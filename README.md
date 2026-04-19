@@ -217,49 +217,204 @@ v Session: "Fix login bug" (ses_abc...)
 | `w` | Set width | Resize the sidebar width |
 | `q` | Quit | Close the sidebar |
 
-## Configuration
+## Customizations
+
+All customizable variables are in the `opencode` customization group. Use `M-x customize-group RET opencode RET` to browse and modify settings.
 
 ### Core Settings
 
-```elisp
-;; Global key prefix (default: "C-c o")
-(setq opencode-keymap-prefix "C-c o")
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `opencode-keymap-prefix` | `"C-c o"` | Global key prefix for commands |
+| `opencode-default-directory` | `nil` | Default project directory (`nil` = current buffer) |
+| `opencode-debug` | `nil` | Enable debug logging to `*opencode: debug*` |
+| `opencode-debug-max-lines` | `10000` | Maximum lines in debug log buffer |
 
-;; Default project directory (nil = current buffer's directory)
-(setq opencode-default-directory nil)
+### Server Settings
 
-;; Debug logging (default: nil)
-(setq opencode-debug t)
-```
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `opencode-server-command` | `"opencode"` | Path to `opencode` binary |
+| `opencode-server-args` | `("serve" "--port" "0" "--print-logs")` | Arguments for server startup |
+| `opencode-server-host` | `"127.0.0.1"` | Server host address |
+| `opencode-server-port` | `nil` | Fixed port (`nil` = auto-assign) |
+| `opencode-server-log-level` | `"WARN"` | Server log level |
+| `opencode-server-auto-restart` | `t` | Auto-restart server on crash |
+| `opencode-server-health-retries` | `5` | Health check retries on startup |
+| `opencode-server-restart-delay` | `2` | Seconds to wait before restart |
+| `opencode-server-log-max-lines` | `5000` | Maximum lines in server log |
 
-### Window Display
+### Window Settings
 
-```elisp
-;; Display mode: 'side, 'float, 'split, or 'full
-(setq opencode-window-display 'side)
-
-;; Side window position: 'left, 'right, or 'bottom
-(setq opencode-window-side 'right)
-
-;; Window width in columns (for side windows)
-(setq opencode-window-width 80)
-```
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `opencode-window-display` | `'side` | Display mode: `side`, `float`, `split`, `full` |
+| `opencode-window-side` | `'right` | Side window position: `left`, `right`, `bottom` |
+| `opencode-window-width` | `80` | Window width in columns |
+| `opencode-window-persistent` | `t` | Keep window across session switches |
+| `opencode-float-frame-alist` | `((width . 100) (height . 40))` | Frame parameters for float mode |
 
 ### Chat Settings
 
-```elisp
-;; Maximum image size for paste (default: 10 MB)
-(setq opencode-chat-image-max-size 10485760)
-
-;; Maximum lines in debug log (default: 10000)
-(setq opencode-debug-max-lines 10000)
-```
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `opencode-chat-image-max-size` | `10485760` | Max image size for paste (bytes) |
+| `opencode-chat-input-history-size` | `50` | Input history ring size |
+| `opencode-chat-refresh-delay` | `0.3` | Debounce delay for refresh (seconds) |
+| `opencode-chat-streaming-fontify-delay` | `0.4` | Delay for markdown fontification during streaming |
+| `opencode-chat-message-limit` | `100` | Max messages per session in memory |
 
 ### Sidebar Settings
 
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `opencode-sidebar-session-limit` | `100` | Max sessions to fetch |
+| `opencode-sidebar-refresh-delay` | `0.5` | Debounce delay for sidebar refresh |
+
+### API Settings
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `opencode-api-timeout` | `30` | HTTP request timeout (seconds) |
+| `opencode-api-directory` | `nil` | Override `X-OpenCode-Directory` header |
+| `opencode-api-cache-session-timeout` | `0.5` | Session cache stale timeout (seconds) |
+| `opencode-config-cache-ttl` | `30` | Config cache TTL (seconds) |
+
+### SSE Settings
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `opencode-sse-auto-reconnect` | `t` | Auto-reconnect on disconnect |
+| `opencode-sse-heartbeat-timeout` | `60` | Seconds before considering connection dead |
+| `opencode-sse-max-reconnect-delay` | `30` | Max reconnect backoff delay (seconds) |
+
+### Markdown Settings
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `opencode-markdown-fontify-enabled` | `t` | Enable markdown fontification |
+| `opencode-markdown-max-fontified-code-blocks` | `20` | Max code blocks to fontify per message |
+| `opencode-markdown-max-code-block-lines` | `300` | Max lines per code block to fontify |
+| `opencode-markdown-fontify-max-size` | `32768` | Max text size for fontification (bytes) |
+
+### Example Configuration
+
 ```elisp
-;; Maximum sessions to fetch (default: 100)
-(setq opencode-sidebar-session-limit 100)
+(use-package opencode
+  :custom
+  ;; Core
+  (opencode-keymap-prefix "C-c o")
+  (opencode-debug t)
+  
+  ;; Window
+  (opencode-window-display 'side)
+  (opencode-window-side 'right)
+  (opencode-window-width 100)
+  
+  ;; Server
+  (opencode-server-log-level "INFO")
+  (opencode-server-auto-restart t)
+  
+  ;; Chat
+  (opencode-chat-input-history-size 100)
+  (opencode-chat-message-limit 200)
+  
+  ;; Sidebar
+  (opencode-sidebar-session-limit 50))
+```
+
+## Hooks
+
+### Server Hooks
+
+Global hooks for server lifecycle events:
+
+| Hook | When Run |
+|------|----------|
+| `opencode-server-connected-hook` | After successfully connecting to server |
+| `opencode-server-disconnected-hook` | After server disconnects |
+
+### SSE Event Hooks
+
+Global hooks for all SSE events (run in no buffer context):
+
+| Hook | Event Type |
+|------|------------|
+| `opencode-sse-event-hook` | All events (catch-all) |
+| `opencode-sse-server-connected-hook` | Server connection established |
+| `opencode-sse-server-heartbeat-hook` | Heartbeat received |
+| `opencode-sse-server-instance-disposed-hook` | Server instance disposed |
+| `opencode-sse-global-disposed-hook` | Global disposal event |
+| `opencode-sse-installation-update-available-hook` | Update available |
+| `opencode-sse-session-created-hook` | New session created |
+| `opencode-sse-session-updated-hook` | Session metadata changed |
+| `opencode-sse-session-deleted-hook` | Session deleted |
+| `opencode-sse-session-status-hook` | Session busy/idle status |
+| `opencode-sse-session-idle-hook` | Session became idle |
+| `opencode-sse-session-error-hook` | Session error occurred |
+| `opencode-sse-session-diff-hook` | Session diff changed |
+| `opencode-sse-session-compacted-hook` | Session history compacted |
+| `opencode-sse-message-updated-hook` | Message created/updated |
+| `opencode-sse-message-removed-hook` | Message removed |
+| `opencode-sse-message-part-updated-hook` | Message part updated (streaming) |
+| `opencode-sse-message-part-removed-hook` | Message part removed |
+| `opencode-sse-todo-updated-hook` | Todo list changed |
+| `opencode-sse-permission-asked-hook` | Permission request received |
+| `opencode-sse-permission-replied-hook` | Permission replied |
+| `opencode-sse-question-asked-hook` | Question received |
+| `opencode-sse-question-replied-hook` | Question answered |
+| `opencode-sse-question-rejected-hook` | Question rejected |
+
+### Chat Buffer Hooks
+
+Buffer-local hooks run in the chat buffer context:
+
+| Hook | When Run |
+|------|----------|
+| `opencode-chat-on-message-sent-hook` | After user sends a message |
+| `opencode-chat-on-message-updated-hook` | Message updated in this session |
+| `opencode-chat-on-message-removed-hook` | Message removed from this session |
+| `opencode-chat-on-part-updated-hook` | Part updated (streaming delta) |
+| `opencode-chat-on-session-updated-hook` | Session metadata changed |
+| `opencode-chat-on-session-status-hook` | Session busy/idle status |
+| `opencode-chat-on-session-idle-hook` | Session became idle |
+| `opencode-chat-on-session-error-hook` | Session error |
+| `opencode-chat-on-session-deleted-hook` | Session deleted |
+| `opencode-chat-on-session-diff-hook` | Diff changed |
+| `opencode-chat-on-session-compacted-hook` | History compacted |
+| `opencode-chat-on-todo-updated-hook` | Todo list changed |
+| `opencode-chat-on-server-instance-disposed-hook` | Server disposed |
+| `opencode-chat-on-installation-update-available-hook` | Update available |
+| `opencode-chat-on-refresh-hook` | After buffer refresh |
+
+### Sidebar Hooks
+
+| Hook | When Run |
+|------|----------|
+| `opencode-sidebar-on-session-event-hook` | Session event in this project |
+
+### Example: Log All SSE Events
+
+```elisp
+(add-hook 'opencode-sse-event-hook
+          (lambda (event)
+            (message "SSE: %s" (plist-get event :type))))
+```
+
+### Example: Notify on Session Idle
+
+```elisp
+(add-hook 'opencode-chat-on-session-idle-hook
+          (lambda (event)
+            (message "Session idle!")))
+```
+
+### Example: Track Message Sends
+
+```elisp
+(add-hook 'opencode-chat-on-message-sent-hook
+          (lambda (msg-id)
+            (message "Sent message: %s" msg-id)))
 ```
 
 ## Sub-Agent Sessions
