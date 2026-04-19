@@ -26,7 +26,7 @@ jobs:
             --eval "(require 'package)" \
             --eval "(add-to-list 'package-archives '(\"melpa\" . \"https://melpa.org/packages/\"))" \
             --eval "(package-initialize)" \
-            --eval "(package-refresh-contents)" \
+            --eval "(package-refresh-conten ts)" \
             --eval "(package-install 'markdown-mode)" \
             --eval "(package-install 'treemacs)"
 
