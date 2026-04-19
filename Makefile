@@ -5,9 +5,9 @@ ELPA_DIR = $(HOME)/.emacs.d/elpa
 ifdef CI
 BATCH = $(EMACS) -Q -batch -L . -L test \
   --eval "(require 'package)" \
-  --eval "(add-to-list 'package-archives '(\"melpa\" . \"https://melpa.org/packages/\"))" \
+  --eval "(push '(melpa . \"https://melpa.org/packages/\") package-archives)" \
   --eval "(package-initialize)" \
-  --eval "(let ((dirs (directory-files package-user-dir t \"^[^.].*-.*$\"))) (dolist (d dirs) (add-to-list 'load-path d)))"
+  --eval "(dolist (d (directory-files package-user-dir t \"[^.].*\")) (when (file-directory-p d) (push d load-path)))"
 else
 DEPS = -L $(ELPA_DIR)/treemacs-3.2 \
        -L $(ELPA_DIR)/s-1.13.0 \
