@@ -21,14 +21,7 @@ jobs:
           version: ${{ matrix.emacs-version }}
 
       - name: Install dependencies
-        run: |
-          emacs -Q -batch \
-            --eval "(require 'package)" \
-            --eval "(add-to-list 'package-archives '(\"melpa\" . \"https://melpa.org/packages/\"))" \
-            --eval "(package-initialize)" \
-            --eval "(package-refresh-conten ts)" \
-            --eval "(package-install 'markdown-mode)" \
-            --eval "(package-install 'treemacs)"
+        run: emacs -Q -batch --eval "(progn (require 'package) (add-to-list 'package-archives '(\"melpa\" . \"https://melpa.org/packages/\")) (package-initialize) (package-refresh-contents) (package-install 'markdown-mode) (package-install 'treemacs))"
 
       - name: Byte-compile
         run: make compile CI=1
