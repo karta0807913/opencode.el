@@ -6,13 +6,20 @@ opencode.el connects Emacs to an OpenCode server over HTTP and Server-Sent Event
 
 ## Screenshots
 
-### Chat Buffer
-
-![Chat Buffer](screenshot/screenshot-chat.png)
-
-### Completion-at-Point (@-mentions & slash commands)
-
-![CAPF Support](screenshot/screenshot-capf-support.png)
+<table>
+<tr>
+<td><strong>Chat Buffer</strong></td>
+<td><strong>Completion-at-Point</strong></td>
+</tr>
+<tr>
+<td><img src="screenshot/screenshot-chat.png" alt="Chat Buffer" /></td>
+<td><img src="screenshot/screenshot-capf-support.png" alt="CAPF Support" /></td>
+</tr>
+<tr>
+<td align="center"><em>Real-time streaming & tool rendering</em></td>
+<td align="center"><em>@-mentions & slash commands</em></td>
+</tr>
+</table>
 
 ## Requirements
 
