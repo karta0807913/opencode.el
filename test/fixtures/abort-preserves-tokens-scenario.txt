@@ -1,0 +1,51 @@
+# Scenario: aborting a stream must not clear context/token usage display
+#
+# Before abort: we have one finished assistant message with real tokens.
+# User sends another message; streaming starts but is aborted before
+# the server reports any token counts.  The aborted assistant message
+# lands in the store with tokens={input:0,output:0,cache:{read:0,write:0}}
+# (no real usage yet).  After the idle refresh, the context/token
+# footer must still show the PREVIOUS cumulative tokens — not zeros.
+
+:session ses_abort_tokens
+:directory /tmp/test-abort-tokens
+
+# API mock: the aborted message has a zero tokens field (server
+# initializes it before the LLM responds; abort happens before any
+# usage lands).  The previous assistant message has real tokens.
+:api GET /session/ses_abort_tokens/message 200 [{"info":{"id":"msg_user1","sessionID":"ses_abort_tokens","role":"user","time":{"created":500000}},"parts":[{"id":"prt_u1","sessionID":"ses_abort_tokens","messageID":"msg_user1","type":"text","text":"first","time":{"start":500000,"end":500001}}]},{"info":{"id":"msg_asst1","sessionID":"ses_abort_tokens","role":"assistant","time":{"created":1000000,"completed":1000050},"modelID":"test-model","agent":"test-agent","finish":"stop","tokens":{"total":5000,"input":100,"output":50,"reasoning":0,"cache":{"read":4800,"write":50}}},"parts":[{"id":"prt_a1","sessionID":"ses_abort_tokens","messageID":"msg_asst1","type":"text","text":"first answer","time":{"start":1000001,"end":1000002}}]},{"info":{"id":"msg_user2","sessionID":"ses_abort_tokens","role":"user","time":{"created":2000000}},"parts":[{"id":"prt_u2","sessionID":"ses_abort_tokens","messageID":"msg_user2","type":"text","text":"second","time":{"start":2000000,"end":2000001}}]},{"info":{"id":"msg_asst2","sessionID":"ses_abort_tokens","role":"assistant","time":{"created":2000010},"modelID":"test-model","agent":"test-agent","error":{"name":"MessageAbortedError","data":{"message":"aborted"}},"tokens":{"total":0,"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}},"parts":[{"id":"prt_step2","sessionID":"ses_abort_tokens","messageID":"msg_asst2","type":"step-start","snapshot":"xyz"}]}]
+
+:api GET /session/ses_abort_tokens 200 {"id":"ses_abort_tokens","slug":"test","projectID":"proj1","directory":"/tmp/test-abort-tokens","title":"Abort Tokens Test","version":"1.0.0","time":{"created":500000,"updated":2000050}}
+
+:api GET /session/ses_abort_tokens/todo 200 []
+:api GET /session/ses_abort_tokens/diff 200 []
+
+# ── Bootstrap: render the existing history (msg_user1 + msg_asst1 done) ──
+:eval (opencode-chat--refresh-sync t)
+:assert-contains first answer
+:eval (should (plist-get (opencode-chat-state-tokens opencode-chat--state) :total))
+:eval (should (> (plist-get (opencode-chat-state-tokens opencode-chat--state) :total) 0))
+:eval (setq test--tokens-before-abort (opencode-chat-state-tokens opencode-chat--state))
+
+# ── User sends a second message; streaming starts ──
+:sse {"type":"session.status","properties":{"sessionID":"ses_abort_tokens","status":{"type":"busy"}}}
+:sse {"type":"message.updated","properties":{"sessionID":"ses_abort_tokens","info":{"id":"msg_user2","sessionID":"ses_abort_tokens","role":"user","time":{"created":2000000}}}}
+:sse {"type":"message.updated","properties":{"sessionID":"ses_abort_tokens","info":{"id":"msg_asst2","sessionID":"ses_abort_tokens","role":"assistant","time":{"created":2000010},"modelID":"test-model","agent":"test-agent","tokens":{"total":0,"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}}
+:sse {"type":"message.part.updated","properties":{"sessionID":"ses_abort_tokens","part":{"id":"prt_step2","sessionID":"ses_abort_tokens","messageID":"msg_asst2","type":"step-start","snapshot":"xyz"}}}
+
+# ── User aborts ──
+:sse {"type":"session.error","properties":{"sessionID":"ses_abort_tokens","error":{"name":"MessageAbortedError","data":{"message":"aborted"}}}}
+
+# ── Message.updated arrives with the aborted info (tokens all zero) ──
+:sse {"type":"message.updated","properties":{"sessionID":"ses_abort_tokens","info":{"id":"msg_asst2","sessionID":"ses_abort_tokens","role":"assistant","time":{"created":2000010},"modelID":"test-model","agent":"test-agent","error":{"name":"MessageAbortedError","data":{"message":"aborted"}},"tokens":{"total":0,"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}}
+
+# ── Session idle triggers refresh ──
+:sse {"type":"session.status","properties":{"sessionID":"ses_abort_tokens","status":{"type":"idle"}}}
+:sse {"type":"session.idle","properties":{"sessionID":"ses_abort_tokens"}}
+:assert-idle
+
+# ── Assertion: context tokens must NOT be cleared by the aborted message ──
+:eval (message "TOKENS-AFTER-ABORT: %S" (opencode-chat-state-tokens opencode-chat--state))
+:eval (should (opencode-chat-state-tokens opencode-chat--state))
+:eval (should (> (plist-get (opencode-chat-state-tokens opencode-chat--state) :total) 0))
+:eval (should (= (plist-get (opencode-chat-state-tokens opencode-chat--state) :total) (plist-get test--tokens-before-abort :total)))

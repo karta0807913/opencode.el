@@ -1,0 +1,70 @@
+# Scenario: auto-generated from out.log
+# Source: out.log
+# Stats: 12 SSE events, 0 API calls, 17 chat actions
+
+# (load-file (expand-file-name "../test-helper.el" (file-name-directory buffer-file-name)))
+# (load-file (expand-file-name "../opencode-scenario-test.el" (file-name-directory buffer-file-name)))
+# (opencode-scenario-run-file buffer-file-name)
+
+:session ses_32f4fb3abffeRB8sBGJKfe1Kxe
+:directory /Users/bytedance/Documents/plbridge
+
+# Set busy state before streaming begins
+:sse {"directory":"/Users/bytedance/Documents/plbridge","payload":{"type":"session.status","properties":{"sessionID":"ses_32f4fb3abffeRB8sBGJKfe1Kxe","status":{"type":"busy"}}}}
+
+# Bootstrap the assistant message so streaming deltas have a target
+:sse {"directory":"/Users/bytedance/Documents/plbridge","payload":{"type":"message.updated","properties":{"info":{"id":"msg_cd188165e00121Imt3f3C28w9U","sessionID":"ses_32f4fb3abffeRB8sBGJKfe1Kxe","role":"assistant","time":{"created":1773041910000},"modelID":"claude-opus-4-6","providerID":"anthropic"}}}}
+
+# [15:38:30.335] chat: on-part-updated part=prt_cd1888193001OmufpNvjQbDJtP type=text delta=t
+# [15:38:30.395] message.part.updated
+:sse {"directory":"/Users/bytedance/Documents/plbridge","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cd1888193001OmufpNvjQbDJtP","sessionID":"ses_32f4fb3abffeRB8sBGJKfe1Kxe","messageID":"msg_cd188165e00121Imt3f3C28w9U","type":"text","text":"\n\nUser rejected the draft deletion — that","time":{"start":1773041910163}},"delta":" that"}}}
+# [15:38:30.396] chat: on-part-updated part=prt_cd1888193001OmufpNvjQbDJtP type=text delta=t
+# [15:38:30.452] message.part.updated
+:sse {"directory":"/Users/bytedance/Documents/plbridge","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cd1888193001OmufpNvjQbDJtP","sessionID":"ses_32f4fb3abffeRB8sBGJKfe1Kxe","messageID":"msg_cd188165e00121Imt3f3C28w9U","type":"text","text":"\n\nUser rejected the draft deletion — that's fine","time":{"start":1773041910163}},"delta":"'s fine"}}}
+# [15:38:30.453] chat: on-part-updated part=prt_cd1888193001OmufpNvjQbDJtP type=text delta=t
+# [15:38:30.505] message.part.updated
+:sse {"directory":"/Users/bytedance/Documents/plbridge","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cd1888193001OmufpNvjQbDJtP","sessionID":"ses_32f4fb3abffeRB8sBGJKfe1Kxe","messageID":"msg_cd188165e00121Imt3f3C28w9U","type":"text","text":"\n\nUser rejected the draft deletion — that's fine,","time":{"start":1773041910163}},"delta":","}}}
+# [15:38:30.505] chat: on-part-updated part=prt_cd1888193001OmufpNvjQbDJtP type=text delta=t
+# [15:38:30.561] message.part.updated
+:sse {"directory":"/Users/bytedance/Documents/plbridge","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cd1888193001OmufpNvjQbDJtP","sessionID":"ses_32f4fb3abffeRB8sBGJKfe1Kxe","messageID":"msg_cd188165e00121Imt3f3C28w9U","type":"text","text":"\n\nUser rejected the draft deletion — that's fine, keeping","time":{"start":1773041910163}},"delta":" keeping"}}}
+# [15:38:30.561] chat: on-part-updated part=prt_cd1888193001OmufpNvjQbDJtP type=text delta=t
+# [15:38:30.619] message.part.updated
+:sse {"directory":"/Users/bytedance/Documents/plbridge","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cd1888193001OmufpNvjQbDJtP","sessionID":"ses_32f4fb3abffeRB8sBGJKfe1Kxe","messageID":"msg_cd188165e00121Imt3f3C28w9U","type":"text","text":"\n\nUser rejected the draft deletion — that's fine, keeping the draf","time":{"start":1773041910163}},"delta":" the draf"}}}
+# [15:38:30.619] chat: on-part-updated part=prt_cd1888193001OmufpNvjQbDJtP type=text delta=t
+# [15:38:30.682] message.part.updated
+:sse {"directory":"/Users/bytedance/Documents/plbridge","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cd1888193001OmufpNvjQbDJtP","sessionID":"ses_32f4fb3abffeRB8sBGJKfe1Kxe","messageID":"msg_cd188165e00121Imt3f3C28w9U","type":"text","text":"\n\nUser rejected the draft deletion — that's fine, keeping the drafts for","time":{"start":1773041910163}},"delta":"ts for"}}}
+# [15:38:30.682] chat: on-part-updated part=prt_cd1888193001OmufpNvjQbDJtP type=text delta=t
+# [15:38:30.746] message.part.updated
+:sse {"directory":"/Users/bytedance/Documents/plbridge","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cd1888193001OmufpNvjQbDJtP","sessionID":"ses_32f4fb3abffeRB8sBGJKfe1Kxe","messageID":"msg_cd188165e00121Imt3f3C28w9U","type":"text","text":"\n\nUser rejected the draft deletion — that's fine, keeping the drafts for reference","time":{"start":1773041910163}},"delta":" reference"}}}
+# [15:38:30.747] chat: on-part-updated part=prt_cd1888193001OmufpNvjQbDJtP type=text delta=t
+# [15:38:30.790] message.part.updated
+:sse {"directory":"/Users/bytedance/Documents/plbridge","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cd1888193001OmufpNvjQbDJtP","sessionID":"ses_32f4fb3abffeRB8sBGJKfe1Kxe","messageID":"msg_cd188165e00121Imt3f3C28w9U","type":"text","text":"\n\nUser rejected the draft deletion — that's fine, keeping the drafts for reference.","time":{"start":1773041910163}},"delta":"."}}}
+# [15:38:30.790] chat: on-part-updated part=prt_cd1888193001OmufpNvjQbDJtP type=text delta=t
+# [15:38:31.108] message.part.updated
+:sse {"directory":"/Users/bytedance/Documents/plbridge","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cd1888539001oYzCQhEFMGeBqP","sessionID":"ses_32f4fb3abffeRB8sBGJKfe1Kxe","messageID":"msg_cd188165e00121Imt3f3C28w9U","type":"tool","callID":"toolu_vrtx_014aZpi54bKxDVJvjU9uuYxs","tool":"todowrite","state":{"status":"pending","input":{},"raw":""}}}}}
+# [15:38:31.108] chat: on-part-updated part=prt_cd1888539001oYzCQhEFMGeBqP type=tool delta=nil
+# [15:38:33.693] chat: refreshing stale buffer *opencode: plbridge/New session - 2026-03-09T03:42:20.756Z*
+# [15:38:33.693] chat: refresh skipped (busy) sid=ses_32f4fb3abffeRB8sBGJKfe1Kxe
+# [15:38:33.948] chat: refreshing stale buffer *opencode: plbridge/New session - 2026-03-09T03:42:20.756Z*
+# [15:38:33.948] chat: refresh skipped (busy) sid=ses_32f4fb3abffeRB8sBGJKfe1Kxe
+# [15:38:34.339] message.part.updated
+:sse {"directory":"/Users/bytedance/Documents/plbridge","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cd1888193001OmufpNvjQbDJtP","sessionID":"ses_32f4fb3abffeRB8sBGJKfe1Kxe","messageID":"msg_cd188165e00121Imt3f3C28w9U","type":"text","text":"\n\nUser rejected the draft deletion — that's fine, keeping the drafts for reference.","time":{"start":1773041914323,"end":1773041914323}}}}}
+# [15:38:34.339] chat: on-part-updated part=prt_cd1888193001OmufpNvjQbDJtP type=text delta=nil
+# [15:38:34.349] message.part.updated
+:sse {"directory":"/Users/bytedance/Documents/plbridge","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cd1888539001oYzCQhEFMGeBqP","sessionID":"ses_32f4fb3abffeRB8sBGJKfe1Kxe","messageID":"msg_cd188165e00121Imt3f3C28w9U","type":"tool","callID":"toolu_vrtx_014aZpi54bKxDVJvjU9uuYxs","tool":"todowrite","state":{"status":"running","input":{"todos":[{"content":"Consult Metis for gap analysis (auto-proceed)","id":"plan-1","priority":"high","status":"cancelled"},{"content":"Generate work plan to .sisyphus/plans/coral-api-v2-migration.md","id":"plan-2","priority":"high","status":"completed"},{"content":"Self-review: classify gaps (critical/minor/ambiguous)","id":"plan-3","priority":"high","status":"completed"},{"content":"Present summary with auto-resolved items and decisions needed","id":"plan-4","priority":"high","status":"completed"},{"content":"If decisions needed: wait for user, update plan — Auto-resolved: createHiveSensor marked TBD in plan, will resolve during implementation","id":"plan-5","priority":"high","status":"completed"},{"content":"Ask user about high accuracy mode (Momus review) — User dismissed, skipping Momus","id":"plan-6","priority":"high","status":"completed"},{"content":"If high accuracy: Submit to Momus and iterate until OKAY","id":"plan-7","priority":"medium","status":"cancelled"},{"content":"Delete draft file and guide user to /start-work — Draft kept per user preference","id":"plan-8","priority":"medium","status":"completed"}]},"time":{"start":1773041914334}}}}}}
+# [15:38:34.349] chat: on-part-updated part=prt_cd1888539001oYzCQhEFMGeBqP type=tool delta=nil
+# [15:38:35.080] todo.updated
+:sse {"directory":"/Users/bytedance/Documents/plbridge","payload":{"type":"todo.updated","properties":{"sessionID":"ses_32f4fb3abffeRB8sBGJKfe1Kxe","todos":[{"content":"Consult Metis for gap analysis (auto-proceed)","id":"plan-1","priority":"high","status":"cancelled"},{"content":"Generate work plan to .sisyphus/plans/coral-api-v2-migration.md","id":"plan-2","priority":"high","status":"completed"},{"content":"Self-review: classify gaps (critical/minor/ambiguous)","id":"plan-3","priority":"high","status":"completed"},{"content":"Present summary with auto-resolved items and decisions needed","id":"plan-4","priority":"high","status":"completed"},{"content":"If decisions needed: wait for user, update plan — Auto-resolved: createHiveSensor marked TBD in plan, will resolve during implementation","id":"plan-5","priority":"high","status":"completed"},{"content":"Ask user about high accuracy mode (Momus review) — User dismissed, skipping Momus","id":"plan-6","priority":"high","status":"completed"},{"content":"If high accuracy: Submit to Momus and iterate until OKAY","id":"plan-7","priority":"medium","status":"cancelled"},{"content":"Delete draft file and guide user to /start-work — Draft kept per user preference","id":"plan-8","priority":"medium","status":"completed"}]}}}
+# [15:38:35.080] chat: on-todo-updated session=ses_32f4fb3abffeRB8sBGJKfe1Kxe count=8
+
+# --- Pre-refresh assertions ---
+:assert-busy
+:assert-contains Todos
+:assert-contains Consult Metis for gap analysis
+
+:refresh multi-tool/messages.json
+
+# After refresh, todos should appear exactly once (not duplicated)
+:assert-contains Todos
+:assert-contains Consult Metis for gap analysis
+:eval (let ((count 0)) (goto-char (point-min)) (while (search-forward " Todos " nil t) (setq count (1+ count))) (when (/= count 1) (error "POST-REFRESH: Found %d ' Todos ' — expected 1" count)))

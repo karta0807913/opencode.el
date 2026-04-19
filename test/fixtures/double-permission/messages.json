@@ -1,0 +1,92 @@
+[
+  {
+    "info": {
+      "id": "msg_cc79908a5001QuYEUxwZ0B0iBP",
+      "sessionID": "ses_3386b5059ffeBogREim0gJGiDt",
+      "role": "user",
+      "time": {"created": 1772875221157},
+      "summary": {"diffs": []},
+      "agent": "Sisyphus (Ultraworker)",
+      "model": {"providerID": "Ttadk", "modelID": "claude-opus-4-6"}
+    },
+    "parts": [
+      {
+        "id": "prt_cc79908a5002ehq0bhUK4WS47A",
+        "sessionID": "ses_3386b5059ffeBogREim0gJGiDt",
+        "messageID": "msg_cc79908a5001QuYEUxwZ0B0iBP",
+        "type": "text",
+        "text": "you have to follow my instruction to do the follow stuff.\n    1. all operation should within a message.\n    2. then run bash with `git push` twice\n    3. output \"abcdefg\" 10 times in one line"
+      }
+    ]
+  },
+  {
+    "info": {
+      "id": "msg_cc79908f1001LhN5AIt9O72NLr",
+      "sessionID": "ses_3386b5059ffeBogREim0gJGiDt",
+      "role": "assistant",
+      "time": {"created": 1772875221233},
+      "parentID": "msg_cc79908a5001QuYEUxwZ0B0iBP",
+      "modelID": "claude-opus-4-6",
+      "providerID": "Ttadk",
+      "mode": "Sisyphus (Ultraworker)",
+      "agent": "Sisyphus (Ultraworker)",
+      "path": {
+        "cwd": "/Users/bytedance/Documents/opencode.el",
+        "root": "/Users/bytedance/Documents/opencode.el"
+      },
+      "cost": 0,
+      "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}}
+    },
+    "parts": [
+      {
+        "id": "prt_cc79935f7001ZZHAwnCeMDDMC5",
+        "sessionID": "ses_3386b5059ffeBogREim0gJGiDt",
+        "messageID": "msg_cc79908f1001LhN5AIt9O72NLr",
+        "type": "step-start",
+        "snapshot": "cdbd46f2387d878214bf7aff4361bf7804600862"
+      },
+      {
+        "id": "prt_cc79935f8001uJIszrWOgzs8is",
+        "sessionID": "ses_3386b5059ffeBogREim0gJGiDt",
+        "messageID": "msg_cc79908f1001LhN5AIt9O72NLr",
+        "type": "text",
+        "text": "\n\nI detect **explicit instruction** intent — you've given me 3 specific steps to execute in sequence. My approach: execute directly.\n\nLet me do all three:",
+        "time": {"start": 1772875235430, "end": 1772875235430}
+      },
+      {
+        "id": "prt_cc7993bf60015aZgAqakFZy14D",
+        "sessionID": "ses_3386b5059ffeBogREim0gJGiDt",
+        "messageID": "msg_cc79908f1001LhN5AIt9O72NLr",
+        "type": "tool",
+        "callID": "toolu_vrtx_01PxVgb6xKLZps8tmJNx6x4m",
+        "tool": "bash",
+        "state": {
+          "status": "completed",
+          "input": {"command": "git push", "description": "First git push"},
+          "output": "fatal: The upstream branch of your current branch does not match\nthe name of your current branch.\n",
+          "title": "First git push",
+          "metadata": {
+            "output": "fatal: The upstream branch of your current branch does not match\nthe name of your current branch.\n",
+            "exit": 128,
+            "description": "First git push",
+            "truncated": false
+          },
+          "time": {"start": 1772875235438, "end": 1772875244754}
+        }
+      },
+      {
+        "id": "prt_cc7993e04001G7FSw4QFFuVof6",
+        "sessionID": "ses_3386b5059ffeBogREim0gJGiDt",
+        "messageID": "msg_cc79908f1001LhN5AIt9O72NLr",
+        "type": "tool",
+        "callID": "toolu_vrtx_01FfezigSd5dRjoNqmp9Vkqo",
+        "tool": "bash",
+        "state": {
+          "status": "running",
+          "input": {"command": "git push", "description": "Second git push"},
+          "time": {"start": 1772875235774}
+        }
+      }
+    ]
+  }
+]

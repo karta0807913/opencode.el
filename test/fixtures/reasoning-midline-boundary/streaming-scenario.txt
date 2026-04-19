@@ -1,0 +1,58 @@
+# Scenario: reasoning-midline-boundary streaming variant.
+#
+# Regression pin for the "streaming parts glued on one line" bug:
+# the reasoning's only delta ends MID-LINE (no trailing newline), then a
+# new text part arrives and starts streaming.  Without the newline
+# separator in update-part Case 2, the text delta would append directly
+# onto the reasoning's tail:
+#     "...state carefully.Here is the diagnostic summary..."
+# With the fix, streaming output matches the refresh render.
+
+:session ses_midline_boundary
+:directory /tmp/midline-boundary
+
+# --- User message ---
+:sse {"directory":"/tmp/midline-boundary","payload":{"type":"message.updated","properties":{"sessionID":"ses_midline_boundary","info":{"id":"msg_u_midline","role":"user","sessionID":"ses_midline_boundary","time":{"created":1700000000000},"agent":"Assistant","model":{"providerID":"anthropic","modelID":"claude-opus-4-6"}}}}}
+
+:sse {"directory":"/tmp/midline-boundary","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_midline_boundary","part":{"id":"prt_u1","type":"text","text":"run the diagnostic","messageID":"msg_u_midline","sessionID":"ses_midline_boundary"},"time":1700000000100}}}
+
+# --- Assistant message starts ---
+:sse {"directory":"/tmp/midline-boundary","payload":{"type":"message.updated","properties":{"sessionID":"ses_midline_boundary","info":{"id":"msg_a_midline","parentID":"msg_u_midline","role":"assistant","agent":"Assistant","modelID":"claude-opus-4-6","providerID":"anthropic","time":{"created":1700000001000},"sessionID":"ses_midline_boundary"}}}}
+
+# --- Reasoning part announced (empty placeholder) ---
+:sse {"directory":"/tmp/midline-boundary","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_midline_boundary","part":{"id":"prt_r_midline","messageID":"msg_a_midline","sessionID":"ses_midline_boundary","type":"reasoning","text":"","time":{"start":1700000002000}},"time":1700000002001}}}
+
+# --- Reasoning delta ENDING MID-LINE (no trailing newline) ---
+# This is the crux of the regression: the previous-part tail the next
+# part's first delta will land on.
+:sse {"directory":"/tmp/midline-boundary","payload":{"type":"message.part.delta","properties":{"sessionID":"ses_midline_boundary","messageID":"msg_a_midline","partID":"prt_r_midline","field":"text","delta":"Looking at the request, I need to check the state carefully."}}}
+
+# --- Reasoning finalization (message.part.updated with :end, no delta) ---
+:sse {"directory":"/tmp/midline-boundary","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_midline_boundary","part":{"id":"prt_r_midline","messageID":"msg_a_midline","sessionID":"ses_midline_boundary","type":"reasoning","text":"Looking at the request, I need to check the state carefully.","time":{"start":1700000002000,"end":1700000003000}},"time":1700000003001}}}
+
+# --- New text part announced (empty, no delta yet) ---
+:sse {"directory":"/tmp/midline-boundary","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_midline_boundary","part":{"id":"prt_t_midline","messageID":"msg_a_midline","sessionID":"ses_midline_boundary","type":"text","text":"","time":{"start":1700000004000}},"time":1700000004001}}}
+
+# --- Text first delta — must NOT glue onto reasoning's tail ---
+:sse {"directory":"/tmp/midline-boundary","payload":{"type":"message.part.delta","properties":{"sessionID":"ses_midline_boundary","messageID":"msg_a_midline","partID":"prt_t_midline","field":"text","delta":"Here is the diagnostic summary for your review."}}}
+
+# --- Text finalization ---
+:sse {"directory":"/tmp/midline-boundary","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_midline_boundary","part":{"id":"prt_t_midline","messageID":"msg_a_midline","sessionID":"ses_midline_boundary","type":"text","text":"Here is the diagnostic summary for your review.","time":{"start":1700000004000,"end":1700000005000}},"time":1700000005001}}}
+
+# --- Assistant message finalization ---
+:sse {"directory":"/tmp/midline-boundary","payload":{"type":"message.updated","properties":{"sessionID":"ses_midline_boundary","info":{"id":"msg_a_midline","parentID":"msg_u_midline","role":"assistant","agent":"Assistant","modelID":"claude-opus-4-6","providerID":"anthropic","time":{"created":1700000001000,"completed":1700000005000},"tokens":{"total":100,"input":50,"output":50,"reasoning":20,"cache":{"read":0,"write":0}},"finish":"stop","cost":0,"sessionID":"ses_midline_boundary"}}}}
+
+:sse {"directory":"/tmp/midline-boundary","payload":{"type":"session.status","properties":{"sessionID":"ses_midline_boundary","status":{"type":"idle"}}}}
+
+:sse {"directory":"/tmp/midline-boundary","payload":{"type":"session.idle","properties":{"sessionID":"ses_midline_boundary"}}}
+
+# --- Assertions ---
+
+:assert-contains run the diagnostic
+:assert-contains state carefully
+:assert-contains Here is the diagnostic summary
+
+# The bug: reasoning tail + text first delta glued onto one line.
+# With the fix, they appear on separate lines — so the concatenated
+# form must NOT be present.
+:assert-not-contains carefully.Here is the diagnostic

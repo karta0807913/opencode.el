@@ -1,0 +1,53 @@
+# Scenario: Dual-dispatch popup purge — answering a popup in one buffer
+# must remove any duplicate queued in other buffers, so that `show-next'
+# does not re-display the already-answered popup.
+#
+# Why this matters:
+#   `opencode--dispatch-popup-event' dispatches the same request to BOTH
+#   the originating session's chat buffer AND its root parent buffer
+#   (for child sessions).  If the user answers in one buffer, the other
+#   buffer still has the request in its `--pending' queue.  Without a
+#   purge, the cleanup path's `show-next' picks the duplicate and
+#   displays it again — UX bug: the same popup pops up twice.
+#
+# This scenario:
+#   1. Opens chat buffer A (root session).
+#   2. Simulates dual-dispatch by manually injecting the same permission
+#      request into buffer A's `--pending' queue AND a sibling buffer's
+#      `--pending' queue.
+#   3. Fires permission.asked (routed to A, shown inline).
+#   4. User allows.
+#   5. Asserts: NO popup re-appears in A, and the sibling's `--pending'
+#      is empty (duplicate was purged).
+
+:session ses_dual_dispatch_root
+:directory /tmp/dual-dispatch-test
+
+# Mock the permission reply endpoint.
+:api POST /permission/per_dual_dispatch/reply 200 true
+
+# Create a sibling chat buffer with the same duplicate already queued.
+:eval (let ((sibling (get-buffer-create "*opencode: dual-sibling*"))) (with-current-buffer sibling (opencode-chat-mode) (opencode-chat--set-session-id "ses_sibling") (setq-local opencode-permission--pending (list '(:id "per_dual_dispatch" :sessionID "ses_dual_dispatch_root" :permission "bash" :patterns ["rm -rf /tmp/test"] :always ["rm*"] :tool (:messageID "msg_x" :callID "call_x"))))))
+
+# --- Permission arrives in the root buffer ---
+:sse {"directory":"/tmp/dual-dispatch-test","payload":{"type":"permission.asked","properties":{"id":"per_dual_dispatch","sessionID":"ses_dual_dispatch_root","permission":"bash","patterns":["rm -rf /tmp/test"],"metadata":{},"always":["rm*"],"tool":{"messageID":"msg_x","callID":"call_x"}}}}
+
+# The popup should now be displayed in the current (root) buffer.
+:assert-permission
+:assert-contains Permission Required
+
+# Confirm the sibling still has the duplicate in its queue before we answer.
+:eval (should (= 1 (length (buffer-local-value 'opencode-permission--pending (get-buffer "*opencode: dual-sibling*")))))
+
+# --- User allows the permission ---
+:answer-permission allow-once
+
+# The current buffer must NOT have another popup showing (no re-show).
+:assert-no-permission
+
+# And the sibling's pending queue must be empty — the dual-dispatch
+# duplicate has been purged.
+:eval (should (null (buffer-local-value 'opencode-permission--pending (get-buffer "*opencode: dual-sibling*"))))
+
+# Cleanup.
+:eval (when-let ((b (get-buffer "*opencode: dual-sibling*"))) (kill-buffer b))

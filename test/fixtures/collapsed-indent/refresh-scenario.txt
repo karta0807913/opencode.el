@@ -1,0 +1,13 @@
+# Scenario: Verify consistent line-prefix indentation for assistant message children
+# All children (reasoning, tool, footer) should have the same line-prefix (stripe only).
+# Tool prefix should NOT have an extra space (was stripe+" ", now just stripe).
+
+:session ses_2a9d8f90affeC6HxDGKkp43dtn
+:directory /Users/bytedance/Documents/opencode.el
+
+# Load the fixture and render
+:refresh collapsed-indent/messages.json
+
+# --- Content assertions ---
+:assert-contains Thinking
+:assert-contains bash

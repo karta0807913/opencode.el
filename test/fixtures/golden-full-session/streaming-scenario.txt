@@ -1,0 +1,128 @@
+# Scenario: golden-full-session streaming variant.
+#
+# Full-pipeline golden fixture.  Pairs with refresh-scenario.txt for
+# streaming-vs-refresh equivalence.  Exercises every boundary this sweep
+# cared about:
+#
+#   - reasoning delta ending mid-line (pins the a4785a6 glue fix)
+#   - reasoning → text transition (new part at message-insert-pos)
+#   - text → tool (bash with stdout)
+#   - tool → text (resume after tool)
+#   - text → tool (edit with inline diff)
+#   - text → footer (message finalization, pins the 7d55305 footer fix)
+#   - second user turn with its own reasoning + tool + text
+#   - session.idle terminates
+
+:session ses_golden
+:directory /tmp/golden
+
+# ============================================================
+# Turn 1 — user "investigate the login bug"
+# ============================================================
+
+:sse {"directory":"/tmp/golden","payload":{"type":"message.updated","properties":{"sessionID":"ses_golden","info":{"id":"msg_u1","role":"user","sessionID":"ses_golden","time":{"created":1700000000000},"agent":"Assistant","model":{"providerID":"anthropic","modelID":"claude-opus-4-6"}}}}}
+
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_golden","part":{"id":"prt_u1_text","type":"text","text":"investigate the login bug","messageID":"msg_u1","sessionID":"ses_golden"},"time":1700000000100}}}
+
+# --- Assistant msg_a1 begins ---
+:sse {"directory":"/tmp/golden","payload":{"type":"message.updated","properties":{"sessionID":"ses_golden","info":{"id":"msg_a1","parentID":"msg_u1","role":"assistant","agent":"Assistant","modelID":"claude-opus-4-6","providerID":"anthropic","time":{"created":1700000001000},"sessionID":"ses_golden"}}}}
+
+# step-start
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_golden","part":{"id":"prt_a1_step1","messageID":"msg_a1","sessionID":"ses_golden","type":"step-start"},"time":1700000001500}}}
+
+# reasoning (empty placeholder)
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_golden","part":{"id":"prt_a1_reason","messageID":"msg_a1","sessionID":"ses_golden","type":"reasoning","text":"","time":{"start":1700000002000}},"time":1700000002001}}}
+
+# reasoning delta ending MID-LINE (no trailing newline)
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.delta","properties":{"sessionID":"ses_golden","messageID":"msg_a1","partID":"prt_a1_reason","field":"text","delta":"Looking at this carefully, I need to check the auth module."}}}
+
+# reasoning finalized
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_golden","part":{"id":"prt_a1_reason","messageID":"msg_a1","sessionID":"ses_golden","type":"reasoning","text":"Looking at this carefully, I need to check the auth module.","time":{"start":1700000002000,"end":1700000003000}},"time":1700000003001}}}
+
+# text part 1 — new text part arrives after mid-line reasoning
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_golden","part":{"id":"prt_a1_text1","messageID":"msg_a1","sessionID":"ses_golden","type":"text","text":"","time":{"start":1700000003100}},"time":1700000003102}}}
+
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.delta","properties":{"sessionID":"ses_golden","messageID":"msg_a1","partID":"prt_a1_text1","field":"text","delta":"I'll check the auth module first."}}}
+
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_golden","part":{"id":"prt_a1_text1","messageID":"msg_a1","sessionID":"ses_golden","type":"text","text":"I'll check the auth module first.","time":{"start":1700000003100,"end":1700000003500}},"time":1700000003501}}}
+
+# bash tool 1 — completed with stdout
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_golden","part":{"id":"prt_a1_bash1","messageID":"msg_a1","sessionID":"ses_golden","type":"tool","tool":"bash","callID":"call_bash1","state":{"status":"completed","input":{"command":"grep -n 'login' src/","description":"Search for login usages"},"output":"src/auth.js:42: function login(user)\nsrc/ui.js:10:   <Login />\nsrc/api.js:88:   POST /login","time":{"start":1700000004000,"end":1700000004500}}},"time":1700000004501}}}
+
+# text part 2 — after bash tool
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_golden","part":{"id":"prt_a1_text2","messageID":"msg_a1","sessionID":"ses_golden","type":"text","text":"","time":{"start":1700000005000}},"time":1700000005001}}}
+
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.delta","properties":{"sessionID":"ses_golden","messageID":"msg_a1","partID":"prt_a1_text2","field":"text","delta":"Found 3 usages. The bug is in src/auth.js."}}}
+
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_golden","part":{"id":"prt_a1_text2","messageID":"msg_a1","sessionID":"ses_golden","type":"text","text":"Found 3 usages. The bug is in src/auth.js.","time":{"start":1700000005000,"end":1700000005500}},"time":1700000005501}}}
+
+# edit tool — completed with inline oldString/newString diff
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_golden","part":{"id":"prt_a1_edit1","messageID":"msg_a1","sessionID":"ses_golden","type":"tool","tool":"edit","callID":"call_edit1","state":{"status":"completed","input":{"filePath":"src/auth.js","oldString":"return false","newString":"return false // TODO: fix session check"},"output":"Edited src/auth.js","time":{"start":1700000006000,"end":1700000006500}}},"time":1700000006501}}}
+
+# text part 3 — last part before footer (pins text→footer glue fix)
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_golden","part":{"id":"prt_a1_text3","messageID":"msg_a1","sessionID":"ses_golden","type":"text","text":"","time":{"start":1700000007000}},"time":1700000007001}}}
+
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.delta","properties":{"sessionID":"ses_golden","messageID":"msg_a1","partID":"prt_a1_text3","field":"text","delta":"I've noted the spot that needs attention."}}}
+
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_golden","part":{"id":"prt_a1_text3","messageID":"msg_a1","sessionID":"ses_golden","type":"text","text":"I've noted the spot that needs attention.","time":{"start":1700000007000,"end":1700000007500}},"time":1700000007501}}}
+
+# assistant msg_a1 finalized — footer re-render triggers
+:sse {"directory":"/tmp/golden","payload":{"type":"message.updated","properties":{"sessionID":"ses_golden","info":{"id":"msg_a1","parentID":"msg_u1","role":"assistant","agent":"Assistant","modelID":"claude-opus-4-6","providerID":"anthropic","time":{"created":1700000001000,"completed":1700000008000},"tokens":{"total":500,"input":300,"output":200,"reasoning":50,"cache":{"read":0,"write":0}},"finish":"stop","cost":0,"sessionID":"ses_golden"}}}}
+
+# ============================================================
+# Turn 2 — user "commit it"
+# ============================================================
+
+:sse {"directory":"/tmp/golden","payload":{"type":"message.updated","properties":{"sessionID":"ses_golden","info":{"id":"msg_u2","role":"user","sessionID":"ses_golden","time":{"created":1700000010000},"agent":"Assistant","model":{"providerID":"anthropic","modelID":"claude-opus-4-6"}}}}}
+
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_golden","part":{"id":"prt_u2_text","type":"text","text":"commit it","messageID":"msg_u2","sessionID":"ses_golden"},"time":1700000010100}}}
+
+# Assistant msg_a2 starts
+:sse {"directory":"/tmp/golden","payload":{"type":"message.updated","properties":{"sessionID":"ses_golden","info":{"id":"msg_a2","parentID":"msg_u2","role":"assistant","agent":"Assistant","modelID":"claude-opus-4-6","providerID":"anthropic","time":{"created":1700000011000},"sessionID":"ses_golden"}}}}
+
+# reasoning
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_golden","part":{"id":"prt_a2_reason","messageID":"msg_a2","sessionID":"ses_golden","type":"reasoning","text":"","time":{"start":1700000011500}},"time":1700000011501}}}
+
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.delta","properties":{"sessionID":"ses_golden","messageID":"msg_a2","partID":"prt_a2_reason","field":"text","delta":"Running git status to check what's staged."}}}
+
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_golden","part":{"id":"prt_a2_reason","messageID":"msg_a2","sessionID":"ses_golden","type":"reasoning","text":"Running git status to check what's staged.","time":{"start":1700000011500,"end":1700000012000}},"time":1700000012001}}}
+
+# bash tool
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_golden","part":{"id":"prt_a2_bash1","messageID":"msg_a2","sessionID":"ses_golden","type":"tool","tool":"bash","callID":"call_bash2","state":{"status":"completed","input":{"command":"git status","description":"Check git status"},"output":"On branch main\nChanges not staged:\n\tmodified: src/auth.js","time":{"start":1700000012100,"end":1700000012500}}},"time":1700000012501}}}
+
+# text
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_golden","part":{"id":"prt_a2_text1","messageID":"msg_a2","sessionID":"ses_golden","type":"text","text":"","time":{"start":1700000012700}},"time":1700000012701}}}
+
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.delta","properties":{"sessionID":"ses_golden","messageID":"msg_a2","partID":"prt_a2_text1","field":"text","delta":"Committed."}}}
+
+:sse {"directory":"/tmp/golden","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_golden","part":{"id":"prt_a2_text1","messageID":"msg_a2","sessionID":"ses_golden","type":"text","text":"Committed.","time":{"start":1700000012700,"end":1700000013000}},"time":1700000013001}}}
+
+# msg_a2 finalized
+:sse {"directory":"/tmp/golden","payload":{"type":"message.updated","properties":{"sessionID":"ses_golden","info":{"id":"msg_a2","parentID":"msg_u2","role":"assistant","agent":"Assistant","modelID":"claude-opus-4-6","providerID":"anthropic","time":{"created":1700000011000,"completed":1700000013000},"tokens":{"total":300,"input":200,"output":100,"reasoning":10,"cache":{"read":0,"write":0}},"finish":"stop","cost":0,"sessionID":"ses_golden"}}}}
+
+# Session idle
+:sse {"directory":"/tmp/golden","payload":{"type":"session.status","properties":{"sessionID":"ses_golden","status":{"type":"idle"}}}}
+
+:sse {"directory":"/tmp/golden","payload":{"type":"session.idle","properties":{"sessionID":"ses_golden"}}}
+
+# --- Assertions ---
+
+:assert-contains investigate the login bug
+:assert-contains Thinking
+:assert-contains check the auth module
+:assert-contains grep -n
+:assert-contains auth.js
+:assert-contains Found 3 usages
+:assert-contains return false
+:assert-contains TODO: fix
+:assert-contains commit it
+:assert-contains git status
+:assert-contains Committed
+
+# Negative assertions — the bugs we fixed must NOT reappear:
+# 1. Reasoning tail must not glue to text (a4785a6).
+:assert-not-contains auth module.I'll check
+# 2. Text must not glue to tool.
+:assert-not-contains auth.js.Found 3 usages
+# 3. Text must not glue to footer (7d55305).
+:assert-not-contains attention. ⬆

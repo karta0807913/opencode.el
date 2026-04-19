@@ -1,0 +1,54 @@
+# Scenario: Real SSE sequence from user send → abort
+# Reproduces: assistant header appears ABOVE user message
+# Source: debug log 2026-04-03 12:24:42
+
+# (load-file (expand-file-name "../../test-helper.el" (file-name-directory buffer-file-name)))
+# (load-file (expand-file-name "../../opencode-scenario-test.el" (file-name-directory buffer-file-name)))
+# (opencode-scenario-run-file buffer-file-name)
+
+:session ses_2ae6a5cd3ffeWhkOr0vS9o4F0a
+:directory /Users/bytedance/Documents/opencode.el
+
+:api POST /session/ses_2ae6a5cd3ffeWhkOr0vS9o4F0a/prompt_async 204 null
+
+# User sends optimistic message
+:eval (opencode-chat--send "anotehr test")
+
+# Server confirms user message
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.updated","properties":{"sessionID":"ses_2ae6a5cd3ffeWhkOr0vS9o4F0a","info":{"id":"msg_d51960f6d000a1FR5mawG3osEt","role":"user","sessionID":"ses_2ae6a5cd3ffeWhkOr0vS9o4F0a","time":{"created":1775190282102},"agent":"claude-native","model":{"providerID":"Gemini","modelID":"gemini-3.1-pro-preview-new"}}}}}
+
+# Server sends user text part
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_2ae6a5cd3ffeWhkOr0vS9o4F0a","part":{"id":"prt_d51960f6e000IETO8GtQl7X4cH","type":"text","text":"anotehr test","messageID":"msg_d51960f6d000a1FR5mawG3osEt","sessionID":"ses_2ae6a5cd3ffeWhkOr0vS9o4F0a"},"time":1775190282112}}}
+
+# Session updated
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"session.updated","properties":{"sessionID":"ses_2ae6a5cd3ffeWhkOr0vS9o4F0a","info":{"id":"ses_2ae6a5cd3ffeWhkOr0vS9o4F0a","slug":"quiet-planet","projectID":"d2dea25e61793f9dee62c6404c8990151db68d60","directory":"/Users/bytedance/Documents/opencode.el","title":"New session","version":"1.3.13","time":{"created":1775190254380,"updated":1775190282114}}}}}
+
+# Session busy
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"session.status","properties":{"sessionID":"ses_2ae6a5cd3ffeWhkOr0vS9o4F0a","status":{"type":"busy"}}}}
+
+# Assistant message created
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.updated","properties":{"sessionID":"ses_2ae6a5cd3ffeWhkOr0vS9o4F0a","info":{"id":"msg_d51960f8b001alZvmT14WpYDQl","parentID":"msg_d51960f6d000a1FR5mawG3osEt","role":"assistant","mode":"claude-native","agent":"claude-native","path":{"cwd":"/Users/bytedance/Documents/opencode.el","root":"/Users/bytedance/Documents/opencode.el"},"cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"modelID":"gemini-3.1-pro-preview-new","providerID":"Gemini","time":{"created":1775190282124},"sessionID":"ses_2ae6a5cd3ffeWhkOr0vS9o4F0a"}}}}
+
+# Session updated with summary
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"session.updated","properties":{"sessionID":"ses_2ae6a5cd3ffeWhkOr0vS9o4F0a","info":{"id":"ses_2ae6a5cd3ffeWhkOr0vS9o4F0a","slug":"quiet-planet","projectID":"d2dea25e61793f9dee62c6404c8990151db68d60","directory":"/Users/bytedance/Documents/opencode.el","title":"New session","version":"1.3.13","summary":{"additions":0,"deletions":0,"files":0},"time":{"created":1775190254380,"updated":1775190282137}}}}}
+
+# Session diff
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"session.diff","properties":{"sessionID":"ses_2ae6a5cd3ffeWhkOr0vS9o4F0a","diff":[]}}}
+
+# Second user message.updated (with summary.diffs) — this triggers the bug
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.updated","properties":{"sessionID":"ses_2ae6a5cd3ffeWhkOr0vS9o4F0a","info":{"role":"user","time":{"created":1775190282102},"agent":"claude-native","model":{"providerID":"Gemini","modelID":"gemini-3.1-pro-preview-new"},"id":"msg_d51960f6d000a1FR5mawG3osEt","sessionID":"ses_2ae6a5cd3ffeWhkOr0vS9o4F0a","summary":{"diffs":[]}}}}}
+
+# Session busy again
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"session.status","properties":{"sessionID":"ses_2ae6a5cd3ffeWhkOr0vS9o4F0a","status":{"type":"busy"}}}}
+
+:assert-busy
+
+# --- Key assertion: user text must appear BEFORE assistant header ---
+# Buffer should have user message first, then assistant
+:assert-contains anotehr test
+
+# User text must appear exactly once
+:eval (should (= 1 (how-many "anotehr test" (point-min) (point-max))))
+
+# User header must appear before assistant header
+:eval (let ((user-pos (save-excursion (goto-char (point-min)) (search-forward "You" nil t))) (asst-pos (save-excursion (goto-char (point-min)) (search-forward "Assistant" nil t)))) (should user-pos) (should asst-pos) (should (< user-pos asst-pos)))

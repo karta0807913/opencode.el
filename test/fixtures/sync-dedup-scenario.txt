@@ -1,0 +1,71 @@
+# Scenario: server sends every event twice (flat bus + sync-wrapped)
+#
+# The server's sync system re-publishes sync events as regular bus events
+# for backwards compatibility. Clients on the SSE stream receive BOTH
+# forms for every event:
+#   1. {payload: {type: "message.updated",   properties: {...}}}
+#   2. {payload: {type: "sync", syncEvent: {type: "message.updated.1",
+#                                           data: {...}}}}
+#
+# After unwrapping sync envelopes, both events dispatch to the same hook,
+# causing doubled handler runs — which presents as:
+#   - Two footer lines per assistant message (same numbers)
+#   - Duplicate tool renders
+#
+# Expected: handler-visible effect exactly once per logical event.
+
+:session ses_sync_dup
+:directory /tmp/test-sync-dup
+
+:api GET /session/ses_sync_dup/message 200 [{"info":{"id":"msg_user1","sessionID":"ses_sync_dup","role":"user","time":{"created":500000}},"parts":[{"id":"prt_u1","sessionID":"ses_sync_dup","messageID":"msg_user1","type":"text","text":"hi","time":{"start":500000,"end":500001}}]},{"info":{"id":"msg_asst1","sessionID":"ses_sync_dup","role":"assistant","time":{"created":1000000,"completed":1000050},"modelID":"test-model","agent":"test-agent","finish":"stop","tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}}},"parts":[{"id":"prt_text1","sessionID":"ses_sync_dup","messageID":"msg_asst1","type":"text","text":"hello","time":{"start":1000001,"end":1000002}}]}]
+
+:api GET /session/ses_sync_dup 200 {"id":"ses_sync_dup","slug":"test","projectID":"proj1","directory":"/tmp/test-sync-dup","title":"Dedup Test","version":"1.0.0","time":{"created":500000,"updated":1000050}}
+
+:api GET /session/ses_sync_dup/todo 200 []
+:api GET /session/ses_sync_dup/diff 200 []
+
+# ── Session becomes busy (flat + sync) ──
+:sse {"type":"session.status","properties":{"sessionID":"ses_sync_dup","status":{"type":"busy"}}}
+:sse {"payload":{"type":"sync","syncEvent":{"type":"session.status.1","id":"evt_1","seq":0,"aggregateID":"ses_sync_dup","data":{"sessionID":"ses_sync_dup","status":{"type":"busy"}}}}}
+:assert-busy
+
+# ── Assistant message created (flat + sync) ──
+:sse {"type":"message.updated","properties":{"sessionID":"ses_sync_dup","info":{"id":"msg_asst1","sessionID":"ses_sync_dup","role":"assistant","time":{"created":1000000},"modelID":"test-model","agent":"test-agent","tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}}
+:sse {"payload":{"type":"sync","syncEvent":{"type":"message.updated.1","id":"evt_2","seq":1,"aggregateID":"ses_sync_dup","data":{"sessionID":"ses_sync_dup","info":{"id":"msg_asst1","sessionID":"ses_sync_dup","role":"assistant","time":{"created":1000000},"modelID":"test-model","agent":"test-agent","tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}}}}
+
+# ── Step-start (flat + sync) ──
+:sse {"type":"message.part.updated","properties":{"sessionID":"ses_sync_dup","part":{"id":"prt_step1","sessionID":"ses_sync_dup","messageID":"msg_asst1","type":"step-start","snapshot":"abc"}}}
+:sse {"payload":{"type":"sync","syncEvent":{"type":"message.part.updated.1","id":"evt_3","seq":2,"aggregateID":"ses_sync_dup","data":{"sessionID":"ses_sync_dup","part":{"id":"prt_step1","sessionID":"ses_sync_dup","messageID":"msg_asst1","type":"step-start","snapshot":"abc"}}}}}
+
+# ── Text part init (flat + sync) ──
+:sse {"type":"message.part.updated","properties":{"sessionID":"ses_sync_dup","part":{"id":"prt_text1","sessionID":"ses_sync_dup","messageID":"msg_asst1","type":"text","text":"","time":{"start":1000001}}}}
+:sse {"payload":{"type":"sync","syncEvent":{"type":"message.part.updated.1","id":"evt_4","seq":3,"aggregateID":"ses_sync_dup","data":{"sessionID":"ses_sync_dup","part":{"id":"prt_text1","sessionID":"ses_sync_dup","messageID":"msg_asst1","type":"text","text":"","time":{"start":1000001}}}}}}
+
+# ── Text delta (flat + sync) ──
+:sse {"type":"message.part.updated","properties":{"sessionID":"ses_sync_dup","part":{"id":"prt_text1","sessionID":"ses_sync_dup","messageID":"msg_asst1","type":"text","text":"hello","time":{"start":1000001}},"delta":"hello"}}
+:sse {"payload":{"type":"sync","syncEvent":{"type":"message.part.updated.1","id":"evt_5","seq":4,"aggregateID":"ses_sync_dup","data":{"sessionID":"ses_sync_dup","part":{"id":"prt_text1","sessionID":"ses_sync_dup","messageID":"msg_asst1","type":"text","text":"hello","time":{"start":1000001}},"delta":"hello"}}}}
+:assert-contains hello
+
+# ── Step-finish with tokens (flat + sync) ──
+:sse {"type":"message.part.updated","properties":{"sessionID":"ses_sync_dup","part":{"id":"prt_stepfin1","sessionID":"ses_sync_dup","messageID":"msg_asst1","type":"step-finish","reason":"stop","tokens":{"total":15,"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}}}}}
+:sse {"payload":{"type":"sync","syncEvent":{"type":"message.part.updated.1","id":"evt_6","seq":5,"aggregateID":"ses_sync_dup","data":{"sessionID":"ses_sync_dup","part":{"id":"prt_stepfin1","sessionID":"ses_sync_dup","messageID":"msg_asst1","type":"step-finish","reason":"stop","tokens":{"total":15,"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}}}}}}}
+
+# ── Text finalized (flat + sync) ──
+:sse {"type":"message.part.updated","properties":{"sessionID":"ses_sync_dup","part":{"id":"prt_text1","sessionID":"ses_sync_dup","messageID":"msg_asst1","type":"text","text":"hello","time":{"start":1000001,"end":1000002}}}}
+:sse {"payload":{"type":"sync","syncEvent":{"type":"message.part.updated.1","id":"evt_7","seq":6,"aggregateID":"ses_sync_dup","data":{"sessionID":"ses_sync_dup","part":{"id":"prt_text1","sessionID":"ses_sync_dup","messageID":"msg_asst1","type":"text","text":"hello","time":{"start":1000001,"end":1000002}}}}}}
+
+# ── Message completed (flat + sync) — triggers footer render ──
+:sse {"type":"message.updated","properties":{"sessionID":"ses_sync_dup","info":{"id":"msg_asst1","sessionID":"ses_sync_dup","role":"assistant","time":{"created":1000000,"completed":1000050},"modelID":"test-model","agent":"test-agent","finish":"stop","tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}}}}}
+:sse {"payload":{"type":"sync","syncEvent":{"type":"message.updated.1","id":"evt_8","seq":7,"aggregateID":"ses_sync_dup","data":{"sessionID":"ses_sync_dup","info":{"id":"msg_asst1","sessionID":"ses_sync_dup","role":"assistant","time":{"created":1000000,"completed":1000050},"modelID":"test-model","agent":"test-agent","finish":"stop","tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}}}}}}}
+
+# ── Idle (flat + sync) ──
+:sse {"type":"session.status","properties":{"sessionID":"ses_sync_dup","status":{"type":"idle"}}}
+:sse {"type":"session.idle","properties":{"sessionID":"ses_sync_dup"}}
+:assert-idle
+:assert-contains hello
+
+# ── Key assertion: the message footer appears exactly once. ──
+# The input area also shows a `Tokens: ...` line with `⬆`, so we can't
+# just count arrows — we narrow by duration suffix (" · Ns") that only
+# the per-message footer has.
+:eval (let ((count 0)) (save-excursion (goto-char (point-min)) (while (re-search-forward "⬆[0-9]+ ⬇[0-9]+.*· [0-9]+s" nil t) (setq count (1+ count)))) (should (= count 1)))

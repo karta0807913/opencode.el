@@ -1,0 +1,4 @@
+*.elc
+*.log
+log/
+.sisyphus/

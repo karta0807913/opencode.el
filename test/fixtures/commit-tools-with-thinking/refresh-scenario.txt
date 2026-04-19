@@ -1,0 +1,28 @@
+# Scenario: Full buffer render from API message response (commit-tools-with-thinking)
+# Uses :refresh to load the /session/:id/message response and render all messages.
+# This tests the complete render pipeline: user message, assistant messages with
+# reasoning/thinking parts, text parts, tool parts (bash), and step-start/step-finish.
+
+:session ses_2af30985affeQRwLJ5aDBcwHZr
+:directory /Users/bytedance/Documents/opencode.el
+
+# Load the saved API response and render the full buffer
+:refresh commit-tools-with-thinking/messages.json
+
+# --- Assertions ---
+
+# User message text should be rendered
+:assert-contains commit and push
+
+# Reasoning/thinking content should be rendered
+:assert-contains Thinking
+
+# Assistant text should be rendered
+:assert-contains I detect implementation intent
+
+# Bash tool parts should show commands
+:assert-contains git status
+:assert-contains git diff
+
+# Second assistant message text
+:assert-contains no changes to commit or push

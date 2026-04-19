@@ -1,0 +1,102 @@
+# Scenario: Message send queue — three rapid sends, server reorders
+#
+# CHECK 0: msg1(QUEUED), msg2(QUEUED), msg3(QUEUED)
+# CHECK 1: msg1, msg2(QUEUED), msg3(QUEUED)
+# CHECK 2: msg1, assistant, msg2(QUEUED), msg3(QUEUED)
+# CHECK 3: msg1, assistant, msg3(new id). msg2 gone.
+
+# (load-file (expand-file-name "../../test-helper.el" (file-name-directory buffer-file-name)))
+# (load-file (expand-file-name "../../opencode-scenario-test.el" (file-name-directory buffer-file-name)))
+# (opencode-scenario-run-file buffer-file-name)
+
+:session ses_queue_test
+:directory /tmp/queue-test
+
+:api POST /session/ses_queue_test/prompt_async 204 null
+
+# --- Override ID generator for predictable IDs ---
+:eval (setq opencode-test--queue-count 0)
+:eval (defun opencode-test--fake-id (&optional pfx) (cl-incf opencode-test--queue-count) (format "%s_%03d" (or pfx "id") opencode-test--queue-count))
+:eval (advice-add 'opencode-util--generate-id :override #'opencode-test--fake-id)
+
+# send1 → msg_001, send2 → msg_003, send3 → msg_005
+:eval (opencode-chat--send "first message")
+:eval (opencode-chat--send "second message")
+:eval (opencode-chat--send "third message")
+
+:eval (advice-remove 'opencode-util--generate-id #'opencode-test--fake-id)
+
+# ═══════════════════════════════════════════════════════════
+# CHECK 0: msg1(QUEUED), msg2(QUEUED), msg3(QUEUED)
+# ═══════════════════════════════════════════════════════════
+:assert-busy
+:eval (should (opencode-chat-message-any-queued-p))
+:eval (should (= 3 (length (opencode-chat-message-queued-ids))))
+:eval (should (= 3 (how-many "QUEUED" (point-min) (point-max))))
+:assert-contains first message
+:assert-contains second message
+:assert-contains third message
+# Order: msg1 < QUEUED < msg2 < QUEUED < msg3 < QUEUED
+:eval (let* ((p1 (save-excursion (goto-char (point-min)) (search-forward "first message" nil t))) (q1 (save-excursion (goto-char p1) (search-forward "QUEUED" nil t))) (p2 (save-excursion (goto-char (point-min)) (search-forward "second message" nil t))) (q2 (save-excursion (goto-char p2) (search-forward "QUEUED" nil t))) (p3 (save-excursion (goto-char (point-min)) (search-forward "third message" nil t))) (q3 (save-excursion (goto-char p3) (search-forward "QUEUED" nil t)))) (should (< p1 q1)) (should (< q1 p2)) (should (< p2 q2)) (should (< q2 p3)) (should (< p3 q3)))
+
+# ═══════════════════════════════════════════════════════════
+# Step 0: Session goes busy
+# ═══════════════════════════════════════════════════════════
+:sse {"type":"session.status","properties":{"sessionID":"ses_queue_test","status":{"type":"busy"}}}
+
+# ═══════════════════════════════════════════════════════════
+# Step 1: Server confirms message1
+# ═══════════════════════════════════════════════════════════
+:sse {"type":"message.updated","properties":{"sessionID":"ses_queue_test","info":{"id":"msg_001","role":"user","sessionID":"ses_queue_test","time":{"created":1000},"agent":"build","model":{"providerID":"P","modelID":"m"}}}}
+:sse {"type":"message.part.updated","properties":{"sessionID":"ses_queue_test","part":{"id":"prt_u1","type":"text","text":"first message","messageID":"msg_001","sessionID":"ses_queue_test"},"time":1001}}
+
+# ═══════════════════════════════════════════════════════════
+# CHECK 1: msg1, msg2(QUEUED), msg3(QUEUED)
+# ═══════════════════════════════════════════════════════════
+:assert-contains first message
+:assert-contains second message
+:assert-contains third message
+:eval (should (= 2 (how-many "QUEUED" (point-min) (point-max))))
+# Order: msg1 < msg2 < QUEUED < msg3 < QUEUED (no QUEUED after msg1)
+:eval (let* ((p1 (save-excursion (goto-char (point-min)) (search-forward "first message" nil t))) (p2 (save-excursion (goto-char (point-min)) (search-forward "second message" nil t))) (q2 (save-excursion (goto-char p2) (search-forward "QUEUED" nil t))) (p3 (save-excursion (goto-char (point-min)) (search-forward "third message" nil t))) (q3 (save-excursion (goto-char p3) (search-forward "QUEUED" nil t)))) (should (< p1 p2)) (should (< p2 q2)) (should (< q2 p3)) (should (< p3 q3)))
+
+# ═══════════════════════════════════════════════════════════
+# Step 2: Assistant response (id between msg_001 and msg_003)
+# ═══════════════════════════════════════════════════════════
+:sse {"type":"message.updated","properties":{"sessionID":"ses_queue_test","info":{"id":"msg_002","parentID":"msg_001","role":"assistant","mode":"build","agent":"build","path":{"cwd":"/tmp","root":"/tmp"},"cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"modelID":"m","providerID":"P","time":{"created":2000},"sessionID":"ses_queue_test"}}}
+:sse {"type":"message.part.updated","properties":{"sessionID":"ses_queue_test","part":{"id":"prt_a1","type":"text","text":"","messageID":"msg_002","sessionID":"ses_queue_test","time":{"start":2001}}}}
+:sse {"type":"message.part.updated","properties":{"sessionID":"ses_queue_test","part":{"id":"prt_a1","type":"text","text":"response to first","messageID":"msg_002","sessionID":"ses_queue_test","time":{"start":2001}},"delta":"response to first"}}
+
+# # ═══════════════════════════════════════════════════════════
+# # CHECK 2: msg1, assistant, msg2(QUEUED), msg3(QUEUED)
+# # ═══════════════════════════════════════════════════════════
+# :assert-contains first message
+# :assert-contains response to first
+# :assert-contains second message
+# :assert-contains third message
+# :eval (should (= 2 (how-many "QUEUED" (point-min) (point-max))))
+# # Order: msg1 < assistant < msg2 < QUEUED < msg3 < QUEUED
+# :eval (let* ((p1 (save-excursion (goto-char (point-min)) (search-forward "first message" nil t))) (pa (save-excursion (goto-char (point-min)) (search-forward "response to first" nil t))) (p2 (save-excursion (goto-char (point-min)) (search-forward "second message" nil t))) (q2 (save-excursion (goto-char p2) (search-forward "QUEUED" nil t))) (p3 (save-excursion (goto-char (point-min)) (search-forward "third message" nil t))) (q3 (save-excursion (goto-char p3) (search-forward "QUEUED" nil t)))) (should (< p1 pa)) (should (< pa p2)) (should (< p2 q2)) (should (< q2 p3)) (should (< p3 q3)))
+# 
+# # ═══════════════════════════════════════════════════════════
+# # Step 3: Server sends NEW user message with msg3's content
+# #   id msg_007 > msg_005. msg_003 ("second message") never got by server.
+# # ═══════════════════════════════════════════════════════════
+# :sse {"type":"message.updated","properties":{"sessionID":"ses_queue_test","info":{"id":"msg_007","role":"user","sessionID":"ses_queue_test","time":{"created":3000},"agent":"build","model":{"providerID":"P","modelID":"m"}}}}
+# :sse {"type":"message.part.updated","properties":{"sessionID":"ses_queue_test","part":{"id":"prt_u7","type":"text","text":"third message","messageID":"msg_007","sessionID":"ses_queue_test"},"time":3001}}
+# 
+# # Session idle (no refresh)
+# :eval (cl-letf (((symbol-function 'opencode-chat--refresh) #'ignore)) (opencode-chat--on-session-idle (list :type "session.idle" :properties (list :sessionID "ses_queue_test"))))
+# 
+# # ═══════════════════════════════════════════════════════════
+# # CHECK 3: msg1, assistant, msg3(new id). msg2 gone.
+# # ═══════════════════════════════════════════════════════════
+# :assert-contains first message
+# :assert-contains response to first
+# :assert-contains third message
+# :assert-not-contains second message
+# :assert-not-contains QUEUED
+# :assert-idle
+# :eval (should-not (opencode-chat-message-any-queued-p))
+# # Order: msg1 < assistant < msg3
+# :eval (let* ((p1 (save-excursion (goto-char (point-min)) (search-forward "first message" nil t))) (pa (save-excursion (goto-char (point-min)) (search-forward "response to first" nil t))) (p3 (save-excursion (goto-char (point-min)) (search-forward "third message" nil t)))) (should (< p1 pa)) (should (< pa p3)))

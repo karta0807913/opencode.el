@@ -1,0 +1,28 @@
+# Scenario: refresh₁ returns X messages, refresh₂ returns Y<X messages.
+# After refresh₂, cursor must stay in the input area.
+
+:session ses_shrink
+:directory /tmp/test-shrink
+
+:api GET /session/ses_shrink 200 {"id":"ses_shrink","slug":"t","projectID":"p","directory":"/tmp/test-shrink","title":"Shrink","version":"1.0","time":{"created":500000,"updated":1000000}}
+:api GET /session/ses_shrink/todo 200 []
+:api GET /session/ses_shrink/diff 200 []
+
+# Refresh₁: 10 messages
+:api GET /session/ses_shrink/message 200 [{"info":{"id":"msg_u1","sessionID":"ses_shrink","role":"user","time":{"created":100}},"parts":[{"id":"prt_u1","sessionID":"ses_shrink","messageID":"msg_u1","type":"text","text":"u1","time":{"start":100,"end":101}}]},{"info":{"id":"msg_a1","sessionID":"ses_shrink","role":"assistant","time":{"created":200,"completed":201},"modelID":"m","agent":"a","finish":"stop","tokens":{"total":10,"input":1,"output":1,"reasoning":0,"cache":{"read":0,"write":0}}},"parts":[{"id":"prt_a1","sessionID":"ses_shrink","messageID":"msg_a1","type":"text","text":"a1","time":{"start":200,"end":201}}]},{"info":{"id":"msg_u2","sessionID":"ses_shrink","role":"user","time":{"created":300}},"parts":[{"id":"prt_u2","sessionID":"ses_shrink","messageID":"msg_u2","type":"text","text":"u2","time":{"start":300,"end":301}}]},{"info":{"id":"msg_a2","sessionID":"ses_shrink","role":"assistant","time":{"created":400,"completed":401},"modelID":"m","agent":"a","finish":"stop","tokens":{"total":20,"input":2,"output":2,"reasoning":0,"cache":{"read":0,"write":0}}},"parts":[{"id":"prt_a2","sessionID":"ses_shrink","messageID":"msg_a2","type":"text","text":"a2","time":{"start":400,"end":401}}]},{"info":{"id":"msg_u3","sessionID":"ses_shrink","role":"user","time":{"created":500}},"parts":[{"id":"prt_u3","sessionID":"ses_shrink","messageID":"msg_u3","type":"text","text":"u3","time":{"start":500,"end":501}}]},{"info":{"id":"msg_a3","sessionID":"ses_shrink","role":"assistant","time":{"created":600,"completed":601},"modelID":"m","agent":"a","finish":"stop","tokens":{"total":30,"input":3,"output":3,"reasoning":0,"cache":{"read":0,"write":0}}},"parts":[{"id":"prt_a3","sessionID":"ses_shrink","messageID":"msg_a3","type":"text","text":"a3","time":{"start":600,"end":601}}]},{"info":{"id":"msg_u4","sessionID":"ses_shrink","role":"user","time":{"created":700}},"parts":[{"id":"prt_u4","sessionID":"ses_shrink","messageID":"msg_u4","type":"text","text":"u4","time":{"start":700,"end":701}}]},{"info":{"id":"msg_a4","sessionID":"ses_shrink","role":"assistant","time":{"created":800,"completed":801},"modelID":"m","agent":"a","finish":"stop","tokens":{"total":40,"input":4,"output":4,"reasoning":0,"cache":{"read":0,"write":0}}},"parts":[{"id":"prt_a4","sessionID":"ses_shrink","messageID":"msg_a4","type":"text","text":"a4","time":{"start":800,"end":801}}]},{"info":{"id":"msg_u5","sessionID":"ses_shrink","role":"user","time":{"created":900}},"parts":[{"id":"prt_u5","sessionID":"ses_shrink","messageID":"msg_u5","type":"text","text":"u5","time":{"start":900,"end":901}}]},{"info":{"id":"msg_a5","sessionID":"ses_shrink","role":"assistant","time":{"created":1000,"completed":1001},"modelID":"m","agent":"a","finish":"stop","tokens":{"total":50,"input":5,"output":5,"reasoning":0,"cache":{"read":0,"write":0}}},"parts":[{"id":"prt_a5","sessionID":"ses_shrink","messageID":"msg_a5","type":"text","text":"a5","time":{"start":1000,"end":1001}}]}]
+
+:eval (opencode-chat--refresh-sync t)
+:assert-contains a1
+:assert-contains a5
+
+:eval (goto-char (opencode-chat--input-content-start))
+
+# Refresh₂: 5 messages (Y < X)
+:api GET /session/ses_shrink/message 200 [{"info":{"id":"msg_u3","sessionID":"ses_shrink","role":"user","time":{"created":500}},"parts":[{"id":"prt_u3","sessionID":"ses_shrink","messageID":"msg_u3","type":"text","text":"u3","time":{"start":500,"end":501}}]},{"info":{"id":"msg_a3","sessionID":"ses_shrink","role":"assistant","time":{"created":600,"completed":601},"modelID":"m","agent":"a","finish":"stop","tokens":{"total":30,"input":3,"output":3,"reasoning":0,"cache":{"read":0,"write":0}}},"parts":[{"id":"prt_a3","sessionID":"ses_shrink","messageID":"msg_a3","type":"text","text":"a3","time":{"start":600,"end":601}}]},{"info":{"id":"msg_u4","sessionID":"ses_shrink","role":"user","time":{"created":700}},"parts":[{"id":"prt_u4","sessionID":"ses_shrink","messageID":"msg_u4","type":"text","text":"u4","time":{"start":700,"end":701}}]},{"info":{"id":"msg_a4","sessionID":"ses_shrink","role":"assistant","time":{"created":800,"completed":801},"modelID":"m","agent":"a","finish":"stop","tokens":{"total":40,"input":4,"output":4,"reasoning":0,"cache":{"read":0,"write":0}}},"parts":[{"id":"prt_a4","sessionID":"ses_shrink","messageID":"msg_a4","type":"text","text":"a4","time":{"start":800,"end":801}}]},{"info":{"id":"msg_u5","sessionID":"ses_shrink","role":"user","time":{"created":900}},"parts":[{"id":"prt_u5","sessionID":"ses_shrink","messageID":"msg_u5","type":"text","text":"u5","time":{"start":900,"end":901}}]},{"info":{"id":"msg_a5","sessionID":"ses_shrink","role":"assistant","time":{"created":1000,"completed":1001},"modelID":"m","agent":"a","finish":"stop","tokens":{"total":50,"input":5,"output":5,"reasoning":0,"cache":{"read":0,"write":0}}},"parts":[{"id":"prt_a5","sessionID":"ses_shrink","messageID":"msg_a5","type":"text","text":"a5","time":{"start":1000,"end":1001}}]}]
+
+:eval (opencode-chat--refresh-sync)
+
+:assert-contains a5
+:assert-not-contains a1
+:eval (should (opencode-chat--in-input-area-p))
+:eval (should (not (= (point) (point-max))))

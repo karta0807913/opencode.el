@@ -1,0 +1,29 @@
+# Scenario: User sends message, server confirms, assistant responds
+# Reproduces: user text disappearing after optimistic delete+recreate
+
+:session ses_test_optimistic
+:directory /Users/bytedance/Documents/opencode.el
+
+:api POST /session/ses_test_optimistic/prompt_async 204 null
+
+# --- User sends (optimistic render) ---
+:eval (opencode-chat--send "commit and push")
+
+# --- Server confirms user message ---
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.updated","properties":{"sessionID":"ses_test_optimistic","info":{"id":"msg_user1","role":"user","sessionID":"ses_test_optimistic","time":{"created":1000},"agent":"build","model":{"providerID":"P","modelID":"m"}}}}}
+
+# --- Server sends user text part ---
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_test_optimistic","part":{"id":"prt_user_text","type":"text","text":"commit and push","messageID":"msg_user1","sessionID":"ses_test_optimistic"},"time":1001}}}
+
+# --- Session busy ---
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"session.status","properties":{"sessionID":"ses_test_optimistic","status":{"type":"busy"}}}}
+
+# --- Assistant message ---
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.updated","properties":{"sessionID":"ses_test_optimistic","info":{"id":"msg_asst1","parentID":"msg_user1","role":"assistant","mode":"build","agent":"build","path":{"cwd":"/tmp","root":"/tmp"},"cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"modelID":"m","providerID":"P","time":{"created":2000},"sessionID":"ses_test_optimistic"}}}}
+
+# --- Assistant streams text ---
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"sessionID":"ses_test_optimistic","part":{"id":"prt_asst_text","type":"text","text":"I will help","messageID":"msg_asst1","sessionID":"ses_test_optimistic","time":{"start":2001}},"delta":"I will help"}}}
+
+# --- Assertions ---
+:assert-contains commit and push
+:assert-contains I will help

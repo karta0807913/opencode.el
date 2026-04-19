@@ -1,0 +1,45 @@
+# Scenario: Subagent streaming — messages arrive in a child session
+# Tests that:
+#   1. Messages render before the sub-agent indicator
+#   2. Indicator shows "Sub-agent session"
+#   3. [Parent] button is present
+#   4. Buffer is NOT read-only (can send messages)
+
+:session ses_child1
+:parent-id ses_parent1
+:directory /tmp/test-project
+
+# Session becomes busy
+:sse {"directory":"/tmp/test-project","payload":{"type":"session.status","properties":{"sessionID":"ses_child1","status":{"type":"busy"}}}}
+:assert-busy
+
+# Assistant message created
+:sse {"directory":"/tmp/test-project","payload":{"type":"message.updated","properties":{"info":{"id":"msg_asst_child1","sessionID":"ses_child1","role":"assistant","time":{"created":1771415771266},"agent":"code","modelID":"claude-sonnet-4-20250514","providerID":"anthropic","tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}}}
+
+# Empty text part (bootstrap)
+:sse {"directory":"/tmp/test-project","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_text_child1","sessionID":"ses_child1","messageID":"msg_asst_child1","type":"text","text":"","time":{"start":1771415789728}}}}}
+
+# Streaming delta
+:sse {"directory":"/tmp/test-project","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_text_child1","sessionID":"ses_child1","messageID":"msg_asst_child1","type":"text","text":"subagent says hello","time":{"start":1771415789728}},"delta":"subagent says hello"}}}
+
+:assert-contains subagent says hello
+:assert-contains Sub-agent session
+
+# Message appears BEFORE the sub-agent indicator
+:eval (let ((msg-pos (save-excursion (goto-char (point-min)) (search-forward "subagent says hello" nil t))) (footer-pos (save-excursion (goto-char (point-min)) (search-forward "Sub-agent session" nil t)))) (should (and msg-pos footer-pos (< msg-pos footer-pos))))
+
+# [Parent] button is present
+:eval (should (save-excursion (goto-char (point-min)) (search-forward "[Parent]" nil t)))
+
+# Buffer is NOT read-only (child sessions can now send messages)
+:eval (should-not buffer-read-only)
+
+# Finalized text part
+:sse {"directory":"/tmp/test-project","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_text_child1","sessionID":"ses_child1","messageID":"msg_asst_child1","type":"text","text":"subagent says hello","time":{"start":1771415789728,"end":1771415789728}}}}}
+
+# Session goes idle
+:sse {"directory":"/tmp/test-project","payload":{"type":"session.status","properties":{"sessionID":"ses_child1","status":{"type":"idle"}}}}
+:sse {"directory":"/tmp/test-project","payload":{"type":"session.idle","properties":{"sessionID":"ses_child1"}}}
+
+:assert-idle
+:assert-contains subagent says hello

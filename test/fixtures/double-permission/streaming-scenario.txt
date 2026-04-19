@@ -1,0 +1,141 @@
+# Scenario: Double permission — two permission.asked events arrive simultaneously
+# Source: Real debug log (2026-03-07). Session ses_3386b5059ffeBogREim0gJGiDt.
+#
+# Flow:
+#   1. User sends message (git push twice + output abcdefg 10 times)
+#   2. Session becomes busy, assistant message created
+#   3. Streaming text deltas arrive
+#   4. Two bash tool parts created (pending)
+#   5. Text finalized
+#   6. First tool starts running (git push)
+#   7. TWO permission.asked events arrive back-to-back (both for "git push")
+#   8. Second tool also starts running
+#   9. User allows first permission → tool completes
+#  10. First tool completes with error output
+#
+# This tests the double-permission popup edge case where two permissions
+# are asked simultaneously for the same session.
+# (load-file (expand-file-name "../../test-helper.el" (file-name-directory buffer-file-name)))
+# (load-file (expand-file-name "../../opencode-scenario-test.el" (file-name-directory buffer-file-name)))
+# (opencode-scenario-run-file buffer-file-name)
+
+:session ses_3386b5059ffeBogREim0gJGiDt
+:directory /Users/bytedance/Documents/opencode.el
+
+# Mock APIs
+:api POST /session/ses_3386b5059ffeBogREim0gJGiDt/prompt_async 204 null
+:api POST /permission/per_cc7994138001RH1HT5SIIASRfM/reply 200 true
+
+# --- User sends message ---
+
+:eval (opencode-chat--send "you have to follow my instruction to do the follow stuff.\n    1. all operation should within a message.\n    2. then run bash with `git push` twice\n    3. output \"abcdefg\" 10 times in one line")
+
+# --- SSE: user message created ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.updated","properties":{"info":{"id":"msg_cc79908a5001QuYEUxwZ0B0iBP","sessionID":"ses_3386b5059ffeBogREim0gJGiDt","role":"user","time":{"created":1772875221157},"agent":"Sisyphus (Ultraworker)","model":{"providerID":"Ttadk","modelID":"claude-opus-4-6"}}}}}
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc79908a5002ehq0bhUK4WS47A","sessionID":"ses_3386b5059ffeBogREim0gJGiDt","messageID":"msg_cc79908a5001QuYEUxwZ0B0iBP","type":"text","text":"you have to follow my instruction to do the follow stuff.\n    1. all operation should within a message.\n    2. then run bash with `git push` twice\n    3. output \"abcdefg\" 10 times in one line"}}}}
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"session.updated","properties":{"info":{"id":"ses_3386b5059ffeBogREim0gJGiDt","slug":"eager-forest","version":"0.0.0","projectID":"d2dea25e","directory":"/Users/bytedance/Documents/opencode.el","title":"New session","time":{"created":1772874936230,"updated":1772875221197}}}}}
+
+# --- Session becomes busy ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"session.status","properties":{"sessionID":"ses_3386b5059ffeBogREim0gJGiDt","status":{"type":"busy"}}}}
+
+:assert-busy
+
+# --- Assistant message created ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.updated","properties":{"info":{"id":"msg_cc79908f1001LhN5AIt9O72NLr","sessionID":"ses_3386b5059ffeBogREim0gJGiDt","role":"assistant","time":{"created":1772875221233},"parentID":"msg_cc79908a5001QuYEUxwZ0B0iBP","modelID":"claude-opus-4-6","providerID":"Ttadk","mode":"Sisyphus (Ultraworker)","agent":"Sisyphus (Ultraworker)","path":{"cwd":"/Users/bytedance/Documents/opencode.el","root":"/Users/bytedance/Documents/opencode.el"},"cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}}}
+
+# --- Session title updated ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"session.updated","properties":{"info":{"id":"ses_3386b5059ffeBogREim0gJGiDt","slug":"eager-forest","version":"0.0.0","projectID":"d2dea25e","directory":"/Users/bytedance/Documents/opencode.el","title":"Git push twice + output abcdefg 10 times","time":{"created":1772874936230,"updated":1772875221207}}}}}
+
+# --- User message summary + session diff ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.updated","properties":{"info":{"id":"msg_cc79908a5001QuYEUxwZ0B0iBP","sessionID":"ses_3386b5059ffeBogREim0gJGiDt","role":"user","time":{"created":1772875221157},"summary":{"diffs":[]},"agent":"Sisyphus (Ultraworker)","model":{"providerID":"Ttadk","modelID":"claude-opus-4-6"}}}}}
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"session.diff","properties":{"sessionID":"ses_3386b5059ffeBogREim0gJGiDt","diff":[]}}}
+
+# --- Step start ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc79935f7001ZZHAwnCeMDDMC5","sessionID":"ses_3386b5059ffeBogREim0gJGiDt","messageID":"msg_cc79908f1001LhN5AIt9O72NLr","type":"step-start","snapshot":"cdbd46f2387d878214bf7aff4361bf7804600862"}}}}
+
+# --- Streaming text deltas ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc79935f8001uJIszrWOgzs8is","sessionID":"ses_3386b5059ffeBogREim0gJGiDt","messageID":"msg_cc79908f1001LhN5AIt9O72NLr","type":"text","text":"\n\nI detect","time":{"start":1772875232760}},"delta":"\n\nI detect"}}}
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc79935f8001uJIszrWOgzs8is","sessionID":"ses_3386b5059ffeBogREim0gJGiDt","messageID":"msg_cc79908f1001LhN5AIt9O72NLr","type":"text","text":"\n\nI detect **explicit instruction** intent — you've given me 3 specific steps to execute in sequence. My approach: execute directly.\n\nLet me do all three:","time":{"start":1772875232760}},"delta":" **explicit instruction** intent — you've given me 3 specific steps to execute in sequence. My approach: execute directly.\n\nLet me do all three:"}}}
+
+:assert-contains I detect
+
+# --- Tool: bash git push #1 (pending) ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc7993bf60015aZgAqakFZy14D","sessionID":"ses_3386b5059ffeBogREim0gJGiDt","messageID":"msg_cc79908f1001LhN5AIt9O72NLr","type":"tool","callID":"toolu_vrtx_01PxVgb6xKLZps8tmJNx6x4m","tool":"bash","state":{"status":"pending","input":{},"raw":""}}}}}
+
+# --- Tool: bash git push #2 (pending) ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc7993e04001G7FSw4QFFuVof6","sessionID":"ses_3386b5059ffeBogREim0gJGiDt","messageID":"msg_cc79908f1001LhN5AIt9O72NLr","type":"tool","callID":"toolu_vrtx_01FfezigSd5dRjoNqmp9Vkqo","tool":"bash","state":{"status":"pending","input":{},"raw":""}}}}}
+
+# --- Text finalized ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc79935f8001uJIszrWOgzs8is","sessionID":"ses_3386b5059ffeBogREim0gJGiDt","messageID":"msg_cc79908f1001LhN5AIt9O72NLr","type":"text","text":"\n\nI detect **explicit instruction** intent — you've given me 3 specific steps to execute in sequence. My approach: execute directly.\n\nLet me do all three:","time":{"start":1772875235430,"end":1772875235430}}}}}
+
+# --- Tool #1 starts running ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc7993bf60015aZgAqakFZy14D","sessionID":"ses_3386b5059ffeBogREim0gJGiDt","messageID":"msg_cc79908f1001LhN5AIt9O72NLr","type":"tool","callID":"toolu_vrtx_01PxVgb6xKLZps8tmJNx6x4m","tool":"bash","state":{"status":"running","input":{"command":"git push","description":"First git push"},"time":{"start":1772875235438}}}}}}
+
+# --- TWO permission.asked events arrive back-to-back ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"permission.asked","properties":{"id":"per_cc7994138001RH1HT5SIIASRfM","sessionID":"ses_3386b5059ffeBogREim0gJGiDt","permission":"bash","patterns":["git push"],"metadata":{},"always":["git push*"],"tool":{"messageID":"msg_cc79908f1001LhN5AIt9O72NLr","callID":"toolu_vrtx_01PxVgb6xKLZps8tmJNx6x4m"}}}}
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"permission.asked","properties":{"id":"per_cc79941b90010VFqjQG6u9o6MC","sessionID":"ses_3386b5059ffeBogREim0gJGiDt","permission":"bash","patterns":["git push"],"metadata":{},"always":["git push*"],"tool":{"messageID":"msg_cc79908f1001LhN5AIt9O72NLr","callID":"toolu_vrtx_01FfezigSd5dRjoNqmp9Vkqo"}}}}
+
+# First permission popup should be displayed
+:assert-contains git push
+
+# --- User allows first permission ---
+# Simulate the real race condition: the SSE permission.replied event
+# arrives DURING the sync HTTP POST (via accept-process-output re-entrancy).
+# In real usage, on-replied fires inside the --reply call, causing
+# double cleanup that wipes the second permission popup.
+#
+# We simulate this by:
+#   1. Stubbing opencode-api--request to fire the SSE on-replied handler
+#      mid-call (before --reply's own cleanup runs)
+#   2. Then calling allow-once which triggers the stub
+
+:eval (goto-char (point-max))
+:eval (let ((orig-fn (symbol-function 'opencode-api--request))) (cl-letf (((symbol-function 'opencode-api--request) (lambda (&rest args) (opencode-permission--on-replied (list :type "permission.replied" :properties (list :sessionID "ses_3386b5059ffeBogREim0gJGiDt" :requestID "per_cc7994138001RH1HT5SIIASRfM" :reply "once"))) nil))) (opencode-permission--allow-once)))
+
+# After dismissing first permission, the second permission popup
+# should appear automatically (queue drain).
+# BUG: the re-entrant on-replied handler shows the second popup,
+# but then --reply's own cleanup wipes it.
+:assert-contains Permission Required
+
+# Verify the current permission is the SECOND one (different ID)
+:eval (should (equal (plist-get opencode-permission--current :id) "per_cc79941b90010VFqjQG6u9o6MC"))
+
+
+# --- Tool #2 starts running ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc7993e04001G7FSw4QFFuVof6","sessionID":"ses_3386b5059ffeBogREim0gJGiDt","messageID":"msg_cc79908f1001LhN5AIt9O72NLr","type":"tool","callID":"toolu_vrtx_01FfezigSd5dRjoNqmp9Vkqo","tool":"bash","state":{"status":"running","input":{"command":"git push","description":"Second git push"},"time":{"start":1772875235774}}}}}}
+
+# --- Server confirms first permission replied ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"permission.replied","properties":{"sessionID":"ses_3386b5059ffeBogREim0gJGiDt","requestID":"per_cc7994138001RH1HT5SIIASRfM","reply":"once"}}}
+
+# --- Tool #1 running with output ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc7993bf60015aZgAqakFZy14D","sessionID":"ses_3386b5059ffeBogREim0gJGiDt","messageID":"msg_cc79908f1001LhN5AIt9O72NLr","type":"tool","callID":"toolu_vrtx_01PxVgb6xKLZps8tmJNx6x4m","tool":"bash","state":{"status":"running","input":{"command":"git push","description":"First git push"},"metadata":{"output":"fatal: The upstream branch of your current branch does not match\nthe name of your current branch.\n","description":"First git push"},"time":{"start":1772875244750}}}}}}
+
+# --- Tool #1 completed ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc7993bf60015aZgAqakFZy14D","sessionID":"ses_3386b5059ffeBogREim0gJGiDt","messageID":"msg_cc79908f1001LhN5AIt9O72NLr","type":"tool","callID":"toolu_vrtx_01PxVgb6xKLZps8tmJNx6x4m","tool":"bash","state":{"status":"completed","input":{"command":"git push","description":"First git push"},"output":"fatal: The upstream branch of your current branch does not match\nthe name of your current branch.\n","title":"First git push","metadata":{"output":"fatal: The upstream branch of your current branch does not match\nthe name of your current branch.\n","exit":128,"description":"First git push","truncated":false},"time":{"start":1772875235438,"end":1772875244754}}}}}}
+
+# --- Final assertions ---
+:assert-busy
+:assert-contains I detect
+:assert-contains git push

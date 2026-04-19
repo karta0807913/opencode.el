@@ -1,0 +1,35 @@
+# Scenario: Full buffer render from API message response
+# Uses :refresh to load the /session/:id/message response and render all messages.
+# This tests the complete render pipeline: user message, assistant message,
+# text parts, tool parts (bash pwd, bash git checkout, question).
+# Also mocks /question/ API to test pending question popup on refresh.
+
+# (load-file (expand-file-name "../test-helper.el" (file-name-directory buffer-file-name)))
+# (load-file (expand-file-name "../opencode-scenario-test.el" (file-name-directory buffer-file-name)))
+# (opencode-scenario-run-file buffer-file-name)
+
+:session ses_33e2ee637ffeGdTqDXBdDD6xO6
+:directory /Users/bytedance/Documents/opencode.el
+
+# Mock the pending question API — server returns the question that has status "running"
+:api GET /question 200 [{"id":"que_cc1d20a95001FPv52EFlpM25to","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","questions":[{"question":"test question","header":"test question","options":[{"label":"test1","description":"Option A"},{"label":"test2","description":"Option B"},{"label":"test3","description":"Option C"}]}]}]
+
+# Load the saved API response and render the full buffer
+:refresh multi-tool/messages.json
+
+# --- Assertions ---
+
+# User message text should be rendered
+:assert-contains abcdefg
+
+# Bash pwd tool should show the command
+:assert-contains pwd
+
+# Bash git checkout tool should show the command and error
+:assert-contains git checkout a
+
+# Question inline popup should be displayed (from /question/ API)
+:assert-contains Question
+:assert-contains test1
+:assert-contains test2
+:assert-contains test3

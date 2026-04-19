@@ -1,0 +1,38 @@
+# Scenario: tool stdout must render while the tool is still running.
+#
+# While a tool is running, its final `state.output' is nil; progressive
+# stdout lives under `state.metadata.output'.  `render-tool-body' must
+# fall back to that so the user sees output as it streams, not a blank
+# tool box until completion.
+#
+# Based on a real log: `echo "ABCDEF"; sleep 10` — ABCDEF is printed
+# almost immediately but the tool doesn't "complete" for ~10s.  Users
+# expect to see ABCDEF as soon as it's emitted.
+
+:session ses_tool_stdout
+:directory /tmp/test-tool-stdout
+
+:api GET /session/ses_tool_stdout 200 {"id":"ses_tool_stdout","slug":"t","projectID":"p","directory":"/tmp/test-tool-stdout","title":"Tool Stdout","version":"1.0","time":{"created":500000,"updated":1000000}}
+:api GET /session/ses_tool_stdout/todo 200 []
+:api GET /session/ses_tool_stdout/diff 200 []
+:api GET /session/ses_tool_stdout/message 200 []
+
+# ── Session busy, assistant message starts streaming ──
+:sse {"type":"session.status","properties":{"sessionID":"ses_tool_stdout","status":{"type":"busy"}}}
+:sse {"type":"message.updated","properties":{"sessionID":"ses_tool_stdout","info":{"id":"msg_asst1","sessionID":"ses_tool_stdout","role":"assistant","time":{"created":1000000},"modelID":"m","agent":"a","tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}}
+:sse {"type":"message.part.updated","properties":{"sessionID":"ses_tool_stdout","part":{"id":"prt_step1","sessionID":"ses_tool_stdout","messageID":"msg_asst1","type":"step-start","snapshot":"abc"}}}
+
+# ── Bash tool: pending → running (no output yet) ──
+:sse {"type":"message.part.updated","properties":{"sessionID":"ses_tool_stdout","part":{"id":"prt_bash","sessionID":"ses_tool_stdout","messageID":"msg_asst1","type":"tool","tool":"bash","callID":"c1","state":{"status":"pending","input":{},"raw":""}}}}
+:sse {"type":"message.part.updated","properties":{"sessionID":"ses_tool_stdout","part":{"id":"prt_bash","sessionID":"ses_tool_stdout","messageID":"msg_asst1","type":"tool","tool":"bash","callID":"c1","state":{"status":"running","input":{"command":"echo hello; sleep 10","description":"Echo and sleep","timeout":15000},"raw":"","time":{"start":1000100}}}}}
+
+# ── Tool emits progressive stdout via `metadata.output' while running ──
+# state.output is still nil, but state.metadata.output has the current
+# stdout.  Our fix must fall back to metadata.output in this case.
+# Use a unique stdout string ("STREAMED-OK") that can't collide with
+# the command line or input echo.
+:sse {"type":"message.part.updated","properties":{"sessionID":"ses_tool_stdout","part":{"id":"prt_bash","sessionID":"ses_tool_stdout","messageID":"msg_asst1","type":"tool","tool":"bash","callID":"c1","state":{"status":"running","input":{"command":"echo hello; sleep 10","description":"Echo and sleep","timeout":15000},"metadata":{"output":"STREAMED-OK\n","description":"Echo and sleep"},"time":{"start":1000100}}}}}
+
+# Key assertion: the streamed stdout must be visible in the buffer even
+# though the tool is still `running' (final :output is still nil).
+:assert-contains STREAMED-OK

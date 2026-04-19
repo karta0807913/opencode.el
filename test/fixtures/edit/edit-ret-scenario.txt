@@ -1,0 +1,94 @@
+# Scenario: RET on edit tool diff opens the edited file at the correct line.
+#
+# Why this matters:
+#   The edit tool body sets the `opencode-file-path' text property and a
+#   specialized keymap so RET opens the edited file.  The chat buffer then
+#   applies `opencode-chat-message-map' over the whole message region via
+#   `opencode-chat--apply-message-props'.  That call must NOT blanket-
+#   overwrite the specialized keymap — otherwise RET on the edit diff
+#   falls through to the generic message keymap (no file open).
+#
+# This scenario exercises BOTH code paths that reach apply-message-props:
+#   1. SSE streaming (message.part.updated → render-tool-part → apply-…)
+#   2. Full refresh (render-messages → render-tool-part → apply-…)
+# and asserts the specialized keymap survives both.
+
+:session ses_edit_ret_test
+:directory /tmp/opencode-edit-ret-test
+
+# --- Create a real file on disk so line navigation is verifiable ---
+:eval (make-directory "/tmp/opencode-edit-ret-test/src/" t)
+:eval (with-temp-file "/tmp/opencode-edit-ret-test/src/app.ts" (dotimes (i 30) (insert (format "line %d\n" (1+ i)))))
+# Point default-directory at the session root so file resolution works.
+:eval (setq default-directory "/tmp/opencode-edit-ret-test/")
+
+# ============================================================
+# PATH 1 — SSE streaming
+# ============================================================
+
+# User message
+:sse {"directory":"/tmp/opencode-edit-ret-test","payload":{"type":"message.updated","properties":{"info":{"id":"msg_u1","sessionID":"ses_edit_ret_test","role":"user","time":{"created":1771415771263}}}}}
+
+# Session busy
+:sse {"directory":"/tmp/opencode-edit-ret-test","payload":{"type":"session.status","properties":{"sessionID":"ses_edit_ret_test","status":{"type":"busy"}}}}
+:assert-busy
+
+# Assistant message
+:sse {"directory":"/tmp/opencode-edit-ret-test","payload":{"type":"message.updated","properties":{"info":{"id":"msg_asst1","sessionID":"ses_edit_ret_test","role":"assistant","time":{"created":1771415771266},"parentID":"msg_u1","modelID":"claude-opus-4-6","providerID":"anthropic","mode":"build","path":{"cwd":"/tmp/opencode-edit-ret-test","root":"/tmp/opencode-edit-ret-test"},"cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}}}
+
+# Step start + edit tool lifecycle
+:sse {"directory":"/tmp/opencode-edit-ret-test","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_step1","sessionID":"ses_edit_ret_test","messageID":"msg_asst1","type":"step-start"}}}}
+:sse {"directory":"/tmp/opencode-edit-ret-test","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_edit1","sessionID":"ses_edit_ret_test","messageID":"msg_asst1","type":"tool","callID":"call_001","tool":"edit","state":{"status":"pending","input":{},"raw":""}}}}}
+:sse {"directory":"/tmp/opencode-edit-ret-test","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_edit1","sessionID":"ses_edit_ret_test","messageID":"msg_asst1","type":"tool","callID":"call_001","tool":"edit","state":{"status":"running","input":{"filePath":"src/app.ts","oldString":"line 10\nline 11\n","newString":"line 10 modified\nline 11 modified\nline 11b new\n"},"title":"Edit src/app.ts","time":{"start":1771415771300}}}}}}
+:sse {"directory":"/tmp/opencode-edit-ret-test","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_edit1","sessionID":"ses_edit_ret_test","messageID":"msg_asst1","type":"tool","callID":"call_001","tool":"edit","state":{"status":"completed","input":{"filePath":"src/app.ts","oldString":"line 10\nline 11\n","newString":"line 10 modified\nline 11 modified\nline 11b new\n"},"output":"OK","title":"Edit src/app.ts","metadata":{},"time":{"start":1771415771300,"end":1771415771400}}}}}}
+
+# Session idle
+:sse {"directory":"/tmp/opencode-edit-ret-test","payload":{"type":"session.status","properties":{"sessionID":"ses_edit_ret_test","status":{"type":"idle"}}}}
+:sse {"directory":"/tmp/opencode-edit-ret-test","payload":{"type":"session.idle","properties":{"sessionID":"ses_edit_ret_test"}}}
+:assert-idle
+
+# --- The critical assertions after SSE render ---
+:assert-contains src/app.ts
+
+# opencode-file-path property must exist at the file path.
+# Combine find+assert into a single eval so match data stays valid.
+:eval (goto-char (point-min))
+:eval (let ((pos (point-min))) (while (and pos (not (equal (get-text-property pos 'opencode-file-path) "src/app.ts"))) (setq pos (next-single-property-change pos 'opencode-file-path))) (should pos) (goto-char pos) (should (eq (key-binding (kbd "RET")) 'opencode-chat-message-open-file-at-point)))
+
+# ============================================================
+# PATH 2 — :refresh path (render-messages → apply-message-props)
+# ============================================================
+# This is the specific path that was broken by the clickable-file patch:
+# on a full refresh, apply-message-props was overwriting the file keymap.
+
+:refresh [{"info":{"id":"msg_u1","sessionID":"ses_edit_ret_test","role":"user","time":{"created":1771415771263}},"parts":[{"id":"prt_user_text","sessionID":"ses_edit_ret_test","messageID":"msg_u1","type":"text","text":"Edit the file"}]},{"info":{"id":"msg_asst1","sessionID":"ses_edit_ret_test","role":"assistant","time":{"created":1771415771266,"completed":1771415771500},"modelID":"claude-opus-4-6","providerID":"anthropic","agent":"build","tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}}},"parts":[{"id":"prt_step1","sessionID":"ses_edit_ret_test","messageID":"msg_asst1","type":"step-start"},{"id":"prt_edit1","sessionID":"ses_edit_ret_test","messageID":"msg_asst1","type":"tool","callID":"call_001","tool":"edit","state":{"status":"completed","input":{"filePath":"src/app.ts","oldString":"line 10\nline 11\n","newString":"line 10 modified\nline 11 modified\nline 11b new\n"},"output":"OK","metadata":{},"time":{"start":1771415771300,"end":1771415771400}}}]}]
+
+# The same assertions must pass after a full refresh.
+:assert-contains src/app.ts
+:eval (let ((pos (point-min))) (while (and pos (not (equal (get-text-property pos 'opencode-file-path) "src/app.ts"))) (setq pos (next-single-property-change pos 'opencode-file-path))) (should pos) (goto-char pos) (should (eq (key-binding (kbd "RET")) 'opencode-chat-message-open-file-at-point)))
+
+# Also confirm the generic message keymap is still in effect OUTSIDE the edit body.
+# Pick a position that does NOT have opencode-file-path and verify RET/g fall through.
+:eval (goto-char (point-min))
+:eval (let ((pos (point-min))) (while (and pos (get-text-property pos 'opencode-file-path)) (setq pos (next-single-property-change pos 'opencode-file-path))) (goto-char (or pos (point-min))) (should (eq (key-binding (kbd "g")) 'opencode-chat--refresh)))
+
+# ============================================================
+# Test the three open-file behaviors (post-refresh)
+# ============================================================
+# Each behavior test wraps every file-visit in a save-excursion-like
+# dance and returns to the chat buffer before the next :eval so that
+# `point-min'/`point-max' stay valid in the chat buffer context.
+
+# Behavior (a) — no buffer for the file, opens in other window.
+:eval (let ((pos (point-min)) (opened nil)) (while (and pos (not (equal (get-text-property pos 'opencode-file-path) "src/app.ts"))) (setq pos (next-single-property-change pos 'opencode-file-path))) (goto-char pos) (cl-letf (((symbol-function 'find-file-other-window) (lambda (path &rest _) (setq opened path) (find-file-noselect path)))) (opencode-chat-message-open-file-at-point)) (should opened) (should (string-suffix-p "src/app.ts" opened)))
+
+# Behavior (b) — file buffer already visible in a window, RET jumps to it.
+# Wrap the whole flow in a single eval so the chat buffer stays current at the end.
+:eval (let ((chat-buf (current-buffer))) (save-window-excursion (split-window) (other-window 1) (find-file "/tmp/opencode-edit-ret-test/src/app.ts") (let ((file-win (selected-window))) (other-window 1) (switch-to-buffer chat-buf) (let ((pos (point-min))) (while (and pos (not (equal (get-text-property pos 'opencode-file-path) "src/app.ts"))) (setq pos (next-single-property-change pos 'opencode-file-path))) (goto-char pos) (opencode-chat-message-open-file-at-point) (should (eq (selected-window) file-win))))))
+
+# Behavior (c) — file buffer exists but not visible in any window.
+:eval (let ((chat-buf (current-buffer))) (save-window-excursion (let ((pos (point-min))) (with-current-buffer chat-buf (while (and pos (not (equal (get-text-property pos 'opencode-file-path) "src/app.ts"))) (setq pos (next-single-property-change pos 'opencode-file-path))) (goto-char pos) (let ((chat-win (selected-window))) (opencode-chat-message-open-file-at-point) (should (not (eq (selected-window) chat-win))))))))
+
+# Cleanup
+:eval (when-let ((buf (find-buffer-visiting "/tmp/opencode-edit-ret-test/src/app.ts"))) (kill-buffer buf))
+:eval (delete-directory "/tmp/opencode-edit-ret-test" t)

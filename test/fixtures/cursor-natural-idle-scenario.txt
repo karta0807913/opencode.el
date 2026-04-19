@@ -1,0 +1,52 @@
+# Scenario: where does cursor end up after natural streaming → idle?
+#
+# No manual cursor movement — just stream, go idle, check where cursor is.
+# This reveals whether streaming moves the cursor somewhere unexpected
+# and whether idle's goto-latest snap fires.
+
+:session ses_cursor_nat
+:directory /tmp/test-cursor-nat
+
+:api GET /session/ses_cursor_nat/message 200 [{"info":{"id":"msg_user1","sessionID":"ses_cursor_nat","role":"user","time":{"created":500000}},"parts":[{"id":"prt_u1","sessionID":"ses_cursor_nat","messageID":"msg_user1","type":"text","text":"hello","time":{"start":500000,"end":500001}}]},{"info":{"id":"msg_asst1","sessionID":"ses_cursor_nat","role":"assistant","time":{"created":1000000},"modelID":"test-model","agent":"test-agent","finish":"stop","tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}}},"parts":[{"id":"prt_text1","sessionID":"ses_cursor_nat","messageID":"msg_asst1","type":"text","text":"hello world done","time":{"start":1000001,"end":1000002}}]}]
+
+:api GET /session/ses_cursor_nat 200 {"id":"ses_cursor_nat","slug":"test","projectID":"proj1","directory":"/tmp/test-cursor-nat","title":"Cursor Natural","version":"1.0.0","time":{"created":500000,"updated":1000002}}
+
+:api GET /session/ses_cursor_nat/todo 200 []
+:api GET /session/ses_cursor_nat/diff 200 []
+
+# Simulate realistic cursor: user just sent a message, cursor is in input area
+:eval (goto-char (opencode-chat--input-content-start))
+:eval (setq test--initial-point (point))
+:eval (setq test--initial-in-input (opencode-chat--in-input-area-p))
+:eval (message "CURSOR-DEBUG initial: point=%d input-start=%s in-input=%s point-max=%d" (point) (and (opencode-chat--input-start) (marker-position (opencode-chat--input-start))) test--initial-in-input (point-max))
+
+# Session becomes busy
+:sse {"type":"session.status","properties":{"sessionID":"ses_cursor_nat","status":{"type":"busy"}}}
+:assert-busy
+
+# Assistant message + streaming
+:sse {"type":"message.updated","properties":{"info":{"id":"msg_asst1","sessionID":"ses_cursor_nat","role":"assistant","time":{"created":1000000},"modelID":"test-model","agent":"test-agent","tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}}}}}
+:sse {"type":"message.part.updated","properties":{"part":{"id":"prt_step1","sessionID":"ses_cursor_nat","messageID":"msg_asst1","type":"step-start","snapshot":"abc123"}}}
+:sse {"type":"message.part.updated","properties":{"part":{"id":"prt_text1","sessionID":"ses_cursor_nat","messageID":"msg_asst1","type":"text","text":"","time":{"start":1000001}}}}
+:sse {"type":"message.part.updated","properties":{"part":{"id":"prt_text1","sessionID":"ses_cursor_nat","messageID":"msg_asst1","type":"text","text":"hello","time":{"start":1000001}},"delta":"hello"}}
+
+:eval (message "CURSOR-DEBUG after-delta-1: point=%d input-start=%s in-input=%s" (point) (and (opencode-chat--input-start) (marker-position (opencode-chat--input-start))) (opencode-chat--in-input-area-p))
+
+:sse {"type":"message.part.updated","properties":{"part":{"id":"prt_text1","sessionID":"ses_cursor_nat","messageID":"msg_asst1","type":"text","text":"hello world","time":{"start":1000001}},"delta":" world"}}
+:assert-contains hello world
+
+# Finalize
+:sse {"type":"message.part.updated","properties":{"part":{"id":"prt_text1","sessionID":"ses_cursor_nat","messageID":"msg_asst1","type":"text","text":"hello world","time":{"start":1000001,"end":1000002}}}}
+:sse {"type":"message.part.updated","properties":{"part":{"id":"prt_step1_finish","sessionID":"ses_cursor_nat","messageID":"msg_asst1","type":"step-finish","reason":"stop","tokens":{"total":100,"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}}}}}
+
+:eval (message "CURSOR-DEBUG before-idle: point=%d input-start=%s in-input=%s point-max=%d" (point) (and (opencode-chat--input-start) (marker-position (opencode-chat--input-start))) (opencode-chat--in-input-area-p) (point-max))
+
+# Idle
+:sse {"type":"session.status","properties":{"sessionID":"ses_cursor_nat","status":{"type":"idle"}}}
+:sse {"type":"session.idle","properties":{"sessionID":"ses_cursor_nat"}}
+:assert-idle
+
+:eval (message "CURSOR-DEBUG after-idle: point=%d input-start=%s in-input=%s content-start=%s point-max=%d" (point) (and (opencode-chat--input-start) (marker-position (opencode-chat--input-start))) (opencode-chat--in-input-area-p) (opencode-chat--input-content-start) (point-max))
+
+# The cursor should be in the input area (content-start) after idle
+:eval (should (opencode-chat--in-input-area-p))

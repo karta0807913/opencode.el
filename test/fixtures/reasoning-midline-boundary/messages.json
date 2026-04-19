@@ -1,0 +1,81 @@
+[
+    {
+        "info": {
+            "role": "user",
+            "time": {
+                "created": 1700000000000
+            },
+            "agent": "Assistant",
+            "model": {
+                "providerID": "anthropic",
+                "modelID": "claude-opus-4-6"
+            },
+            "summary": {
+                "diffs": []
+            },
+            "id": "msg_u_midline",
+            "sessionID": "ses_midline_boundary"
+        },
+        "parts": [
+            {
+                "type": "text",
+                "text": "run the diagnostic",
+                "id": "prt_u1",
+                "sessionID": "ses_midline_boundary",
+                "messageID": "msg_u_midline"
+            }
+        ]
+    },
+    {
+        "info": {
+            "parentID": "msg_u_midline",
+            "role": "assistant",
+            "mode": "Assistant",
+            "agent": "Assistant",
+            "cost": 0,
+            "tokens": {
+                "total": 100,
+                "input": 50,
+                "output": 50,
+                "reasoning": 20,
+                "cache": {
+                    "write": 0,
+                    "read": 0
+                }
+            },
+            "modelID": "claude-opus-4-6",
+            "providerID": "anthropic",
+            "time": {
+                "created": 1700000001000,
+                "completed": 1700000005000
+            },
+            "finish": "stop",
+            "id": "msg_a_midline",
+            "sessionID": "ses_midline_boundary"
+        },
+        "parts": [
+            {
+                "type": "reasoning",
+                "text": "Looking at the request, I need to check the state carefully.",
+                "time": {
+                    "start": 1700000002000,
+                    "end": 1700000003000
+                },
+                "id": "prt_r_midline",
+                "sessionID": "ses_midline_boundary",
+                "messageID": "msg_a_midline"
+            },
+            {
+                "type": "text",
+                "text": "Here is the diagnostic summary for your review.",
+                "time": {
+                    "start": 1700000004000,
+                    "end": 1700000005000
+                },
+                "id": "prt_t_midline",
+                "sessionID": "ses_midline_boundary",
+                "messageID": "msg_a_midline"
+            }
+        ]
+    }
+]

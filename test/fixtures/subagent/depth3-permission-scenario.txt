@@ -1,0 +1,63 @@
+# Scenario: Depth-3 subagent permission — permission from grandchild session
+#
+# Session hierarchy:
+#   ses_root (top-level, has open buffer)
+#     └─ ses_child (depth 1, no open buffer — only exists in cache)
+#         └─ ses_grandchild (depth 2, no open buffer)
+#
+# Flow:
+#   1. Root session receives a message with a task tool part for ses_child
+#      (populates child→parent cache: ses_child → ses_root)
+#   2. We manually populate ses_grandchild → ses_child in the cache
+#   3. permission.asked arrives from ses_grandchild
+#   4. Union-find walks: ses_grandchild → ses_child → ses_root
+#   5. Permission popup appears in the root buffer
+#   6. User allows → popup dismissed
+#
+# Tests that:
+#   - Multi-level child→parent chain resolves correctly
+#   - Path compression works (subsequent lookups are O(1))
+#   - No sync HTTP calls (no max-lisp-eval-depth crash)
+#   - Permission popup renders in root buffer
+
+:session ses_root
+:directory /tmp/depth3-test
+
+# Mock APIs
+:api POST /session/ses_root/prompt_async 204 null
+:api POST /permission/per_grandchild_perm/reply 200 true
+
+# --- Root session gets a message with task tool (child session) ---
+
+:sse {"directory":"/tmp/depth3-test","payload":{"type":"message.updated","properties":{"info":{"id":"msg_root_asst","sessionID":"ses_root","role":"assistant","time":{"created":1772900000000},"agent":"build","modelID":"claude-opus-4-6","providerID":"anthropic","tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}}}
+
+:sse {"directory":"/tmp/depth3-test","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_task_child","sessionID":"ses_root","messageID":"msg_root_asst","type":"tool","callID":"call_task_child","tool":"task","state":{"status":"running","input":{"description":"Run child task"},"metadata":{"sessionId":"ses_child"}}}}}}
+
+# Task tool rendering populates cache: ses_child → ses_root
+:eval (should (equal (opencode-domain-child-parent-get "ses_child") "ses_root"))
+
+# --- Manually populate grandchild → child cache entry ---
+# (In real usage, this would be populated when ses_child renders its own task tool)
+:eval (opencode-domain-child-parent-put "ses_grandchild" "ses_child")
+
+# Verify the chain: grandchild → child → root
+:eval (should (equal (opencode-domain-find-root-session "ses_grandchild") "ses_root"))
+
+# --- Permission from grandchild arrives ---
+:sse {"directory":"/tmp/depth3-test","payload":{"type":"permission.asked","properties":{"id":"per_grandchild_perm","sessionID":"ses_grandchild","permission":"bash","patterns":["rm -rf /tmp/test"],"metadata":{},"always":["rm*"],"tool":{"messageID":"msg_grandchild_asst","callID":"call_bash_gc"}}}}
+
+# Permission popup should appear in the ROOT buffer (not grandchild)
+:assert-contains Permission Required
+:assert-contains rm -rf /tmp/test
+
+# Current permission should be the grandchild's
+:eval (should (equal (plist-get opencode-permission--current :id) "per_grandchild_perm"))
+
+# --- Path compression should have updated grandchild to point directly to root ---
+:eval (should (equal (opencode-domain-child-parent-get "ses_grandchild") "ses_root"))
+
+# --- Allow the permission ---
+:eval (opencode-permission--allow-once)
+
+# Permission should be dismissed
+:eval (should-not opencode-permission--current)

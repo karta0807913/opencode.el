@@ -1,0 +1,36 @@
+[
+  {
+    "name": "build",
+    "description": "Default development agent",
+    "mode": "primary",
+    "native": true,
+    "color": "#34d399",
+    "permission": {},
+    "model": {
+      "providerID": "anthropic",
+      "modelID": "claude-sonnet-4-20250514"
+    },
+    "options": {},
+    "steps": 200
+  },
+  {
+    "name": "plan",
+    "description": "Plan mode agent",
+    "mode": "primary",
+    "native": true,
+    "color": "#a78bfa",
+    "permission": {},
+    "options": {},
+    "steps": 100
+  },
+  {
+    "name": "Prometheus (Plan Builder)",
+    "description": "Plan builder agent",
+    "mode": "all",
+    "native": false,
+    "color": "#f59e0b",
+    "permission": {},
+    "options": {},
+    "steps": 150
+  }
+]

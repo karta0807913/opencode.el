@@ -1,0 +1,61 @@
+# Scenario: cursor position through streaming → retry → idle
+#
+# Tests all cursor scenarios:
+#   1. Cursor in input during streaming — should stay in input
+#   2. Cursor in messages during retry — should stay in messages
+#   3. Cursor in messages after idle refresh — should stay in messages
+
+:session ses_cursor_retry
+:directory /tmp/test-cursor-retry
+
+:api GET /session/ses_cursor_retry/message 200 [{"info":{"id":"msg_user1","sessionID":"ses_cursor_retry","role":"user","time":{"created":500000}},"parts":[{"id":"prt_u1","sessionID":"ses_cursor_retry","messageID":"msg_user1","type":"text","text":"hello","time":{"start":500000,"end":500001}}]},{"info":{"id":"msg_asst1","sessionID":"ses_cursor_retry","role":"assistant","time":{"created":1000000},"modelID":"test-model","agent":"test-agent","finish":"stop","tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}}},"parts":[{"id":"prt_text1","sessionID":"ses_cursor_retry","messageID":"msg_asst1","type":"text","text":"this is the complete response","time":{"start":1000001,"end":1000002}}]}]
+
+:api GET /session/ses_cursor_retry 200 {"id":"ses_cursor_retry","slug":"test","projectID":"proj1","directory":"/tmp/test-cursor-retry","title":"Test","version":"1.0.0","time":{"created":500000,"updated":1000002}}
+
+:api GET /session/ses_cursor_retry/todo 200 []
+:api GET /session/ses_cursor_retry/diff 200 []
+
+# Start with cursor in input area (realistic)
+:eval (goto-char (opencode-chat--input-content-start))
+
+# Session becomes busy
+:sse {"type":"session.status","properties":{"sessionID":"ses_cursor_retry","status":{"type":"busy"}}}
+:assert-busy
+
+# Stream some content
+:sse {"type":"message.updated","properties":{"info":{"id":"msg_asst1","sessionID":"ses_cursor_retry","role":"assistant","time":{"created":1000000},"modelID":"test-model","agent":"test-agent","tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}}}}}
+:sse {"type":"message.part.updated","properties":{"part":{"id":"prt_step1","sessionID":"ses_cursor_retry","messageID":"msg_asst1","type":"step-start","snapshot":"abc123"}}}
+:sse {"type":"message.part.updated","properties":{"part":{"id":"prt_text1","sessionID":"ses_cursor_retry","messageID":"msg_asst1","type":"text","text":"","time":{"start":1000001}}}}
+:sse {"type":"message.part.updated","properties":{"part":{"id":"prt_text1","sessionID":"ses_cursor_retry","messageID":"msg_asst1","type":"text","text":"this is the","time":{"start":1000001}},"delta":"this is the"}}
+:assert-contains this is the
+
+# Check: cursor still in input after streaming
+:eval (message "CURSOR after-stream: point=%d in-input=%s" (point) (opencode-chat--in-input-area-p))
+:eval (should (opencode-chat--in-input-area-p))
+
+# User moves cursor to message area to read
+:eval (goto-char (point-min))
+:eval (search-forward "this is the")
+:eval (setq test--msg-cursor (point))
+:eval (message "CURSOR in-messages: point=%d in-input=%s input-start=%s" (point) (opencode-chat--in-input-area-p) (marker-position (opencode-chat--input-start)))
+
+# Retry 1 — cursor should NOT move
+:sse {"type":"session.status","properties":{"sessionID":"ses_cursor_retry","status":{"type":"retry","attempt":1,"message":"Internal server error","next":9999999999999}}}
+:eval (message "CURSOR after-retry-1: point=%d in-input=%s" (point) (opencode-chat--in-input-area-p))
+:eval (should (= (point) test--msg-cursor))
+:assert-busy
+
+# Retry 2 — cursor should NOT move (hide old badge + show new one)
+:sse {"type":"session.status","properties":{"sessionID":"ses_cursor_retry","status":{"type":"retry","attempt":2,"message":"Internal server error","next":9999999999999}}}
+:eval (message "CURSOR after-retry-2: point=%d in-input=%s" (point) (opencode-chat--in-input-area-p))
+:eval (should (= (point) test--msg-cursor))
+:assert-busy
+
+# Session recovers — idle
+:sse {"type":"session.status","properties":{"sessionID":"ses_cursor_retry","status":{"type":"idle"}}}
+:sse {"type":"session.idle","properties":{"sessionID":"ses_cursor_retry"}}
+:assert-idle
+
+# After idle: cursor should still be in message area (not jumped to input/end)
+:eval (message "CURSOR after-idle: point=%d in-input=%s input-start=%s content-start=%s point-max=%d" (point) (opencode-chat--in-input-area-p) (marker-position (opencode-chat--input-start)) (opencode-chat--input-content-start) (point-max))
+:eval (should (< (point) (marker-position (opencode-chat--input-start))))

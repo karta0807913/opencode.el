@@ -1,0 +1,55 @@
+# Scenario: cursor jumps to point-max after async refresh.
+#
+# Root cause: `render-messages' runs inside an async HTTP callback
+# (process filter).  `goto-char' restores buffer-point to the input
+# area, but doesn't touch `window-point'.  When the buffer was
+# `erase-buffer'd earlier, `window-point' got clamped to the new
+# `point-max' (the end of the help line).  At the next redisplay,
+# Emacs syncs buffer-point FROM window-point — dragging the cursor
+# to `point-max'.
+#
+# The scenario simulates the async context by manually setting
+# `window-point' to `point-max' between bootstrap and refresh.
+# After `refresh-sync' runs render-messages, `window-point' must
+# match the restored buffer-point inside the input area.
+
+:session ses_winpt
+:directory /tmp/test-winpt
+
+:api GET /session/ses_winpt 200 {"id":"ses_winpt","slug":"t","projectID":"p","directory":"/tmp/test-winpt","title":"WinPt","version":"1.0","time":{"created":500000,"updated":1000000}}
+:api GET /session/ses_winpt/todo 200 []
+:api GET /session/ses_winpt/diff 200 []
+
+:api GET /session/ses_winpt/message 200 [{"info":{"id":"msg_u1","sessionID":"ses_winpt","role":"user","time":{"created":100}},"parts":[{"id":"prt_u1","sessionID":"ses_winpt","messageID":"msg_u1","type":"text","text":"u1","time":{"start":100,"end":101}}]},{"info":{"id":"msg_a1","sessionID":"ses_winpt","role":"assistant","time":{"created":200,"completed":201},"modelID":"m","agent":"a","finish":"stop","tokens":{"total":10,"input":1,"output":1,"reasoning":0,"cache":{"read":0,"write":0}}},"parts":[{"id":"prt_a1","sessionID":"ses_winpt","messageID":"msg_a1","type":"text","text":"a1","time":{"start":200,"end":201}}]}]
+
+# Bootstrap
+:eval (opencode-chat--refresh-sync t)
+
+# Display this buffer in a selected window so `set-window-point' is
+# meaningful.  Without a window, the bug can't manifest.
+:eval (set-window-buffer (selected-window) (current-buffer))
+
+# Park cursor in the input area
+:eval (goto-char (opencode-chat--input-content-start))
+:eval (should (opencode-chat--in-input-area-p))
+
+# Simulate the state at the moment the async HTTP callback fires:
+# window-point is at `point-max' (clamped by the erase-buffer that
+# happened earlier), but buffer-point is in the input area.
+:eval (set-window-point (selected-window) (point-max))
+
+# Run refresh — this calls render-messages which will goto-char the
+# restored position.  After refresh, window-point MUST be synced to
+# buffer-point; otherwise the next redisplay strands the cursor.
+:eval (opencode-chat--refresh-sync)
+
+:eval (message ">> post buffer-pt=%d window-pt=%d point-max=%d" (point) (window-point (selected-window)) (point-max))
+
+:assert-contains a1
+
+# window-point and buffer-point MUST agree inside the input area.
+# If render-messages only calls `goto-char' without `set-window-point',
+# window-point is still `point-max' — next redisplay drags buffer-point
+# to `point-max', stranding the cursor.
+:eval (should (= (window-point (selected-window)) (point)))
+:eval (should (< (window-point (selected-window)) (point-max)))

@@ -1,0 +1,32 @@
+[
+  {
+    "id": "todo_1",
+    "content": "Examine the authentication code",
+    "status": "completed",
+    "priority": "high"
+  },
+  {
+    "id": "todo_2",
+    "content": "Fix JWT token validation error handling",
+    "status": "in_progress",
+    "priority": "high"
+  },
+  {
+    "id": "todo_3",
+    "content": "Add unit tests for expired token case",
+    "status": "pending",
+    "priority": "medium"
+  },
+  {
+    "id": "todo_4",
+    "content": "Run full test suite",
+    "status": "pending",
+    "priority": "medium"
+  },
+  {
+    "id": "todo_5",
+    "content": "Update API documentation",
+    "status": "pending",
+    "priority": "low"
+  }
+]

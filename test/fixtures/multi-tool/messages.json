@@ -1,0 +1,226 @@
+[
+    {
+        "info": {
+            "id": "msg_cc1d18598000GmVFgh9DBLdXqc",
+            "sessionID": "ses_33e2ee637ffeGdTqDXBdDD6xO6",
+            "role": "user",
+            "time": {
+                "created": 1772778259876
+            },
+            "summary": {
+                "diffs": []
+            },
+            "agent": "build",
+            "model": {
+                "providerID": "Ttadk",
+                "modelID": "claude-opus-4-6"
+            }
+        },
+        "parts": [
+            {
+                "id": "prt_cc1d18598001TWX8Oqo2kUJmN4",
+                "sessionID": "ses_33e2ee637ffeGdTqDXBdDD6xO6",
+                "messageID": "msg_cc1d18598000GmVFgh9DBLdXqc",
+                "type": "text",
+                "text": "this is a test session. you have to follow my instruction to do the follow stuff.\n  1. all operation should within a message.\n  2. output \"abcdefg\".\n  3. then run bash with `pwd`\n  4. then run bash with `git checkout a`\n  5. then ask me a question with title \"test question\" option\n     a. test1\n     b. test2\n     c. test3"
+            }
+        ]
+    },
+    {
+        "info": {
+            "id": "msg_cc1d185c6001GuREXdXAlsVUp5",
+            "sessionID": "ses_33e2ee637ffeGdTqDXBdDD6xO6",
+            "role": "assistant",
+            "time": {
+                "created": 1772778259910,
+                "completed": 1772778284817
+            },
+            "parentID": "msg_cc1d18598000GmVFgh9DBLdXqc",
+            "modelID": "claude-opus-4-6",
+            "providerID": "Ttadk",
+            "mode": "build",
+            "agent": "build",
+            "path": {
+                "cwd": "/Users/bytedance/Documents/opencode.el",
+                "root": "/Users/bytedance/Documents/opencode.el"
+            },
+            "cost": 0,
+            "tokens": {
+                "input": 0,
+                "output": 135,
+                "reasoning": 0,
+                "cache": {
+                    "read": 0,
+                    "write": 0
+                }
+            },
+            "finish": "tool-calls"
+        },
+        "parts": [
+            {
+                "id": "prt_cc1d1b131001gdbh0nSBDdr01A",
+                "sessionID": "ses_33e2ee637ffeGdTqDXBdDD6xO6",
+                "messageID": "msg_cc1d185c6001GuREXdXAlsVUp5",
+                "type": "step-start",
+                "snapshot": "e0806a5b980b29d32e263cdde9fd62834a66f95d"
+            },
+            {
+                "id": "prt_cc1d1b133001obeyWbGJhg2oui",
+                "sessionID": "ses_33e2ee637ffeGdTqDXBdDD6xO6",
+                "messageID": "msg_cc1d185c6001GuREXdXAlsVUp5",
+                "type": "text",
+                "text": "\n\nabcdefg",
+                "time": {
+                    "start": 1772778272141,
+                    "end": 1772778272141
+                }
+            },
+            {
+                "id": "prt_cc1d1b1a9001oWp8LnTp2m9tfG",
+                "sessionID": "ses_33e2ee637ffeGdTqDXBdDD6xO6",
+                "messageID": "msg_cc1d185c6001GuREXdXAlsVUp5",
+                "type": "tool",
+                "callID": "toolu_vrtx_014JqbtTaV9nmZQyM5dpymXf",
+                "tool": "bash",
+                "state": {
+                    "status": "completed",
+                    "input": {
+                        "command": "pwd",
+                        "description": "Print working directory"
+                    },
+                    "output": "/Users/bytedance/Documents/opencode.el\n",
+                    "title": "Print working directory",
+                    "metadata": {
+                        "output": "/Users/bytedance/Documents/opencode.el\n",
+                        "exit": 0,
+                        "description": "Print working directory",
+                        "truncated": false
+                    },
+                    "time": {
+                        "start": 1772778272166,
+                        "end": 1772778273497
+                    }
+                }
+            },
+            {
+                "id": "prt_cc1d1b37c001zm0X3aMRJO2gW4",
+                "sessionID": "ses_33e2ee637ffeGdTqDXBdDD6xO6",
+                "messageID": "msg_cc1d185c6001GuREXdXAlsVUp5",
+                "type": "tool",
+                "callID": "toolu_vrtx_01WEvxeqcU7hvPZ3Uhg2Sri8",
+                "tool": "bash",
+                "state": {
+                    "status": "completed",
+                    "input": {
+                        "command": "git checkout a",
+                        "description": "Checkout branch 'a'"
+                    },
+                    "output": "error: pathspec 'a' did not match any file(s) known to git\n",
+                    "title": "Checkout branch 'a'",
+                    "metadata": {
+                        "output": "error: pathspec 'a' did not match any file(s) known to git\n",
+                        "exit": 1,
+                        "description": "Checkout branch 'a'",
+                        "truncated": false
+                    },
+                    "time": {
+                        "start": 1772778273474,
+                        "end": 1772778284771
+                    }
+                }
+            },
+            {
+                "id": "prt_cc1d1e6e7001rplqmJ6eb5tD1n",
+                "sessionID": "ses_33e2ee637ffeGdTqDXBdDD6xO6",
+                "messageID": "msg_cc1d185c6001GuREXdXAlsVUp5",
+                "type": "step-finish",
+                "reason": "tool-calls",
+                "snapshot": "e0806a5b980b29d32e263cdde9fd62834a66f95d",
+                "cost": 0,
+                "tokens": {
+                    "input": 0,
+                    "output": 135,
+                    "reasoning": 0,
+                    "cache": {
+                        "read": 0,
+                        "write": 0
+                    }
+                }
+            }
+        ]
+    },
+    {
+        "info": {
+            "id": "msg_cc1d1e716001pAx3BwmxJdk0wx",
+            "sessionID": "ses_33e2ee637ffeGdTqDXBdDD6xO6",
+            "role": "assistant",
+            "time": {
+                "created": 1772778284822
+            },
+            "parentID": "msg_cc1d18598000GmVFgh9DBLdXqc",
+            "modelID": "claude-opus-4-6",
+            "providerID": "Ttadk",
+            "mode": "build",
+            "agent": "build",
+            "path": {
+                "cwd": "/Users/bytedance/Documents/opencode.el",
+                "root": "/Users/bytedance/Documents/opencode.el"
+            },
+            "cost": 0,
+            "tokens": {
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "cache": {
+                    "read": 0,
+                    "write": 0
+                }
+            }
+        },
+        "parts": [
+            {
+                "id": "prt_cc1d2073b001x5uGhnwIgKiTVE",
+                "sessionID": "ses_33e2ee637ffeGdTqDXBdDD6xO6",
+                "messageID": "msg_cc1d1e716001pAx3BwmxJdk0wx",
+                "type": "step-start",
+                "snapshot": "e0806a5b980b29d32e263cdde9fd62834a66f95d"
+            },
+            {
+                "id": "prt_cc1d2073c0010mkHkEumDujXmt",
+                "sessionID": "ses_33e2ee637ffeGdTqDXBdDD6xO6",
+                "messageID": "msg_cc1d1e716001pAx3BwmxJdk0wx",
+                "type": "tool",
+                "callID": "toolu_vrtx_011A67WBj322VfkZVhf6EKck",
+                "tool": "question",
+                "state": {
+                    "status": "running",
+                    "input": {
+                        "questions": [
+                            {
+                                "question": "test question",
+                                "header": "test question",
+                                "options": [
+                                    {
+                                        "label": "test1",
+                                        "description": "Option A"
+                                    },
+                                    {
+                                        "label": "test2",
+                                        "description": "Option B"
+                                    },
+                                    {
+                                        "label": "test3",
+                                        "description": "Option C"
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    "time": {
+                        "start": 1772778293910
+                    }
+                }
+            }
+        ]
+    }
+]

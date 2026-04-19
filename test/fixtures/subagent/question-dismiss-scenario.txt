@@ -1,0 +1,52 @@
+# Scenario: Question popup dismiss in subagent session
+#
+# Tests that answering a question popup properly dismisses it and
+# does NOT re-show from a stale duplicate in --pending.
+# This catches the dual-dispatch bug where the same request is
+# queued in both child and root buffers' --pending lists.
+#
+# Flow:
+#   1. Session gets an assistant message
+#   2. Question tool part arrives (pending)
+#   3. question.asked SSE event → popup shown
+#   4. User selects option 1 and submits (RET)
+#   5. Popup should be dismissed — NOT re-shown
+
+:session ses_qdismiss
+:directory /tmp/qdismiss-test
+
+# Mock APIs
+:api POST /session/ses_qdismiss/prompt_async 204 null
+:api POST /question/que_dismiss_test/reply 200 true
+
+# --- Assistant message ---
+
+:sse {"directory":"/tmp/qdismiss-test","payload":{"type":"message.updated","properties":{"info":{"id":"msg_asst_qd","sessionID":"ses_qdismiss","role":"assistant","time":{"created":1772900000000},"agent":"build","modelID":"claude-opus-4-6","providerID":"anthropic","tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}}}
+
+# --- Step start ---
+
+:sse {"directory":"/tmp/qdismiss-test","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_step_qd","sessionID":"ses_qdismiss","messageID":"msg_asst_qd","type":"step-start","snapshot":"abc123"}}}}
+
+# --- Question tool part (pending) ---
+
+:sse {"directory":"/tmp/qdismiss-test","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_qtool_qd","sessionID":"ses_qdismiss","messageID":"msg_asst_qd","type":"tool","callID":"call_question_qd","tool":"question","state":{"status":"pending","input":{},"raw":""}}}}}
+
+# --- question.asked SSE event ---
+
+:sse {"directory":"/tmp/qdismiss-test","payload":{"type":"question.asked","properties":{"id":"que_dismiss_test","sessionID":"ses_qdismiss","questions":[{"question":"Pick your favorite","header":"Favorite","options":[{"label":"Alpha","description":"First option"},{"label":"Beta","description":"Second option"},{"label":"Gamma","description":"Third option"}]}],"tool":{"messageID":"msg_asst_qd","callID":"call_question_qd"}}}}
+
+# Question popup should be displayed
+:assert-question
+:assert-contains Pick your favorite
+:assert-contains Alpha
+:assert-contains Beta
+:assert-contains Gamma
+
+# --- User answers: select option 1 and submit ---
+
+:answer-question 1
+:assert-no-question
+
+# Verify the popup is truly gone — input area should be restored
+:eval (should (opencode-popup--input-area-valid-p))
+:eval (should-not opencode-popup--inline-p)

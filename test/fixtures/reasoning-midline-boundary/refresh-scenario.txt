@@ -1,0 +1,14 @@
+# Scenario: reasoning-midline-boundary refresh variant.
+# Renders the finalized state from messages.json via /session/:id/message.
+
+:session ses_midline_boundary
+:directory /tmp/midline-boundary
+
+:refresh reasoning-midline-boundary/messages.json
+
+# --- Assertions ---
+
+:assert-contains run the diagnostic
+:assert-contains Thinking
+:assert-contains state carefully
+:assert-contains Here is the diagnostic summary

@@ -1,0 +1,183 @@
+# Scenario: Multi-tool session with text, bash, permission, and question
+# Source: Real debug log from a test session (2026-03-06).
+#
+# Flow:
+#   1. User sends message via :eval
+#   2. SSE events arrive: user message, session busy, assistant message
+#   3. Assistant streams "abcdefg" text
+#   4. Bash tool (pwd) runs — pending, then running, then completed
+#   5. Bash tool (git checkout a) needs permission → popup shown
+#   6. Text part finalized
+#   7. Permission popup displayed
+#   8. User allows permission "once" via :eval
+#   9. Server confirms permission.replied → question popup appears
+#  10. git checkout a runs and fails (pathspec 'a' not found)
+#  11. First assistant message completes (finish: tool-calls)
+#  12. Second assistant message with question tool
+# (load-file (expand-file-name "../../test-helper.el" (file-name-directory buffer-file-name)))
+# (load-file (expand-file-name "../../opencode-scenario-test.el" (file-name-directory buffer-file-name)))
+# (opencode-scenario-run-file buffer-file-name)
+
+:session ses_33e2ee637ffeGdTqDXBdDD6xO6
+:directory /Users/bytedance/Documents/opencode.el
+
+# Mock APIs
+:api POST /session/ses_33e2ee637ffeGdTqDXBdDD6xO6/prompt_async 204 null
+:api POST /permission/per_cc1d1baa0001858J7nAgPuzeDh/reply 200 true
+
+# --- User sends message ---
+
+:eval (opencode-chat--send "this is a test session. you have to follow my instruction to do the follow stuff.\n  1. all operation should within a message.\n  2. output \"abcdefg\".\n  3. then run bash with `pwd`\n  4. then run bash with `git checkout a`\n  5. then ask me a question with title \"test question\" option\n     a. test1\n     b. test2\n     c. test3")
+
+# --- SSE: user message created ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.updated","properties":{"info":{"id":"msg_cc1d18598000GmVFgh9DBLdXqc","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","role":"user","time":{"created":1772778259876},"agent":"build","model":{"providerID":"Ttadk","modelID":"claude-opus-4-6"}}}}}
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc1d18598001TWX8Oqo2kUJmN4","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","messageID":"msg_cc1d18598000GmVFgh9DBLdXqc","type":"text","text":"this is a test session. you have to follow my instruction to do the follow stuff.\n  1. all operation should within a message.\n  2. output \"abcdefg\".\n  3. then run bash with `pwd`\n  4. then run bash with `git checkout a`\n  5. then ask me a question with title \"test question\" option\n     a. test1\n     b. test2\n     c. test3"}}}}
+
+# --- Session becomes busy ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"session.updated","properties":{"info":{"id":"ses_33e2ee637ffeGdTqDXBdDD6xO6","slug":"sunny-nebula","version":"0.0.0-feat/show-mcp-error-202601260136","projectID":"d2dea25e61793f9dee62c6404c8990151db68d60","directory":"/Users/bytedance/Documents/opencode.el","title":"New session - 2026-03-06T06:23:52.265Z","time":{"created":1772778232265,"updated":1772778259885}}}}}
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"session.status","properties":{"sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","status":{"type":"busy"}}}}
+
+:assert-busy
+
+# --- Assistant message created ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.updated","properties":{"info":{"id":"msg_cc1d185c6001GuREXdXAlsVUp5","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","role":"assistant","time":{"created":1772778259910},"parentID":"msg_cc1d18598000GmVFgh9DBLdXqc","modelID":"claude-opus-4-6","providerID":"Ttadk","mode":"build","agent":"build","path":{"cwd":"/Users/bytedance/Documents/opencode.el","root":"/Users/bytedance/Documents/opencode.el"},"cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}}}
+
+# --- Intermediate user message update (summary) + session updates ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.updated","properties":{"info":{"id":"msg_cc1d18598000GmVFgh9DBLdXqc","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","role":"user","time":{"created":1772778259876},"summary":{"diffs":[]},"agent":"build","model":{"providerID":"Ttadk","modelID":"claude-opus-4-6"}}}}}
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"session.updated","properties":{"info":{"id":"ses_33e2ee637ffeGdTqDXBdDD6xO6","slug":"sunny-nebula","version":"0.0.0-feat/show-mcp-error-202601260136","projectID":"d2dea25e61793f9dee62c6404c8990151db68d60","directory":"/Users/bytedance/Documents/opencode.el","title":"New session - 2026-03-06T06:23:52.265Z","time":{"created":1772778232265,"updated":1772778268205},"summary":{"additions":0,"deletions":0,"files":0}}}}}
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"session.diff","properties":{"sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","diff":[]}}}
+
+# --- Step start ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc1d1b131001gdbh0nSBDdr01A","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","messageID":"msg_cc1d185c6001GuREXdXAlsVUp5","type":"step-start","snapshot":"e0806a5b980b29d32e263cdde9fd62834a66f95d"}}}}
+
+# --- Streaming text: "abcdefg" (two deltas) ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc1d1b133001obeyWbGJhg2oui","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","messageID":"msg_cc1d185c6001GuREXdXAlsVUp5","type":"text","text":"\n\nab","time":{"start":1772778271027}},"delta":"\n\nab"}}}
+
+:assert-contains ab
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc1d1b133001obeyWbGJhg2oui","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","messageID":"msg_cc1d185c6001GuREXdXAlsVUp5","type":"text","text":"\n\nabcdefg","time":{"start":1772778271027}},"delta":"cdefg"}}}
+
+:assert-contains abcdefg
+
+# --- Tool: bash pwd (pending) ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc1d1b1a9001oWp8LnTp2m9tfG","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","messageID":"msg_cc1d185c6001GuREXdXAlsVUp5","type":"tool","callID":"toolu_vrtx_014JqbtTaV9nmZQyM5dpymXf","tool":"bash","state":{"status":"pending","input":{},"raw":""}}}}}
+
+# --- Tool: bash git checkout a (pending) ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc1d1b37c001zm0X3aMRJO2gW4","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","messageID":"msg_cc1d185c6001GuREXdXAlsVUp5","type":"tool","callID":"toolu_vrtx_01WEvxeqcU7hvPZ3Uhg2Sri8","tool":"bash","state":{"status":"pending","input":{},"raw":""}}}}}
+
+# --- Text finalized ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc1d1b133001obeyWbGJhg2oui","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","messageID":"msg_cc1d185c6001GuREXdXAlsVUp5","type":"text","text":"\n\nabcdefg","time":{"start":1772778272141,"end":1772778272141}}}}}
+
+# --- Tool: bash pwd (running) ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc1d1b1a9001oWp8LnTp2m9tfG","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","messageID":"msg_cc1d185c6001GuREXdXAlsVUp5","type":"tool","callID":"toolu_vrtx_014JqbtTaV9nmZQyM5dpymXf","tool":"bash","state":{"status":"running","input":{"command":"pwd","description":"Print working directory"},"time":{"start":1772778272166}}}}}}
+
+# --- Permission asked: bash "git checkout a" ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"permission.asked","properties":{"id":"per_cc1d1baa0001858J7nAgPuzeDh","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","permission":"bash","patterns":["git checkout a"],"metadata":{},"always":["git checkout*"],"tool":{"messageID":"msg_cc1d185c6001GuREXdXAlsVUp5","callID":"toolu_vrtx_01WEvxeqcU7hvPZ3Uhg2Sri8"}}}}
+
+# Permission popup should be displayed
+:assert-contains git checkout a
+
+# --- Tool: bash pwd (running, with output) ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc1d1b1a9001oWp8LnTp2m9tfG","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","messageID":"msg_cc1d185c6001GuREXdXAlsVUp5","type":"tool","callID":"toolu_vrtx_014JqbtTaV9nmZQyM5dpymXf","tool":"bash","state":{"status":"running","input":{"command":"pwd","description":"Print working directory"},"metadata":{"output":"/Users/bytedance/Documents/opencode.el\n","description":"Print working directory"},"time":{"start":1772778273446}}}}}}
+
+# --- Tool: bash git checkout a (running, waiting for permission) ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc1d1b37c001zm0X3aMRJO2gW4","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","messageID":"msg_cc1d185c6001GuREXdXAlsVUp5","type":"tool","callID":"toolu_vrtx_01WEvxeqcU7hvPZ3Uhg2Sri8","tool":"bash","state":{"status":"running","input":{"command":"git checkout a","description":"Checkout branch 'a'"},"time":{"start":1772778273474}}}}}}
+
+# --- Tool: bash pwd (running, with output 2) ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc1d1b1a9001oWp8LnTp2m9tfG","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","messageID":"msg_cc1d185c6001GuREXdXAlsVUp5","type":"tool","callID":"toolu_vrtx_014JqbtTaV9nmZQyM5dpymXf","tool":"bash","state":{"status":"running","input":{"command":"pwd","description":"Print working directory"},"metadata":{"output":"/Users/bytedance/Documents/opencode.el\n","description":"Print working directory"},"time":{"start":1772778273489}}}}}}
+
+# --- Tool: bash pwd (completed) ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc1d1b1a9001oWp8LnTp2m9tfG","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","messageID":"msg_cc1d185c6001GuREXdXAlsVUp5","type":"tool","callID":"toolu_vrtx_014JqbtTaV9nmZQyM5dpymXf","tool":"bash","state":{"status":"completed","input":{"command":"pwd","description":"Print working directory"},"output":"/Users/bytedance/Documents/opencode.el\n","title":"Print working directory","metadata":{"output":"/Users/bytedance/Documents/opencode.el\n","exit":0,"description":"Print working directory","truncated":false},"time":{"start":1772778272166,"end":1772778273497}}}}}}
+
+# --- User allows permission "once" ---
+
+:eval (goto-char (point-max))
+:eval (opencode-permission--allow-once)
+
+# --- Server confirms permission replied ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"permission.replied","properties":{"sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","requestID":"per_cc1d1baa0001858J7nAgPuzeDh","reply":"once"}}}
+
+# --- Tool: bash git checkout a (running, after permission granted) ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc1d1b37c001zm0X3aMRJO2gW4","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","messageID":"msg_cc1d185c6001GuREXdXAlsVUp5","type":"tool","callID":"toolu_vrtx_01WEvxeqcU7hvPZ3Uhg2Sri8","tool":"bash","state":{"status":"running","input":{"command":"git checkout a","description":"Checkout branch 'a'"},"metadata":{"output":"","description":"Checkout branch 'a'"},"time":{"start":1772778284739}}}}}}
+
+# --- Tool: bash git checkout a (running, error output arrives) ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc1d1b37c001zm0X3aMRJO2gW4","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","messageID":"msg_cc1d185c6001GuREXdXAlsVUp5","type":"tool","callID":"toolu_vrtx_01WEvxeqcU7hvPZ3Uhg2Sri8","tool":"bash","state":{"status":"running","input":{"command":"git checkout a","description":"Checkout branch 'a'"},"metadata":{"output":"error: pathspec 'a' did not match any file(s) known to git\n","description":"Checkout branch 'a'"},"time":{"start":1772778284769}}}}}}
+
+# --- Tool: bash git checkout a (completed, exit=1) ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc1d1b37c001zm0X3aMRJO2gW4","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","messageID":"msg_cc1d185c6001GuREXdXAlsVUp5","type":"tool","callID":"toolu_vrtx_01WEvxeqcU7hvPZ3Uhg2Sri8","tool":"bash","state":{"status":"completed","input":{"command":"git checkout a","description":"Checkout branch 'a'"},"output":"error: pathspec 'a' did not match any file(s) known to git\n","title":"Checkout branch 'a'","metadata":{"output":"error: pathspec 'a' did not match any file(s) known to git\n","exit":1,"description":"Checkout branch 'a'","truncated":false},"time":{"start":1772778273474,"end":1772778284771}}}}}}
+
+# --- Step finish (first assistant message) ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc1d1e6e7001rplqmJ6eb5tD1n","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","messageID":"msg_cc1d185c6001GuREXdXAlsVUp5","type":"step-finish","reason":"tool-calls","snapshot":"e0806a5b980b29d32e263cdde9fd62834a66f95d","cost":0,"tokens":{"input":0,"output":135,"reasoning":0,"cache":{"read":0,"write":0}}}}}}
+
+# --- First assistant message finalized ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.updated","properties":{"info":{"id":"msg_cc1d185c6001GuREXdXAlsVUp5","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","role":"assistant","time":{"created":1772778259910,"completed":1772778284817},"parentID":"msg_cc1d18598000GmVFgh9DBLdXqc","modelID":"claude-opus-4-6","providerID":"Ttadk","mode":"build","agent":"build","path":{"cwd":"/Users/bytedance/Documents/opencode.el","root":"/Users/bytedance/Documents/opencode.el"},"cost":0,"tokens":{"input":0,"output":135,"reasoning":0,"cache":{"read":0,"write":0}},"finish":"tool-calls"}}}}
+
+# --- Session stays busy (second round of tool calls) ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"session.status","properties":{"sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","status":{"type":"busy"}}}}
+
+# --- Second assistant message created (for question tool) ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.updated","properties":{"info":{"id":"msg_cc1d1e716001pAx3BwmxJdk0wx","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","role":"assistant","time":{"created":1772778284822},"parentID":"msg_cc1d18598000GmVFgh9DBLdXqc","modelID":"claude-opus-4-6","providerID":"Ttadk","mode":"build","agent":"build","path":{"cwd":"/Users/bytedance/Documents/opencode.el","root":"/Users/bytedance/Documents/opencode.el"},"cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}}}
+
+# --- More session updates ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.updated","properties":{"info":{"id":"msg_cc1d18598000GmVFgh9DBLdXqc","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","role":"user","time":{"created":1772778259876},"summary":{"diffs":[]},"agent":"build","model":{"providerID":"Ttadk","modelID":"claude-opus-4-6"}}}}}
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"session.updated","properties":{"info":{"id":"ses_33e2ee637ffeGdTqDXBdDD6xO6","slug":"sunny-nebula","version":"0.0.0-feat/show-mcp-error-202601260136","projectID":"d2dea25e61793f9dee62c6404c8990151db68d60","directory":"/Users/bytedance/Documents/opencode.el","title":"New session - 2026-03-06T06:23:52.265Z","time":{"created":1772778232265,"updated":1772778290647},"summary":{"additions":0,"deletions":0,"files":0}}}}}
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"session.diff","properties":{"sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","diff":[]}}}
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"session.status","properties":{"sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","status":{"type":"busy"}}}}
+
+# --- Step start (second assistant message) ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc1d2073b001x5uGhnwIgKiTVE","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","messageID":"msg_cc1d1e716001pAx3BwmxJdk0wx","type":"step-start","snapshot":"e0806a5b980b29d32e263cdde9fd62834a66f95d"}}}}
+
+# --- Tool: question (pending) ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc1d2073c0010mkHkEumDujXmt","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","messageID":"msg_cc1d1e716001pAx3BwmxJdk0wx","type":"tool","callID":"toolu_vrtx_011A67WBj322VfkZVhf6EKck","tool":"question","state":{"status":"pending","input":{},"raw":""}}}}}
+
+# --- Question asked ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"question.asked","properties":{"id":"que_cc1d20a95001FPv52EFlpM25to","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","questions":[{"question":"test question","header":"test question","options":[{"label":"test1","description":"Option A"},{"label":"test2","description":"Option B"},{"label":"test3","description":"Option C"}]}],"tool":{"messageID":"msg_cc1d1e716001pAx3BwmxJdk0wx","callID":"toolu_vrtx_011A67WBj322VfkZVhf6EKck"}}}}
+
+# --- After permission is dismissed, question popup should appear ---
+
+:assert-contains Question
+:assert-contains test1
+:assert-contains test2
+:assert-contains test3
+
+# --- Tool: question (running, with question details) ---
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_cc1d2073c0010mkHkEumDujXmt","sessionID":"ses_33e2ee637ffeGdTqDXBdDD6xO6","messageID":"msg_cc1d1e716001pAx3BwmxJdk0wx","type":"tool","callID":"toolu_vrtx_011A67WBj322VfkZVhf6EKck","tool":"question","state":{"status":"running","input":{"questions":[{"question":"test question","header":"test question","options":[{"label":"test1","description":"Option A"},{"label":"test2","description":"Option B"},{"label":"test3","description":"Option C"}]}]},"time":{"start":1772778293910}}}}}}
+
+# --- Final assertions ---
+:assert-busy
+:assert-contains abcdefg

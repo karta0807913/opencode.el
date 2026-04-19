@@ -1,0 +1,24 @@
+# Scenario: golden-full-session refresh variant.
+# Renders the finalized state from messages.json via /session/:id/message.
+# Pairs with streaming-scenario.txt for a streaming-vs-refresh comparison
+# covering the full pipeline: reasoning, multiple tools (bash + edit),
+# multiple text parts, two messages, session.idle at end.
+
+:session ses_golden
+:directory /tmp/golden
+
+:refresh golden-full-session/messages.json
+
+# --- Assertions ---
+
+:assert-contains investigate the login bug
+:assert-contains Thinking
+:assert-contains check the auth module
+:assert-contains grep -n
+:assert-contains auth.js
+:assert-contains Found 3 usages
+:assert-contains return false
+:assert-contains TODO: fix
+:assert-contains commit it
+:assert-contains git status
+:assert-contains Committed

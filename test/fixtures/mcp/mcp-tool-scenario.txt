@@ -1,0 +1,71 @@
+# Scenario: MCP (Model Context Protocol) generic tool renderer
+#
+# Why this matters:
+#   MCP tools are named `<server>_<tool>' or `<server>-<tool>'
+#   (e.g. `tiksearch_mcp__tiksearch', `lark-cli_send-message').
+#   The chat buffer has no tool-specific renderer for them — instead
+#   it falls through to a generic renderer that prints each INPUT
+#   key as a `  key: value' line and then the tool output.
+#
+#   Two invariants this scenario guards:
+#
+#   1. MCP tools are collapsed-by-default (like Bash/Read) so the diff
+#      or huge JSON output doesn't dominate the chat.
+#   2. The generic input renderer must handle every JSON type the
+#      server sends: string, number, boolean, null, nested object,
+#      array (homogeneous and mixed).  Without this fallback, MCP tool
+#      calls would show the cryptic `▸ tool-name' header with nothing
+#      else.
+
+:session ses_mcp_render
+:directory /tmp/mcp-render-test
+
+# --- User message ---
+:sse {"directory":"/tmp/mcp-render-test","payload":{"type":"message.updated","properties":{"info":{"id":"msg_u1","sessionID":"ses_mcp_render","role":"user","time":{"created":1770000000000}}}}}
+
+# --- Session busy ---
+:sse {"directory":"/tmp/mcp-render-test","payload":{"type":"session.status","properties":{"sessionID":"ses_mcp_render","status":{"type":"busy"}}}}
+:assert-busy
+
+# --- Assistant message ---
+:sse {"directory":"/tmp/mcp-render-test","payload":{"type":"message.updated","properties":{"info":{"id":"msg_a1","sessionID":"ses_mcp_render","role":"assistant","time":{"created":1770000000100},"parentID":"msg_u1","modelID":"claude-opus-4-6","providerID":"anthropic","mode":"build","tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}}}
+
+# --- Step start ---
+:sse {"directory":"/tmp/mcp-render-test","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_step1","sessionID":"ses_mcp_render","messageID":"msg_a1","type":"step-start"}}}}
+
+# --- MCP tool call: tiksearch_mcp__tiksearch with a rich input plist ---
+:sse {"directory":"/tmp/mcp-render-test","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_mcp1","sessionID":"ses_mcp_render","messageID":"msg_a1","type":"tool","callID":"call_mcp_001","tool":"tiksearch_mcp__tiksearch","state":{"status":"completed","input":{"userQuery":"how does feature X work","limit":5,"recent":true,"cursor":null,"nested":{"key":"value","count":3},"tags":["fast","cheap","long"]},"output":"[{\"title\":\"doc1\"},{\"title\":\"doc2\"}]","metadata":{},"time":{"start":1770000000200,"end":1770000000500}}}}}}
+
+# --- Session idle ---
+:sse {"directory":"/tmp/mcp-render-test","payload":{"type":"session.status","properties":{"sessionID":"ses_mcp_render","status":{"type":"idle"}}}}
+:sse {"directory":"/tmp/mcp-render-test","payload":{"type":"session.idle","properties":{"sessionID":"ses_mcp_render"}}}
+:assert-idle
+
+# --- Assertions ---
+# Tool section header is present.
+:assert-contains tiksearch_mcp__tiksearch
+
+# MCP tools are EXPANDED by default (unlike bash/read which collapse)
+# so the user can see the arguments without opening the section.
+# The `[collapsed]' indicator must NOT be on the MCP tool's header.
+# The simplest check: the body key `userQuery:' must be visible without
+# toggling the section.
+:assert-not-contains [collapsed]
+
+# String value rendered.
+:assert-contains userQuery: how does feature X work
+
+# Numeric value.
+:assert-contains limit: 5
+
+# Boolean true.
+:assert-contains recent: true
+
+# Null value.
+:assert-contains cursor: null
+
+# Nested object rendered compactly.
+:assert-contains nested: {key: value, count: 3}
+
+# Array rendered as [a, b, c].
+:assert-contains tags: [fast, cheap, long]

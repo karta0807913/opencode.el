@@ -1,0 +1,54 @@
+# Sample scenario: Simple "hello world" prompt and response
+# This replays a real SSE event stream from an OpenCode session.
+
+:session ses_38f646bdbffe_test
+:directory /Users/bytedance/Documents/opencode.el
+
+# User sends a message
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.updated","properties":{"info":{"id":"msg_c709b987f001_user","sessionID":"ses_38f646bdbffe_test","role":"user","time":{"created":1771415771263},"agent":"build","model":{"providerID":"anthropic","modelID":"claude-opus-4-6"}}}}}
+
+# User text part (no delta — rendered via refresh, which is mocked.
+# In real sessions, user text appears via optimistic insert or refresh.)
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_user_text","sessionID":"ses_38f646bdbffe_test","messageID":"msg_c709b987f001_user","type":"text","text":"reply with exactly: hello world"}}}}
+
+# Note: user text is NOT asserted here because it requires a full
+# refresh to render (which is mocked in the test framework).
+# Only streaming assistant deltas are visible without refresh.
+
+# Session becomes busy
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"session.status","properties":{"sessionID":"ses_38f646bdbffe_test","status":{"type":"busy"}}}}
+:assert-busy
+
+# Assistant message created (empty)
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.updated","properties":{"info":{"id":"msg_asst1","sessionID":"ses_38f646bdbffe_test","role":"assistant","time":{"created":1771415771266},"parentID":"msg_c709b987f001_user","modelID":"claude-opus-4-6","providerID":"anthropic","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}}}
+
+# Step start
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_step_start","sessionID":"ses_38f646bdbffe_test","messageID":"msg_asst1","type":"step-start","snapshot":"8edaa204d6d3"}}}}
+
+# Empty text part (bootstrap)
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_text1","sessionID":"ses_38f646bdbffe_test","messageID":"msg_asst1","type":"text","text":"","time":{"start":1771415789728}}}}}
+
+# Streaming delta 1
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_text1","sessionID":"ses_38f646bdbffe_test","messageID":"msg_asst1","type":"text","text":"hello","time":{"start":1771415789728}},"delta":"hello"}}}
+
+:wait 100
+:assert-contains hello
+
+# Streaming delta 2
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_text1","sessionID":"ses_38f646bdbffe_test","messageID":"msg_asst1","type":"text","text":"hello world","time":{"start":1771415789728}},"delta":" world"}}}
+
+:assert-contains hello world
+
+# Finalized text part
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_text1","sessionID":"ses_38f646bdbffe_test","messageID":"msg_asst1","type":"text","text":"hello world","time":{"start":1771415789728,"end":1771415789728}}}}}
+
+# Step finish
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"message.part.updated","properties":{"part":{"id":"prt_step_finish","sessionID":"ses_38f646bdbffe_test","messageID":"msg_asst1","type":"step-finish","reason":"stop","cost":0,"tokens":{"total":28332,"input":3,"output":5,"reasoning":0,"cache":{"read":16594,"write":11730}}}}}}
+
+# Session goes idle
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"session.status","properties":{"sessionID":"ses_38f646bdbffe_test","status":{"type":"idle"}}}}
+
+:sse {"directory":"/Users/bytedance/Documents/opencode.el","payload":{"type":"session.idle","properties":{"sessionID":"ses_38f646bdbffe_test"}}}
+
+:assert-idle
+:assert-contains hello world

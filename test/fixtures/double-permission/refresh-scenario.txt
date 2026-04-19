@@ -1,0 +1,24 @@
+# Scenario: Full buffer render from API message response (double-permission)
+# Uses :refresh to load the /session/:id/message response and render all messages.
+# Tests: user messages, assistant text, two bash tool calls (one completed, one running),
+# plus a pending permission popup for the second tool.
+
+:session ses_3386b5059ffeBogREim0gJGiDt
+:directory /Users/bytedance/Documents/opencode.el
+
+# Mock the pending permission API — server returns the second permission still pending
+:api GET /permission 200 [{"id":"per_cc79941b90010VFqjQG6u9o6MC","sessionID":"ses_3386b5059ffeBogREim0gJGiDt","permission":"bash","patterns":["git push"],"metadata":{},"always":["git push*"],"tool":{"messageID":"msg_cc79908f1001LhN5AIt9O72NLr","callID":"toolu_vrtx_01FfezigSd5dRjoNqmp9Vkqo"}}]
+
+# Load the saved API response and render the full buffer
+:refresh double-permission/messages.json
+
+# --- Assertions ---
+
+# Assistant text should be rendered
+:assert-contains I detect
+
+# Bash tool should show the command
+:assert-contains git push
+
+# Permission popup should be displayed (from /permission/ API)
+:assert-contains git push

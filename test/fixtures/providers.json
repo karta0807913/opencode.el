@@ -1,0 +1,89 @@
+{
+  "all": [
+    {
+      "id": "anthropic",
+      "name": "Anthropic",
+      "api": "https://api.anthropic.com",
+      "env": ["ANTHROPIC_API_KEY"],
+      "npm": "@ai-sdk/anthropic",
+      "models": {
+        "claude-opus-4-6": {
+          "name": "Claude Opus 4.6",
+          "capabilities": {
+            "reasoning": true
+          },
+          "limit": {
+            "context": 200000,
+            "output": 32000
+          },
+          "variants": {
+            "low": {
+              "thinking": {
+                "type": "adaptive"
+              },
+              "effort": "low"
+            },
+            "medium": {
+              "thinking": {
+                "type": "adaptive"
+              },
+              "effort": "medium"
+            },
+            "high": {
+              "thinking": {
+                "type": "adaptive"
+              },
+              "effort": "high"
+            },
+            "max": {
+              "thinking": {
+                "type": "adaptive"
+              },
+              "effort": "max"
+            }
+          }
+        },
+        "claude-sonnet-4-20250514": {
+          "name": "Claude Sonnet 4",
+          "capabilities": {
+            "reasoning": true
+          },
+          "limit": {
+            "context": 200000,
+            "output": 64000
+          },
+          "variants": {
+            "high": {
+              "thinking": {
+                "type": "enabled",
+                "budgetTokens": 16000
+              }
+            },
+            "max": {
+              "thinking": {
+                "type": "enabled",
+                "budgetTokens": 31999
+              }
+            }
+          }
+        },
+        "claude-haiku-4-5": {
+          "name": "Claude Haiku 4.5",
+          "capabilities": {
+            "reasoning": false
+          },
+          "limit": {
+            "context": 200000,
+            "output": 8192
+          },
+          "variants": {}
+        }
+      }
+    }
+  ],
+  "default": {
+    "providerID": "anthropic",
+    "modelID": "claude-sonnet-4-20250514"
+  },
+  "connected": ["anthropic"]
+}

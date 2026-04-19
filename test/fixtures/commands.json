@@ -1,0 +1,26 @@
+[
+  {
+    "name": "init",
+    "description": "Initialize AGENTS.md",
+    "agent": "build",
+    "hints": ["/init"],
+    "subtask": false,
+    "mcp": false
+  },
+  {
+    "name": "compact",
+    "description": "Compact conversation history",
+    "agent": "compaction",
+    "hints": ["/compact"],
+    "subtask": false,
+    "mcp": false
+  },
+  {
+    "name": "bug",
+    "description": "Report a bug",
+    "agent": "build",
+    "hints": ["/bug"],
+    "subtask": false,
+    "mcp": false
+  }
+]
