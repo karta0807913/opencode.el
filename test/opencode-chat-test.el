@@ -190,6 +190,237 @@ OVERRIDES is a plist merged on top of defaults."
   (should (commandp (keymap-lookup opencode-chat-message-map "q")))
   (should (commandp (keymap-lookup opencode-chat-message-map "TAB"))))
 
+(ert-deftest opencode-chat-user-keymap-is-parent-of-all-three ()
+  "The public `opencode-chat-user-keymap' is the parent of every internal chat keymap.
+
+This pins the parent-keymap contract.  If this fails, user bindings
+added to `opencode-chat-user-keymap' will not propagate to chat buffers
+(no fall-through), and users have no way to add bindings that span the
+three-region split (input area / message area / major-mode fallback)."
+  (should (keymapp opencode-chat-user-keymap))
+  (should (eq (keymap-parent opencode-chat-mode-map)
+              opencode-chat-user-keymap))
+  (should (eq (keymap-parent opencode-chat-message-map)
+              opencode-chat-user-keymap))
+  (should (eq (keymap-parent opencode-chat-input-map)
+              opencode-chat-user-keymap)))
+
+(ert-deftest opencode-chat-user-keymap-binding-propagates-to-all-regions ()
+  "A binding added to `opencode-chat-user-keymap' resolves via all three child maps.
+
+Because the user-keymap is the parent of all three chat keymaps,
+any key unbound in the children falls through to the parent.  This
+test verifies that fall-through works for a fresh key in all three
+maps.  If this fails, users who add bindings to the parent keymap
+will see them ignored in one or more regions of the chat buffer."
+  ;; Use a key no child map binds: "C-c M-x M-x" — clearly free.
+  (let ((test-key "C-c M-x M-x")
+        (test-cmd (lambda () (interactive) 'opencode-test-user-keymap)))
+    (unwind-protect
+        (progn
+          (keymap-set opencode-chat-user-keymap test-key test-cmd)
+          ;; All three children should resolve the key via the parent.
+          (should (eq (keymap-lookup opencode-chat-mode-map test-key) test-cmd))
+          (should (eq (keymap-lookup opencode-chat-message-map test-key) test-cmd))
+          (should (eq (keymap-lookup opencode-chat-input-map test-key) test-cmd)))
+      (keymap-unset opencode-chat-user-keymap test-key t))))
+
+(ert-deftest opencode-chat-unbound-keys-removes-from-all-three-maps ()
+  "Listing a key in `opencode-chat-unbound-keys' removes it from all three chat keymaps.
+
+The defcustom's `:set' handler re-applies defaults and then unbinds
+the listed keys with the REMOVE flag, so `keymap-lookup' returns nil
+on each map and the key falls through to the parent keymap (here,
+eventually to the global `previous-line' binding for C-p).
+
+If this fails, users cannot recover standard bindings like C-p →
+`previous-line' even when they explicitly ask for it."
+  (let ((saved (default-value 'opencode-chat-unbound-keys)))
+    (unwind-protect
+        (progn
+          (customize-set-variable 'opencode-chat-unbound-keys '("C-p"))
+          ;; All three maps must have the C-p binding REMOVED, not nil-shadowed.
+          (should-not (keymap-lookup opencode-chat-mode-map "C-p"))
+          (should-not (keymap-lookup opencode-chat-message-map "C-p"))
+          (should-not (keymap-lookup opencode-chat-input-map "C-p")))
+      (customize-set-variable 'opencode-chat-unbound-keys saved))))
+
+(ert-deftest opencode-chat-unbound-keys-use-package-custom-flow ()
+  "Simulate the `use-package' `:custom' flow for `opencode-chat-unbound-keys'.
+
+`use-package' `:custom' expands to `customize-set-variable' calls
+that run after the library is loaded.  This test pins that (a) the
+`:set' handler fires and the unbinds propagate to all three internal
+chat keymaps, and (b) a subsequent binding added to
+`opencode-chat-user-keymap' (simulating the `:config' stage) is
+reachable from all three regions via parent resolution.
+
+If this fails, users who configure opencode via `use-package' silently
+lose their overrides — their C-p would still fire
+`opencode-command-select' despite their config saying otherwise, or
+the rebind in `:config' would not be visible in one of the three
+chat regions.  Pins the canonical pattern documented in
+\"Customizing Chat Keybindings\" in README.md."
+  (let ((saved (default-value 'opencode-chat-unbound-keys))
+        (test-rebind-key "C-c x p")
+        (test-cmd (lambda () (interactive) 'test-use-package-rebind)))
+    (unwind-protect
+        (progn
+          ;; Step 1: simulate `:custom (opencode-chat-unbound-keys '("C-p"))'.
+          (customize-set-variable 'opencode-chat-unbound-keys '("C-p"))
+          ;; All three maps must have C-p removed.
+          (should-not (keymap-lookup opencode-chat-mode-map "C-p"))
+          (should-not (keymap-lookup opencode-chat-message-map "C-p"))
+          (should-not (keymap-lookup opencode-chat-input-map "C-p"))
+
+          ;; Step 2: simulate `:config (keymap-set opencode-chat-user-keymap ...)'.
+          (keymap-set opencode-chat-user-keymap test-rebind-key test-cmd)
+          ;; The rebind must be reachable from all three chat regions
+          ;; via parent-keymap resolution.
+          (should (eq (keymap-lookup opencode-chat-mode-map test-rebind-key)
+                      test-cmd))
+          (should (eq (keymap-lookup opencode-chat-message-map test-rebind-key)
+                      test-cmd))
+          (should (eq (keymap-lookup opencode-chat-input-map test-rebind-key)
+                      test-cmd)))
+      ;; Cleanup: remove the user-keymap binding and restore defaults.
+      (keymap-unset opencode-chat-user-keymap test-rebind-key t)
+      (customize-set-variable 'opencode-chat-unbound-keys saved))))
+
+
+(ert-deftest opencode-chat-unbound-keys-idempotent-on-mode-reenter ()
+  "Calling `opencode-chat-mode' twice does not error and keeps unbinds consistent.
+
+`define-derived-mode' may run its body more than once per buffer
+(e.g. mode resets).  The apply-unbound-keys helper must be safely
+re-invokable.  If this fails, a buffer reuse could double-restore
+defaults and miss subsequent unbinds, or signal an error."
+  (let ((saved (default-value 'opencode-chat-unbound-keys)))
+    (unwind-protect
+        (progn
+          (customize-set-variable 'opencode-chat-unbound-keys '("C-p"))
+          (opencode-test-with-temp-buffer "*test-unbound-idempotent*"
+            (opencode-chat-mode)
+            (opencode-chat-mode)  ; Re-enter — must not error.
+            (should-not (keymap-lookup opencode-chat-mode-map "C-p"))
+            (should-not (keymap-lookup opencode-chat-input-map "C-p"))))
+      (customize-set-variable 'opencode-chat-unbound-keys saved))))
+
+(ert-deftest opencode-chat-unbound-keys-defaults-restored-when-list-changes ()
+  "Removing a key from `opencode-chat-unbound-keys' restores its default binding.
+
+The `:set' handler captures defaults at load time and restores them
+before applying the current unbind set.  This makes customization
+fully reversible.  If this fails, unbinding C-p once permanently
+breaks it until Emacs is restarted — the user cannot toggle."
+  (let ((saved (default-value 'opencode-chat-unbound-keys)))
+    (unwind-protect
+        (progn
+          ;; Remove C-p from all three maps
+          (customize-set-variable 'opencode-chat-unbound-keys '("C-p"))
+          (should-not (keymap-lookup opencode-chat-mode-map "C-p"))
+          ;; Now set back to nil — default binding should reappear
+          (customize-set-variable 'opencode-chat-unbound-keys nil)
+          (should (eq (keymap-lookup opencode-chat-mode-map "C-p")
+                      'opencode-command-select))
+          (should (eq (keymap-lookup opencode-chat-message-map "C-p")
+                      'opencode-command-select))
+          (should (eq (keymap-lookup opencode-chat-input-map "C-p")
+                      'opencode-command-select)))
+      (customize-set-variable 'opencode-chat-unbound-keys saved))))
+
+(ert-deftest opencode-chat-default-c-p-unchanged-when-not-customized ()
+  "With `opencode-chat-unbound-keys' nil (default), C-p stays bound to `opencode-command-select'.
+
+Regression guard: if a future refactor accidentally unbinds C-p in
+the default configuration, this test catches it.  Existing users
+rely on C-p opening the command palette."
+  (let ((saved (default-value 'opencode-chat-unbound-keys)))
+    (unwind-protect
+        (progn
+          (customize-set-variable 'opencode-chat-unbound-keys nil)
+          (should (eq (keymap-lookup opencode-chat-mode-map "C-p")
+                      'opencode-command-select))
+          (should (eq (keymap-lookup opencode-chat-message-map "C-p")
+                      'opencode-command-select))
+          (should (eq (keymap-lookup opencode-chat-input-map "C-p")
+                      'opencode-command-select)))
+      (customize-set-variable 'opencode-chat-unbound-keys saved))))
+
+(ert-deftest opencode-chat-unbound-keys-set-propagates-to-live-buffer ()
+  "Changing `opencode-chat-unbound-keys' at runtime affects already-open chat buffers.
+
+The three internal keymaps are shared (not buffer-local), so the
+`:set' handler mutating them changes key resolution in every live
+chat buffer immediately.  If this fails, users who change
+`opencode-chat-unbound-keys' via `customize' or `setopt' after
+opening a chat buffer will see no effect until they reopen — poor UX."
+  (let ((saved (default-value 'opencode-chat-unbound-keys)))
+    (unwind-protect
+        (opencode-test-with-temp-buffer "*test-live-propagate*"
+          (opencode-chat-mode)
+          ;; Default: C-p is bound to opencode-command-select
+          (should (eq (keymap-lookup opencode-chat-mode-map "C-p")
+                      'opencode-command-select))
+          ;; Change the defcustom at runtime
+          (customize-set-variable 'opencode-chat-unbound-keys '("C-p"))
+          ;; The live buffer's shared keymap should reflect the change
+          (should-not (keymap-lookup opencode-chat-mode-map "C-p"))
+          (should-not (keymap-lookup opencode-chat-input-map "C-p")))
+      (customize-set-variable 'opencode-chat-unbound-keys saved))))
+
+(ert-deftest opencode-chat-unbound-keys-multiple-keys ()
+  "Multiple keys in `opencode-chat-unbound-keys' are all removed from all three maps.
+
+Pins that the apply loop iterates the full list, not just the
+first element."
+  (let ((saved (default-value 'opencode-chat-unbound-keys)))
+    (unwind-protect
+        (progn
+          (customize-set-variable 'opencode-chat-unbound-keys '("C-p" "C-t"))
+          (should-not (keymap-lookup opencode-chat-mode-map "C-p"))
+          (should-not (keymap-lookup opencode-chat-mode-map "C-t"))
+          (should-not (keymap-lookup opencode-chat-message-map "C-p"))
+          (should-not (keymap-lookup opencode-chat-message-map "C-t"))
+          (should-not (keymap-lookup opencode-chat-input-map "C-p"))
+          (should-not (keymap-lookup opencode-chat-input-map "C-t")))
+      (customize-set-variable 'opencode-chat-unbound-keys saved))))
+
+(ert-deftest opencode-chat-user-keymap-autoload-stub-exists ()
+  "The autoload stub in `opencode-autoloads.el' defines `opencode-chat-user-keymap'.
+
+Regression guard: users often bind `opencode-chat-user-keymap' or set
+`opencode-chat-unbound-keys' in their init file BEFORE `opencode-chat.el'
+is loaded.  If the autoload stub is missing, this produces the error
+\"Symbol's value as variable is void: opencode-chat-user-keymap\" at
+startup.  This test is a guardrail around the manual autoload entries
+in `opencode-autoloads.el' — if the file is regenerated and the stubs
+are accidentally dropped, this test catches it before release."
+  ;; The autoloads file must have been loaded and both symbols must be
+  ;; bound.  In the test environment, `opencode-chat' itself has been
+  ;; loaded so the "real" defvar-keymap has taken effect — but the
+  ;; autoload stub was what made the symbol available BEFORE load.
+  ;; We verify the symbols exist and carry usable values.
+  (should (boundp 'opencode-chat-user-keymap))
+  (should (keymapp opencode-chat-user-keymap))
+  (should (boundp 'opencode-chat-unbound-keys))
+  ;; The autoloads file should contain the stubs (documentation-guard,
+  ;; since loading opencode-chat overwrites the stub with the real form).
+  (let ((autoloads-file (expand-file-name
+                         "opencode-autoloads.el"
+                         (file-name-directory
+                          (or (locate-library "opencode-chat")
+                              (locate-library "opencode-autoloads"))))))
+    (should (file-readable-p autoloads-file))
+    (with-temp-buffer
+      (insert-file-contents autoloads-file)
+      (goto-char (point-min))
+      (should (search-forward "opencode-chat-user-keymap" nil t))
+      (goto-char (point-min))
+      (should (search-forward "opencode-chat-unbound-keys" nil t))
+      (goto-char (point-min))
+      (should (search-forward "(custom-autoload 'opencode-chat-unbound-keys" nil t)))))
+
 (ert-deftest opencode-chat-mode-sets-word-wrap ()
   "Chat mode enables word wrap."
   (opencode-test-with-temp-buffer "*test-chat-mode*"

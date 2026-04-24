@@ -102,6 +102,25 @@ Same behavior as `server.instance.disposed'." t)
 
 ;;; Generated autoloads from opencode-chat.el
 
+(defvar opencode-chat-user-keymap (make-sparse-keymap) "\
+Public parent keymap for all `opencode-chat-mode' keymaps.
+Installed as the parent of `opencode-chat-mode-map',
+`opencode-chat-message-map', and `opencode-chat-input-map' when
+`opencode-chat' is loaded.  Bindings added here propagate to all three
+regions.  Combine with `opencode-chat-unbound-keys' to override package
+defaults.  See `opencode-chat.el' for full documentation.
+
+Autoloaded so users can `keymap-set' into this variable from init
+files before `opencode-chat' has been loaded.")
+(defvar opencode-chat-unbound-keys nil "\
+Keys to unbind from every internal `opencode-chat-mode' keymap.
+A list of key descriptions accepted by `keymap-set'.  See
+`opencode-chat.el' for full documentation.
+
+Autoloaded so users can set this via `setq', `setopt', or
+`customize-set-variable' from init files before `opencode-chat' has
+been loaded; the apply pass runs on first `opencode-chat-mode' invocation.")
+(custom-autoload 'opencode-chat-unbound-keys "opencode-chat" nil)
 (register-definition-prefixes "opencode-chat" '("opencode-chat-"))
 
 
