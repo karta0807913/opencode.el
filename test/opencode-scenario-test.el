@@ -1724,6 +1724,38 @@ so keybindings like C-p (command-select) stop working on pasted text."
            (pos (+ start 3)))  ; middle of "pasted text"
       (should (eq (get-text-property pos 'keymap) opencode-chat-input-map)))))
 
+(ert-deftest opencode-scenario-yanked-text-honors-unbound-keys ()
+  "Yanked text in the input area honors `opencode-chat-unbound-keys'.
+
+When the user yanks text into the input area, the `after-change-functions'
+hook reapplies `opencode-chat-input-map' to the new text.  That map is
+a shared (not copied) reference, so any unbinds installed via
+`opencode-chat-unbound-keys' take effect on yanked text too.
+
+If this fails, users who unbind C-p (expecting it to become
+`previous-line' in the chat buffer) would see C-p behave inconsistently
+on pasted vs typed text — pasted text would still fire
+`opencode-command-select' while typed text would fall through to
+`previous-line'.  Pins the interaction between
+`opencode-chat--input-after-change' and `opencode-chat-unbound-keys'."
+  (let ((saved (default-value 'opencode-chat-unbound-keys)))
+    (unwind-protect
+        (progn
+          (customize-set-variable 'opencode-chat-unbound-keys '("C-p"))
+          (opencode-scenario-with-replay
+              (concat
+               ":session ses_yank_unbound\n"
+               ":eval (goto-char (opencode-chat--input-content-start))\n"
+               ":eval (let ((inhibit-read-only t)) (insert \"yanked\"))\n")
+            (let* ((start (opencode-chat--input-content-start))
+                   (pos (+ start 3)))
+              ;; Yanked text carries the input map (via after-change hook).
+              (should (eq (get-text-property pos 'keymap) opencode-chat-input-map))
+              ;; And that map has C-p removed, so lookup returns nil
+              ;; (fall-through to parent / global).
+              (should-not (keymap-lookup opencode-chat-input-map "C-p")))))
+      (customize-set-variable 'opencode-chat-unbound-keys saved))))
+
 (ert-deftest opencode-scenario-s-tab-cycles-agent-backward ()
   "S-TAB in the input area must cycle through agents in reverse order.
 TAB cycles forward; S-TAB should cycle backward for symmetry."
