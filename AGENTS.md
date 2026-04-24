@@ -353,6 +353,72 @@ opencode-chat--find-buffer    ; cross-module internal
 - **Right-alignment**: Use `(space :align-to (- right N))` display property. `mode-line-format-right-align` does NOT work in `header-line-format` (Emacs bug #71835)
 - **Marker insertion types**: When creating markers that must stay before subsequently-inserted content (e.g. `messages-end` before the input area), use `nil` insertion type initially, render surrounding content, THEN switch to `t` with `set-marker-insertion-type`
 
+### Keymap Customization (User Overrides)
+
+`opencode-chat-mode` has three active keymaps (see "Chat Buffer Layout" and "Common Mistakes" #22):
+
+| Keymap | Installed as | Region |
+|---|---|---|
+| `opencode-chat-mode-map` | Major-mode map | Whole buffer (fallback) |
+| `opencode-chat-message-map` | Text property `'keymap` | Read-only message area |
+| `opencode-chat-input-map` | Text property `'keymap` | Editable input area |
+
+Emacs resolves text-property `'keymap` entries **before** major- and minor-mode maps, so rebinding only the mode-map is insufficient. Package code keeps this split load-bearing because the input area needs `self-insert-command` while the read-only region needs single-letter navigation (`q`, `g`, `G`, `TAB`).
+
+**Two public extension points** let users override bindings consistently across all three regions:
+
+1. **`opencode-chat-user-keymap`** — a parent keymap installed as `set-keymap-parent` of all three internal maps. Any binding added here propagates to all three regions whenever the child map doesn't have an explicit binding for the same key. This is the right place for *additive* bindings (new keys that don't collide with package defaults).
+
+2. **`opencode-chat-unbound-keys`** — a `defcustom` listing keys to remove from every internal map. The apply helper uses `keymap-unset MAP KEY t` (the `remove` flag), which truly deletes the binding so the parent/global map resolves it. Defaults to `nil`. Runtime-reactive via a custom `:set` handler that re-applies unbinds on live buffers. Defaults are captured at load time into `opencode-chat--default-bindings-alist` so changes are fully reversible.
+
+**Canonical example — recover `C-p` to `previous-line`:**
+
+```elisp
+(setq opencode-chat-unbound-keys '("C-p"))
+(keymap-set opencode-chat-user-keymap "C-c p" #'opencode-command-select)
+```
+
+**Complete `use-package` example** (recommended form):
+
+```elisp
+(use-package opencode
+  ;; `:bind-keymap' is the correct idiom for binding a prefix to a keymap.
+  ;; Using bare `:bind' with a keymap on the right side is unreliable
+  ;; across use-package versions.
+  :bind-keymap ("C-c c o" . opencode-command-map)
+  :custom
+  ;; Works via :custom because the defcustom is registered in
+  ;; opencode-autoloads.el via `custom-autoload', so the :set handler
+  ;; fires during library load via `custom-initialize-reset'.
+  (opencode-chat-unbound-keys '("C-p"))
+  (opencode-window-display 'side)
+  (opencode-window-side 'right)
+  ;; CAVEAT: `opencode-keymap-prefix' is consumed once at `defvar' time
+  ;; and cannot be changed via :custom after load.  Use `:bind-keymap'
+  ;; above with your desired prefix instead; ignore this variable unless
+  ;; you `setq' it BEFORE requiring opencode.  (Tracked separately as
+  ;; the `fix-keymap-prefix-reactive' OpenSpec change.)
+  :config
+  ;; Add user bindings AFTER load so the parent-keymap wiring is complete.
+  (keymap-set opencode-chat-user-keymap "C-c c o p"
+              #'opencode-command-select))
+```
+
+**Why the split between `:custom` and `:config`?**
+
+- `:custom` values go through `customize-set-variable`, which invokes
+  the defcustom's `:set` handler.  For `opencode-chat-unbound-keys`,
+  the autoloaded `custom-autoload` registration combined with the
+  `:set`-handler guard (no-op when the apply helper isn't yet defined)
+  makes pre-load configuration safe.
+- `:config` runs AFTER the library has been loaded, which means
+  `opencode-chat-user-keymap` is fully wired as the parent of all
+  three chat keymaps.  Add custom bindings to it here — they will
+  resolve correctly from the input area, message area, and mode-map
+  fallback regions.
+
+For package-internal bindings, keep them in the child maps (mode/message/input) — the user-keymap is for users, not for us. New internal bindings that genuinely span all three regions are rare; when they exist, prefer placing them in the child map closest to their region and let users opt in via the override points above.
+
 ## OpenCode Server Architecture
 
 opencode.el implements the equivalent of `opencode attach` — an external client connecting
@@ -1402,6 +1468,8 @@ v Session: "Parent Task" (ses_abc...)
 
 46. **`url-request-data` and every `url-request-extra-headers` value MUST be unibyte (Bug#23750)** — `url-http-create-request' builds the outgoing request by `concat'ing the header block with `url-http-data' and then asserts `(= (string-bytes request) (length request))'.  The assertion is a proxy for "this string is unibyte".  If ANY piece — a header value, the body, a user-agent fragment — is multibyte, `concat' promotes the whole request to multibyte, the byte/length counts disagree, and url.el signals `"Multibyte text in HTTP request"'.  A previous workaround escaped every non-ASCII char in the JSON body as `\\uXXXX` via `opencode-api--json-escape-non-ascii', which bloated CJK payloads ~10× and left multibyte header values (e.g. `X-OpenCode-Directory: /Users/项目`) still broken.  The canonical fix lives in `opencode-api.el`: a single `opencode-api--to-unibyte' helper runs `encode-coding-string ... 'utf-8 t' iff the input is multibyte (unibyte inputs pass through untouched).  `opencode-api--build-headers' coerces EVERY header value through it; `opencode-api--request' coerces the serialized body (which is already unibyte from `json-serialize', but the belt-and-braces call costs nothing).  `json-serialize' itself is documented to return a unibyte UTF-8 byte sequence — do NOT add another escape layer.  Guarded by `opencode-api-to-unibyte-idempotent', `opencode-api-json-serialize-returns-unibyte-utf8', `opencode-api-headers-values-are-unibyte', and the end-to-end `opencode-api-request-survives-url-http-create-request' which feeds a multibyte directory header through the real `url-http-create-request'.
 
+47. **User chat-mode keybinding overrides must go through `opencode-chat-user-keymap` and `opencode-chat-unbound-keys` — not per-map hooks** — `opencode-chat-mode' has THREE active keymaps (major-mode `opencode-chat-mode-map', plus `opencode-chat-message-map' and `opencode-chat-input-map' installed as text-property `keymap').  Text-property keymaps win over mode maps (see #22), so unbinding C-p in `opencode-chat-mode-hook' does NOTHING when point is on read-only message text or in the input area.  The canonical extension surface is: (a) `opencode-chat-user-keymap' — public parent keymap of all three internal maps; any additive binding added here propagates to all three regions; (b) `opencode-chat-unbound-keys' defcustom — listed keys are truly removed (via `keymap-unset MAP KEY t', the REMOVE flag) from all three maps so the parent/global binding takes over.  The `:set' handler on the defcustom makes runtime changes immediately visible in live buffers, and `opencode-chat--default-bindings-alist' (captured at load time) lets the apply pass restore defaults so unbind toggles are reversible.  Do NOT re-invent per-map override logic in user-facing code or docs — route users at these two symbols.  When adding new package-internal bindings, keep them in the child maps (mode/message/input); the user-keymap is reserved for users.
+
 ## Debug Logging
 All debug tracing goes to a dedicated `*opencode: debug*` buffer, NOT `*Messages*`.
 Controlled by a single defcustom — disabled by default.
@@ -1739,7 +1807,11 @@ Never add a single-dash private.  Never invent a new top-level namespace.
 - **Bind a key** — public keys go in `opencode-chat-mode-map` (input area)
   or attach via text-property `keymap` for message-area-only bindings.
   Three-layer architecture: mode-map, message-map (text prop),
-  input-map (text prop).  See "Keymap Architecture" in memory.
+  input-map (text prop).  See "Keymap Architecture" in memory.  Package
+  bindings live in the child maps; do NOT put them in
+  `opencode-chat-user-keymap' — that symbol is reserved for user
+  overrides.  New keys that genuinely span all three regions are rare;
+  prefer placing them in the child closest to their region.
 - **React to an SSE event** — add a handler in the right module, subscribe
   via global hook (SSE dispatch is global, not buffer-local).  Handler
   must filter by `(opencode-chat--session-id)` before acting.  See "SSE
