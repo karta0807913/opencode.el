@@ -296,8 +296,49 @@ Format: *opencode: <project>/<title>*"
 
 ;;; --- Chat mode ---
 
+;;;###autoload
+(defvar-keymap opencode-chat-user-keymap
+  :doc "Public parent keymap for all `opencode-chat-mode' keymaps.
+
+This is the single extension point for user-level customization of
+keybindings in the chat buffer.  It is installed as the
+`keymap-parent' of all three internal chat keymaps:
+
+  - `opencode-chat-mode-map'     (whole buffer, major-mode map)
+  - `opencode-chat-message-map'  (read-only message area, text property)
+  - `opencode-chat-input-map'    (editable input area, text property)
+
+Bindings added here propagate to all three regions automatically
+whenever the child map does not have an explicit binding for the
+same key.  Because Emacs keymap lookup resolves the child's explicit
+bindings FIRST, parent bindings only shadow global/fall-through keys;
+they cannot override an explicit binding in a child map.
+
+To REMOVE an explicit binding from a child map so your parent binding
+(or the global binding like `previous-line' for C-p) takes effect, add
+the key to `opencode-chat-unbound-keys'.
+
+Example — recover C-p to `previous-line' and move the command palette
+to C-c p:
+
+    (setq opencode-chat-unbound-keys \\='(\"C-p\"))
+    (keymap-set opencode-chat-user-keymap \"C-c p\" #\\='opencode-command-select)
+
+Do NOT reparent this keymap via `set-keymap-parent' unless you also
+chain through its previous parent; doing so breaks the override
+contract for all three child maps.")
+
 (defvar-keymap opencode-chat-mode-map
-  :doc "Keymap for `opencode-chat-mode'."
+  :doc "Keymap for `opencode-chat-mode'.
+
+This is the fallback (major-mode) keymap.  It is active whenever
+point is outside a text-property keymap region (there are few such
+positions in the chat buffer — most of the buffer carries either
+`opencode-chat-message-map' or `opencode-chat-input-map').
+
+To override bindings here without editing the package, add bindings
+to `opencode-chat-user-keymap' (the parent keymap) or list keys in
+`opencode-chat-unbound-keys' to expose the global/parent fall-through."
   "C-c C-c" #'opencode-chat--send
   "C-c C-k" #'opencode-chat-abort
   "C-c C-a" #'opencode-chat--attach
@@ -349,13 +390,161 @@ Shows a read-only label and a [Parent] button for navigation."
     (insert (propertize "\n" 'read-only t))))
 
 (defvar-keymap opencode-chat-message-map
-  :doc "Keymap for the read-only message area (applied via text property)."
+  :doc "Keymap for the read-only message area (applied via text property).
+
+This keymap is installed as a `keymap' text property on the
+pre-input region of the chat buffer, so Emacs resolves its bindings
+BEFORE any minor-mode map or the major-mode `opencode-chat-mode-map'.
+
+To override bindings here without editing the package, add bindings
+to `opencode-chat-user-keymap' (the parent keymap) or list keys in
+`opencode-chat-unbound-keys' to expose the global/parent fall-through."
   "g" #'opencode-chat--refresh
   "G" #'opencode-chat--goto-latest
   "q" #'opencode-chat--quit-or-goto-parent
   "C-p" #'opencode-command-select
   "C-t" #'opencode-chat--cycle-variant
   "TAB" #'opencode-ui--toggle-section)
+
+;; Install the public parent keymap on all three chat keymaps.  This is
+;; the single extension point for user overrides — see the docstring of
+;; `opencode-chat-user-keymap' for the contract.  `opencode-chat-input-map'
+;; is defined in `opencode-chat-input.el', which is required at the top of
+;; this file, so it is guaranteed to be bound here.
+(set-keymap-parent opencode-chat-mode-map opencode-chat-user-keymap)
+(set-keymap-parent opencode-chat-message-map opencode-chat-user-keymap)
+(set-keymap-parent opencode-chat-input-map opencode-chat-user-keymap)
+
+;;; --- Keymap customization ---
+;;
+;; `opencode-chat-unbound-keys' lets users remove explicit bindings from
+;; all three chat keymaps so the parent keymap (`opencode-chat-user-keymap')
+;; or the global map takes over.  The trick: plain `keymap-unset' shadows
+;; the binding with nil instead of removing it, which still blocks the
+;; parent — we use `keymap-unset MAP KEY t' (the REMOVE flag) to truly
+;; delete the binding.
+;;
+;; Because removal is destructive, we capture the default bindings at
+;; load time into `opencode-chat--default-bindings-alist' so we can
+;; restore-then-remove on every `apply' pass.  This makes the `:set'
+;; handler fully reversible: setting the list to nil after removing
+;; C-p will re-bind C-p to `opencode-command-select'.
+
+(defvar opencode-chat--default-bindings-alist nil
+  "Snapshot of the default bindings on the three internal chat keymaps.
+An alist of the form ((MAP-SYMBOL . BINDINGS)...) where BINDINGS is a
+list of (KEY . DEFINITION) pairs captured at package load time.
+Used by `opencode-chat--apply-unbound-keys' to restore defaults before
+applying the current unbind set, so changes to `opencode-chat-unbound-keys'
+are reversible.")
+
+(defun opencode-chat--capture-default-bindings (map-sym)
+  "Return the top-level bindings of MAP-SYM as a list of (KEY . DEF) pairs.
+Only walks the map itself, not any parent.  Called once per map at
+load time to snapshot the package defaults."
+  (let ((map (symbol-value map-sym))
+        bindings)
+    ;; Temporarily detach the parent so `map-keymap' only sees the map's
+    ;; own bindings.  We restore the parent before returning.
+    (let ((parent (keymap-parent map)))
+      (unwind-protect
+          (progn
+            (set-keymap-parent map nil)
+            (map-keymap
+             (lambda (key def)
+               ;; `key' is an event (integer or symbol); wrap into a vector
+               ;; so it is accepted by `define-key'/`keymap-set'.
+               (push (cons (vector key) def) bindings))
+             map))
+        (set-keymap-parent map parent)))
+    (nreverse bindings)))
+
+;; Capture defaults now, before any user customization runs.
+(setq opencode-chat--default-bindings-alist
+      (list (cons 'opencode-chat-mode-map
+                  (opencode-chat--capture-default-bindings 'opencode-chat-mode-map))
+            (cons 'opencode-chat-message-map
+                  (opencode-chat--capture-default-bindings 'opencode-chat-message-map))
+            (cons 'opencode-chat-input-map
+                  (opencode-chat--capture-default-bindings 'opencode-chat-input-map))))
+
+(defun opencode-chat--restore-default-bindings ()
+  "Re-apply the snapshotted default bindings to all three chat keymaps.
+Called before `opencode-chat--apply-unbound-keys' so removing a key
+from `opencode-chat-unbound-keys' restores its original binding."
+  (dolist (entry opencode-chat--default-bindings-alist)
+    (let ((map (symbol-value (car entry)))
+          (bindings (cdr entry)))
+      (dolist (kv bindings)
+        (define-key map (car kv) (cdr kv))))))
+
+;; Forward declaration so the compiler doesn't warn on the reference
+;; below; the real `defcustom' follows `apply-unbound-keys' because the
+;; defcustom's `:set' handler refers to `apply-unbound-keys'.
+(defvar opencode-chat-unbound-keys)
+
+(defun opencode-chat--apply-unbound-keys ()
+  "Remove every key in `opencode-chat-unbound-keys' from the three chat keymaps.
+First restores the package-default bindings on all three maps (so the
+operation is fully reversible) and then calls `keymap-unset' with the
+REMOVE flag set to t for each listed key, on each map.  The REMOVE flag
+is critical: without it, the key would be shadowed by nil, which still
+blocks the parent keymap `opencode-chat-user-keymap' from resolving it.
+
+Idempotent: safe to call repeatedly on the same (or different) keymap
+state.  Called from `opencode-chat-mode' and from the `:set' handler
+on `opencode-chat-unbound-keys'."
+  (opencode-chat--restore-default-bindings)
+  (dolist (key opencode-chat-unbound-keys)
+    (ignore-errors (keymap-unset opencode-chat-mode-map key t))
+    (ignore-errors (keymap-unset opencode-chat-message-map key t))
+    (ignore-errors (keymap-unset opencode-chat-input-map key t))))
+
+(defun opencode-chat--unbound-keys-set (sym val)
+  "Custom `:set' handler for `opencode-chat-unbound-keys'.
+SYM is the symbol being set (always `opencode-chat-unbound-keys') and
+VAL is the new list of key descriptions.  Updates the variable via
+`set-default-toplevel-value', then re-applies the unbind pass so the
+three keymaps (which are shared across all live chat buffers) reflect
+the new value immediately.
+
+If the apply helper is not yet defined (e.g. the user set this
+variable in their init file before `opencode-chat' was loaded), the
+new value is stored but no unbind pass runs — `opencode-chat-mode'
+applies the value on its first invocation via its body."
+  (set-default-toplevel-value sym val)
+  (when (fboundp 'opencode-chat--apply-unbound-keys)
+    (opencode-chat--apply-unbound-keys)))
+
+;;;###autoload
+(defcustom opencode-chat-unbound-keys nil
+  "Keys to unbind from every internal `opencode-chat-mode' keymap.
+
+Each element is a key description (a string accepted by `keymap-set'
+and `kbd', e.g. \"C-p\" or \"M-RET\").  On every `opencode-chat-mode'
+initialization — and whenever this variable is set via `customize',
+`setopt', or `customize-set-variable' — each listed key is removed
+from all three internal maps:
+
+  - `opencode-chat-mode-map'
+  - `opencode-chat-message-map'
+  - `opencode-chat-input-map'
+
+Removal uses `keymap-unset MAP KEY t' (the REMOVE flag), which
+actually deletes the binding instead of shadowing it with nil.  This
+lets the parent keymap `opencode-chat-user-keymap' — or the global
+map if no parent binding exists — resolve the key instead.
+
+Combine with `opencode-chat-user-keymap' to remap keys:
+
+    (setq opencode-chat-unbound-keys \\='(\"C-p\"))
+    (keymap-set opencode-chat-user-keymap
+                \"C-c p\" #\\='opencode-command-select)
+
+Setting this to nil restores all package-default bindings."
+  :type '(repeat key)
+  :group 'opencode-chat
+  :set #'opencode-chat--unbound-keys-set)
 
 (define-derived-mode opencode-chat-mode nil "OpenCode Chat"
   "Major mode for OpenCode chat conversations.
@@ -365,6 +554,11 @@ Read-only protection is via text properties.
 
 \\{opencode-chat-mode-map}"
   :group 'opencode-chat
+  ;; Apply any user-requested unbinds from `opencode-chat-unbound-keys'.
+  ;; Shared keymap state, so this is a no-op for all but the first call
+  ;; — but calling it here ensures a fresh Emacs session that loads a
+  ;; saved-customization value picks up the unbinds on first buffer open.
+  (opencode-chat--apply-unbound-keys)
   (setq truncate-lines nil
         word-wrap t
         buffer-read-only nil)  ; We use text-property 'read-only instead

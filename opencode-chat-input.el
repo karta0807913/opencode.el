@@ -82,13 +82,22 @@ Called with one argument, a plist:
 
 (defvar-keymap opencode-chat-input-map
   :doc "Keymap for the editable input area (applied via text property).
+
+This keymap is installed as a `keymap' text property on the editable
+region of the chat buffer, so Emacs resolves its bindings BEFORE any
+minor-mode map or the major-mode `opencode-chat-mode-map'.
+
 Only binds keys that must override Evil state maps or need special
 handling at the read-only boundary.  All other input-area bindings
 \(C-c C-c, TAB, DEL, etc.) live in `opencode-chat-mode-map' and work
 fine because Evil doesn't shadow C-c prefixes or those keys.
 `kill-line' (C-k) works natively via `field' text properties (like eshell).
 `kill-whole-line' needs explicit binding because it always tries to
-delete the newline which belongs to the read-only `footer' field."
+delete the newline which belongs to the read-only `footer' field.
+
+To override bindings here without editing the package, add bindings
+to `opencode-chat-user-keymap' (the parent keymap) or list keys in
+`opencode-chat-unbound-keys' to expose the global/parent fall-through."
   "C-p" #'opencode-command-select
   "C-t" #'opencode-chat--cycle-variant
   "C-j" #'opencode-chat--input-history-next
