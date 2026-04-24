@@ -44,8 +44,12 @@ Clone the repository and add to your `load-path`:
 ```elisp
 (use-package opencode
   :straight (opencode :type git :host github :repo "karta0807913/opencode.el")
-  :bind ("C-c o" . opencode-command-map)
+  :bind-keymap ("C-c o" . opencode-command-map)
   :custom
+  ;; CAVEAT: `opencode-keymap-prefix' is consumed once at defvar time
+  ;; and cannot be changed via :custom after load.  Rely on
+  ;; `:bind-keymap' above with the desired prefix, and leave this at
+  ;; the default unless you `setq' it BEFORE loading opencode.
   (opencode-keymap-prefix "C-c o")
   (opencode-window-display 'side)
   (opencode-window-side 'right))
@@ -303,6 +307,10 @@ All customizable variables are in the `opencode` customization group. Use `M-x c
 (use-package opencode
   :custom
   ;; Core
+  ;; CAVEAT: `opencode-keymap-prefix' is consumed once at defvar time
+  ;; and cannot be changed via :custom after load.  Use `:bind-keymap'
+  ;; to bind your desired prefix instead (see the quickstart example
+  ;; near the top of this file).  Tracked as `fix-keymap-prefix-reactive'.
   (opencode-keymap-prefix "C-c o")
   (opencode-debug t)
   
@@ -318,10 +326,59 @@ All customizable variables are in the `opencode` customization group. Use `M-x c
   ;; Chat
   (opencode-chat-input-history-size 100)
   (opencode-chat-message-limit 200)
+  ;; Example: recover C-p to `previous-line' in chat buffers.
+  ;; See "Customizing Chat Keybindings" below for the full pattern.
+  (opencode-chat-unbound-keys '("C-p"))
   
   ;; Sidebar
-  (opencode-sidebar-session-limit 50))
+  (opencode-sidebar-session-limit 50)
+
+  :config
+  ;; Rebind the chat command palette to a new key after unbinding C-p.
+  ;; Bindings added to `opencode-chat-user-keymap' propagate to all three
+  ;; chat regions (input area, read-only message area, mode-map fallback).
+  (keymap-set opencode-chat-user-keymap "C-c o p"
+              #'opencode-command-select))
 ```
+
+### Customizing Chat Keybindings
+
+The chat buffer uses three layered keymaps — a major-mode map, a
+read-only message area map (installed as a text property), and an
+editable input-area map (also text-property).  Text-property keymaps
+win over mode maps in Emacs's lookup chain, so rebinding only
+`opencode-chat-mode-map` is not enough to override keys that appear in
+the input area or on message text.
+
+Two public extension points solve this:
+
+- **`opencode-chat-user-keymap`** — a parent keymap installed as the
+  `keymap-parent` of all three internal chat keymaps.  Bindings added
+  here propagate to all three regions.  Use this for *additive*
+  bindings that do not collide with package defaults.
+
+- **`opencode-chat-unbound-keys`** — a `defcustom` listing keys to
+  remove from every internal chat keymap.  Unlike a plain unbind, this
+  truly deletes the binding (via `keymap-unset MAP KEY t`), so the
+  parent keymap or the global map resolves the key instead.
+
+**Canonical pattern — recover `C-p` (previous-line) and remap the
+chat command palette:**
+
+```elisp
+(setq opencode-chat-unbound-keys '("C-p"))
+(keymap-set opencode-chat-user-keymap "C-c o p" #'opencode-command-select)
+```
+
+Both symbols are autoloaded, so they are safe to reference from your
+init file before `opencode` has been loaded.  The standard
+`use-package` forms work too — see the Example Configuration above
+for the full `:custom` + `:config` pattern.
+
+Changes to `opencode-chat-unbound-keys` via `customize`,
+`setopt`, or `customize-set-variable` apply immediately to live chat
+buffers; changes via plain `setq` take effect on the next chat
+buffer open.
 
 ## Hooks
 
