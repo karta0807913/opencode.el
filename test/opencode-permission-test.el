@@ -177,20 +177,31 @@
   "Verify opencode-permission--format-patterns-short works correctly."
   ;; Single short pattern
   (should (string= (opencode-permission--format-patterns-short
-                    ["emacs *"] "bash")
+                    :patterns ["emacs *"] :permission "bash")
                    "emacs *"))
   ;; Multiple patterns joined with "; "
   (should (string= (opencode-permission--format-patterns-short
-                    ["emacs *" "tee *"] "bash")
+                    :patterns ["emacs *" "tee *"] :permission "bash")
                    "emacs *; tee *"))
   ;; Empty patterns falls back to permission
   (should (string= (opencode-permission--format-patterns-short
-                    [] "bash")
+                    :patterns [] :permission "bash")
                    "bash"))
   ;; Nil patterns falls back to permission
   (should (string= (opencode-permission--format-patterns-short
-                    nil "file.write")
+                    :patterns nil :permission "file.write")
                    "file.write")))
+
+(ert-deftest opencode-permission-public-reply-can-select-id ()
+  "Verify hook users can reply to a chosen permission id via public API.
+This guards user code that handles `opencode-sse-permission-asked-hook' and
+answers a request without using the built-in popup state."
+  (opencode-test-with-mock-api
+    (opencode-test-mock-response "POST" "/permission/perm_selected/reply" 200 t)
+    (opencode-permission-reply :id "perm_selected" :choice "once")
+    (let ((req (opencode-test-last-request)))
+      (should (equal (nth 1 req) "/permission/perm_selected/reply"))
+      (should (equal (plist-get (nth 3 req) :reply) "once")))))
 
 ;;; --- Test: show returns nil for child sessions (no input area) ---
 

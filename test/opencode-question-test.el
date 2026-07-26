@@ -84,11 +84,13 @@ Returns a plist matching the `question.asked' SSE event properties."
       (should (opencode-test-buffer-contains-p "PostgreSQL"))
       (should (opencode-test-buffer-contains-p "SQLite"))
       (should (opencode-test-buffer-contains-p "MySQL"))
+      (should (opencode-test-buffer-contains-p "Others"))
       ;; Verify descriptions
       (should (opencode-test-buffer-contains-p "Full-featured relational database"))
       ;; Verify key hints
       (should (opencode-test-buffer-contains-p "Submit"))
-      (should (opencode-test-buffer-contains-p "Reject")))))
+      (should (opencode-test-buffer-contains-p "Reject"))
+      (should (opencode-test-buffer-contains-p "More")))))
 
 ;;; --- Test: Single select ---
 
@@ -175,6 +177,93 @@ Returns a plist matching the `question.asked' SSE event properties."
       ;; Buffer should show custom text
       (should (opencode-test-buffer-contains-p "Custom: MongoDB")))))
 
+(ert-deftest opencode-question-more-prefixes-selected-option ()
+  "Verify m/More pre-fills selected option and submits on minibuffer RET.
+This lets users extend an existing answer and send it immediately."
+  (let ((opencode-question--current nil)
+        (opencode-question--pending nil))
+    (opencode-test-with-mock-api
+      (opencode-test-mock-response "POST" "/question/question_xyz789/reply" 200 t)
+      (opencode-test-with-temp-buffer "*opencode: question*"
+        (opencode-question-mode)
+        (setq opencode-question--current (opencode-question-test--make-request))
+        (setq opencode-question--question-idx 0)
+        (setq opencode-question--answers nil)
+        (opencode-question--render-question)
+        (opencode-question--select-option 1)
+        (cl-letf (((symbol-function 'read-string)
+                   (lambda (_prompt initial &rest _)
+                     (should (equal initial "PostgreSQL - "))
+                     "PostgreSQL - use with pgvector")))
+          (opencode-question--add-more))
+        (let ((req (opencode-test-last-request)))
+          (should (equal (plist-get (nth 3 req) :answers)
+                         [["PostgreSQL - use with pgvector"]])))))))
+
+(ert-deftest opencode-question-more-others-starts-blank ()
+  "Verify m/More starts blank for Others and submits on minibuffer RET.
+This makes Others a pure free-form answer path."
+  (let ((opencode-question--current nil)
+        (opencode-question--pending nil))
+    (opencode-test-with-mock-api
+      (opencode-test-mock-response "POST" "/question/question_xyz789/reply" 200 t)
+      (opencode-test-with-temp-buffer "*opencode: question*"
+        (opencode-question-mode)
+        (setq opencode-question--current (opencode-question-test--make-request))
+        (setq opencode-question--question-idx 0)
+        (setq opencode-question--answers nil)
+        (opencode-question--render-question)
+        (opencode-question--select-option 4)
+        (cl-letf (((symbol-function 'read-string)
+                   (lambda (_prompt initial &rest _)
+                     (should-not initial)
+                     "Use DuckDB")))
+          (opencode-question--add-more))
+        (let ((req (opencode-test-last-request)))
+          (should (equal (plist-get (nth 3 req) :answers)
+                         [["Use DuckDB"]])))))))
+
+(ert-deftest opencode-question-more-no-selection-starts-blank ()
+  "Verify m/More starts blank and submits when no option is selected.
+This lets users type a free-form answer without first choosing Others."
+  (let ((opencode-question--current nil)
+        (opencode-question--pending nil))
+    (opencode-test-with-mock-api
+      (opencode-test-mock-response "POST" "/question/question_xyz789/reply" 200 t)
+      (opencode-test-with-temp-buffer "*opencode: question*"
+        (opencode-question-mode)
+        (setq opencode-question--current (opencode-question-test--make-request))
+        (setq opencode-question--question-idx 0)
+        (setq opencode-question--answers nil)
+        (opencode-question--render-question)
+        (cl-letf (((symbol-function 'read-string)
+                   (lambda (_prompt initial &rest _)
+                     (should-not initial)
+                     "No selection answer")))
+          (opencode-question--add-more))
+        (let ((req (opencode-test-last-request)))
+          (should (equal (plist-get (nth 3 req) :answers)
+                         [["No selection answer"]])))))))
+
+(ert-deftest opencode-question-submit-others-option ()
+  "Verify RET on the built-in Others option submits it without crashing.
+This guards the effective-options path added for free-form answers."
+  (let ((opencode-question--current nil)
+        (opencode-question--pending nil))
+    (opencode-test-with-mock-api
+      (opencode-test-mock-response "POST" "/question/question_xyz789/reply" 200 t)
+      (opencode-test-with-temp-buffer "*opencode: question*"
+        (opencode-question-mode)
+        (setq opencode-question--current (opencode-question-test--make-request))
+        (setq opencode-question--question-idx 0)
+        (setq opencode-question--answers nil)
+        (opencode-question--render-question)
+        (opencode-question--select-option 4)
+        (opencode-question--submit)
+        (let ((req (opencode-test-last-request)))
+          (should (equal (plist-get (nth 3 req) :answers)
+                         [["Others"]])))))))
+
 ;;; --- Test: Reply format ---
 
 (ert-deftest opencode-question-reply-format ()
@@ -204,6 +293,28 @@ Returns a plist matching the `question.asked' SSE event properties."
             (should (equal (plist-get body :answers)
                             [["PostgreSQL"]]))))))))
 
+(ert-deftest opencode-question-public-reply-can-select-id ()
+  "Verify hook users can reply to a chosen question id via public API.
+This guards user code that handles `opencode-sse-question-asked-hook' and
+answers a request without using the built-in popup state."
+  (opencode-test-with-mock-api
+    (opencode-test-mock-response "POST" "/question/question_selected/reply" 200 t)
+    (opencode-question-reply :id "question_selected" :answers '(("SQLite")))
+    (let ((req (opencode-test-last-request)))
+      (should (equal (nth 1 req) "/question/question_selected/reply"))
+      (should (equal (plist-get (nth 3 req) :answers) [["SQLite"]])))))
+
+(ert-deftest opencode-question-public-reject-can-select-id ()
+  "Verify hook users can reject a chosen question id via public API.
+This guards user code that handles `opencode-sse-question-asked-hook' and
+rejects a request without using the built-in popup state."
+  (opencode-test-with-mock-api
+    (opencode-test-mock-response "POST" "/question/question_selected/reject" 200 t)
+    (opencode-question-reject :id "question_selected" :message "no")
+    (let ((req (opencode-test-last-request)))
+      (should (equal (nth 1 req) "/question/question_selected/reject"))
+      (should (equal (plist-get (nth 3 req) :message) "no")))))
+
 
 ;;; --- Test: Reject ---
 
@@ -232,7 +343,7 @@ Returns a plist matching the `question.asked' SSE event properties."
 ;;; --- Test: Reject with message ---
 
 (ert-deftest opencode-question-reject-with-message ()
-  "Verify that reject-with-message sends POST with :message body."
+  "Verify internal reject-with-message still sends POST with :message body."
   (let ((opencode-question--current nil)
         (opencode-question--pending nil))
     (opencode-test-with-mock-api

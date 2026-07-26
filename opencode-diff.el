@@ -14,6 +14,7 @@
 (require 'diff-mode)
 (require 'seq)
 (require 'opencode-api)
+(require 'opencode-backend)
 (require 'opencode-ui)
 (require 'opencode-faces)
 (require 'opencode-log)
@@ -74,9 +75,7 @@ to preserve custom face names in text properties.
   "Fetch file diffs for SESSION-ID, optionally scoped to MESSAGE-ID.
 Returns a vector of diff plists, or nil on error."
   (condition-case err
-      (opencode-api-get-sync
-       (format "/session/%s/diff" session-id)
-       (when message-id `(("messageID" . ,message-id))))
+      (opencode-backend-get-diff-sync session-id message-id)
     (error
      (message "Failed to fetch diffs: %s" (error-message-string err))
      nil)))

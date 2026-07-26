@@ -46,6 +46,7 @@
 (require 'opencode-api)
 (require 'opencode-agent)
 (require 'opencode-config)
+(require 'opencode-backend)
 (require 'opencode-domain)
 (require 'opencode-event)
 (require 'opencode-sse)
@@ -58,6 +59,7 @@
 (require 'opencode-question)
 (require 'opencode-todo)
 (require 'opencode-sidebar)
+(require 'opencode-pi)
 (require 'project)
 (require 'seq)
 
@@ -97,7 +99,6 @@ When nil, uses `default-directory' of the current buffer."
   "o" #'opencode-start
   "O" #'opencode-attach
   "c" #'opencode-chat
-  "l" #'opencode-list-sessions
   "n" #'opencode-new-session
   "a" #'opencode-abort
   "t" #'opencode-toggle-sidebar
@@ -214,9 +215,7 @@ When called interactively with a prefix argument, prompts for the directory."
                    default-directory)))))
     ;; Persist so API headers and sidebar use the same root
     (setopt opencode-default-directory dir)
-    (opencode-server-start dir)
-    ;; Open session list after server is ready (one-shot)
-    (add-hook 'opencode-server-connected-hook #'opencode--open-session-list)))
+    (opencode-server-start dir)))
 
 ;;;###autoload
 (defun opencode-attach (url &optional directory)
@@ -277,26 +276,18 @@ Uses `url-generic-parse-url' for robust parsing."
         (user-error "Cannot parse host from: %s" input))
       (cons host port)))))
 
-(defun opencode--open-session-list ()
-  "Open the session list after server is ready.
-Runs once, then removes itself from the hook."
-  (remove-hook 'opencode-server-connected-hook #'opencode--open-session-list)
-  ;; preheat the cache
-  (opencode-api--agents :callback (lambda (resp) resp))
-  (opencode-api--providers :callback (lambda (resp) resp))
-  (opencode-session-open-list opencode-default-directory))
-
 ;;;###autoload
-(defun opencode-chat (&optional session-id)
+(defun opencode-chat (&optional session-id backend)
   "Open a chat buffer for SESSION-ID.
-If SESSION-ID is nil, prompts for a session from the list.
+If SESSION-ID is nil, prompts for a session.
 The completion list includes a \"\u2605 New session\" option at the top.
 Auto-connects to the server if `opencode-server-port' is set.
-The session list is scoped to the current buffer's project (via
-`project-current'), so switching projects shows the right sessions."
+The picker is scoped to the current buffer's project (via
+`project-current'), so switching projects shows the right sessions.
+BACKEND defaults to `opencode-backend-current'."
   (interactive)
   (opencode--ensure-ready)
-  ;; Use current buffer's project so the session list is scoped correctly
+  ;; Use current buffer's project so the picker is scoped correctly
   ;; even when opencode-default-directory points to a different project.
   (let* ((current-dir (or (when-let ((proj (project-current)))
                             (project-root proj))
@@ -307,31 +298,26 @@ The session list is scoped to the current buffer's project (via
                      (opencode--read-session "Chat session: "))))
     (when result
       (if (eq result 'new)
-          (opencode-new-session)
+          (opencode-new-session nil backend)
         (opencode-chat-open (car result) (or (cdr result)
-                                               current-dir))))))
+                                                current-dir)
+                           nil
+                           (or backend opencode-backend-current))))))
 
 ;;;###autoload
-(defun opencode-list-sessions ()
-  "Open the session list buffer for the current project."
-  (interactive)
-  (opencode--ensure-ready)
-  (opencode-session-open-list
-   (or (when-let* ((proj (project-current)))
-         (project-root proj))
-       opencode-default-directory
-       default-directory)))
-
-;;;###autoload
-(defun opencode-new-session (&optional title)
-  "Create a new session with optional TITLE and open it."
+(defun opencode-new-session (&optional title backend)
+  "Create a new session with optional TITLE and open it.
+BACKEND defaults to `opencode-backend-current'."
   (interactive "sSession title (empty for untitled): ")
   (opencode--ensure-ready)
-  (let* ((title (if (and title (not (string-empty-p title))) title nil))
-         (session (opencode-session-create title)))
+  (let* ((backend (or backend opencode-backend-current))
+         (title (if (and title (not (string-empty-p title))) title nil))
+         (session (opencode-session-create title nil backend)))
     (when session
       (opencode-chat-open (plist-get session :id)
-                          (plist-get session :directory)))))
+                          (plist-get session :directory)
+                          nil
+                          backend))))
 
 ;;;###autoload
 (defun opencode-abort ()
@@ -594,8 +580,8 @@ Wraps each call in `condition-case' to handle errors."
                       'opencode-sse-question-replied-hook
                       #'opencode-question--on-replied 'global)
 (opencode-event-route "question.rejected"
-                      'opencode-sse-question-rejected-hook
-                      #'opencode-question--on-rejected 'global)
+                       'opencode-sse-question-rejected-hook
+                       #'opencode-question--on-rejected 'global)
 (opencode-event-route "todo.updated.global"
                       'opencode-sse-todo-updated-hook
                       #'opencode-todo--on-updated 'global)
@@ -666,11 +652,11 @@ sequences coalesce into a single re-bootstrap."
               (msg (plist-get props :message)))
     (message "OpenCode: %s" msg)))
 
-(add-hook 'opencode-sse-server-instance-disposed-hook #'opencode--on-instance-disposed)
-(add-hook 'opencode-sse-global-disposed-hook #'opencode--on-global-disposed)
+(add-hook 'opencode-sse-server-instance-disposed-hook-global #'opencode--on-instance-disposed)
+(add-hook 'opencode-sse-global-disposed-hook-global #'opencode--on-global-disposed)
 
 ;; Toast: show server-side toast messages in the minibuffer
-(add-hook 'opencode-sse-tui-toast-show-hook #'opencode--on-tui-toast)
+(add-hook 'opencode-sse-tui-toast-show-hook-global #'opencode--on-tui-toast)
 
 ;;; --- Cleanup ---
 

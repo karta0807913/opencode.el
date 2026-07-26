@@ -74,7 +74,7 @@ SSE protocol — empty line is the event boundary that triggers dispatch."
   (let ((opencode-sse--current-event nil)
         (opencode-sse--last-event-time nil)
         (dispatched nil))
-    (add-hook 'opencode-sse-event-hook
+    (add-hook 'opencode-sse-event-hook-global
               (lambda (event) (setq dispatched event))
               nil t)
     (unwind-protect
@@ -86,7 +86,7 @@ SSE protocol — empty line is the event boundary that triggers dispatch."
           (should (string= (plist-get dispatched :type) "server.heartbeat"))
           ;; Current event should be cleared after dispatch
           (should (null opencode-sse--current-event)))
-      (remove-hook 'opencode-sse-event-hook
+      (remove-hook 'opencode-sse-event-hook-global
                    (lambda (event) (setq dispatched event))
                    t))))
 
@@ -98,7 +98,7 @@ so processing both would double every handler run."
         (opencode-sse--last-event-time nil)
         (fire-count 0))
     (let ((listener (lambda (_event) (cl-incf fire-count))))
-      (add-hook 'opencode-sse-message-updated-hook listener)
+      (add-hook 'opencode-sse-message-updated-hook-global listener)
       (unwind-protect
           (progn
             ;; Flat bus event — should fire the hook
@@ -110,20 +110,20 @@ so processing both would double every handler run."
              "message"
              "{\"payload\":{\"type\":\"sync\",\"syncEvent\":{\"type\":\"message.updated.1\",\"id\":\"evt_1\",\"seq\":0,\"aggregateID\":\"s1\",\"data\":{\"sessionID\":\"s1\",\"info\":{\"id\":\"m1\",\"role\":\"assistant\"}}}}}")
             (should (= fire-count 1)))
-        (remove-hook 'opencode-sse-message-updated-hook listener)))))
+        (remove-hook 'opencode-sse-message-updated-hook-global listener)))))
 
 (ert-deftest opencode-sse-no-dispatch-without-data ()
   "Verify empty line with no accumulated data does not dispatch.
 No spurious events — consecutive blank lines must not fire empty dispatches."
   (let ((opencode-sse--current-event nil)
         (dispatched nil))
-    (add-hook 'opencode-sse-event-hook
+    (add-hook 'opencode-sse-event-hook-global
               (lambda (_event) (setq dispatched t)))
     (unwind-protect
         (progn
           (opencode-sse--process-line "")
           (should-not dispatched))
-      (remove-hook 'opencode-sse-event-hook
+      (remove-hook 'opencode-sse-event-hook-global
                    (lambda (_event) (setq dispatched t))))))
 
 ;;; --- Hook dispatch by type ---
@@ -163,7 +163,7 @@ Integration — validates the full parse→dispatch→hook pipeline works."
   (let ((opencode-sse--current-event nil)
         (opencode-sse--last-event-time nil)
         (received nil))
-    (add-hook 'opencode-sse-message-part-updated-hook
+    (add-hook 'opencode-sse-message-part-updated-hook-global
               (lambda (event) (setq received event)))
     (unwind-protect
         (progn
@@ -177,8 +177,12 @@ Integration — validates the full parse→dispatch→hook pipeline works."
           (should received)
           (should (string= (plist-get received :type) "message.part.updated"))
           (let ((props (plist-get received :properties)))
-            (should (string= (plist-get props :sessionID) "ses_abc"))))
-      (remove-hook 'opencode-sse-message-part-updated-hook
+            (should (string= (plist-get props :sessionID) "ses_abc")))
+          (let ((backend-event (plist-get received :backend-event)))
+            (should backend-event)
+            (should (string= (plist-get backend-event :session-id) "ses_abc"))
+            (should (string= (plist-get backend-event :part-id) "p1"))))
+      (remove-hook 'opencode-sse-message-part-updated-hook-global
                    (lambda (event) (setq received event))))))
 
 ;;; --- Process filter: partial data ---
@@ -190,7 +194,7 @@ Normal case — full event in single TCP packet must dispatch correctly."
         (opencode-sse--current-event nil)
         (opencode-sse--last-event-time nil)
         (dispatched nil))
-    (add-hook 'opencode-sse-event-hook
+    (add-hook 'opencode-sse-event-hook-global
               (lambda (event) (setq dispatched event)))
     (unwind-protect
         (progn
@@ -198,7 +202,7 @@ Normal case — full event in single TCP packet must dispatch correctly."
            nil
            "event: server.heartbeat\ndata: {\"type\":\"server.heartbeat\",\"properties\":{}}\n\n")
           (should dispatched))
-      (remove-hook 'opencode-sse-event-hook
+      (remove-hook 'opencode-sse-event-hook-global
                    (lambda (event) (setq dispatched event))))))
 
 (ert-deftest opencode-sse-filter-handles-partial-chunks ()
@@ -208,7 +212,7 @@ CRITICAL: Chunked TCP delivery splits events mid-line — must reassemble."
         (opencode-sse--current-event nil)
         (opencode-sse--last-event-time nil)
         (dispatched nil))
-    (add-hook 'opencode-sse-event-hook
+    (add-hook 'opencode-sse-event-hook-global
               (lambda (event) (setq dispatched event)))
     (unwind-protect
         (progn
@@ -220,8 +224,34 @@ CRITICAL: Chunked TCP delivery splits events mid-line — must reassemble."
            nil
            "rtbeat\ndata: {\"type\":\"server.heartbeat\",\"properties\":{}}\n\n")
           (should dispatched))
-      (remove-hook 'opencode-sse-event-hook
+      (remove-hook 'opencode-sse-event-hook-global
                    (lambda (event) (setq dispatched event))))))
+
+(ert-deftest opencode-sse-filter-survives-reset-during-dispatch ()
+  "Verify hooks may reset SSE state while the filter dispatches events.
+Permission popups and reconnect paths can run from SSE hooks; if the filter
+keeps accumulator buffer positions across hook dispatch, users see
+`Args out of range' errors from the process filter."
+  (let ((opencode-sse--buffer nil)
+        (opencode-sse--current-event nil)
+        (opencode-sse--last-event-time nil)
+        (seen nil))
+    (let ((listener (lambda (event)
+                      (push (plist-get event :type) seen)
+                      (opencode-sse--reset-state))))
+      (add-hook 'opencode-sse-event-hook-global listener)
+      (unwind-protect
+          (progn
+            (opencode-sse--filter
+             nil
+             (concat
+              "data: {\"payload\":{\"type\":\"permission.asked\","
+              "\"properties\":{\"id\":\"per_1\",\"sessionID\":\"ses_1\"}}}\n\n"
+              "data: {\"payload\":{\"type\":\"server.heartbeat\","
+              "\"properties\":{}}}\n\n"))
+            (should (member "permission.asked" seen))
+            (should (member "server.heartbeat" seen)))
+        (remove-hook 'opencode-sse-event-hook-global listener)))))
 
 ;;; --- Reconnect logic ---
 
@@ -291,7 +321,7 @@ Integration test — validates complete SSE pipeline with multiple events."
         (opencode-sse--current-event nil)
         (opencode-sse--last-event-time nil)
         (received-events nil))
-    (add-hook 'opencode-sse-event-hook
+    (add-hook 'opencode-sse-event-hook-global
               (lambda (event) (push event received-events)))
     (unwind-protect
         (progn
@@ -316,7 +346,7 @@ Integration test — validates complete SSE pipeline with multiple events."
           ;; Second is message.part.updated
           (should (string= (plist-get (cadr received-events) :type)
                             "message.part.updated")))
-      (remove-hook 'opencode-sse-event-hook
+      (remove-hook 'opencode-sse-event-hook-global
                    (lambda (event) (push event received-events))))))
 
 ;;; --- session.status and session.idle hook mapping ---
@@ -339,7 +369,7 @@ Busy/idle status tracking — drives UI spinner, wrong data breaks UX."
   (let ((opencode-sse--current-event nil)
         (opencode-sse--last-event-time nil)
         (received nil))
-    (add-hook 'opencode-sse-session-status-hook
+    (add-hook 'opencode-sse-session-status-hook-global
               (lambda (event) (setq received event)))
     (unwind-protect
         (progn
@@ -355,7 +385,7 @@ Busy/idle status tracking — drives UI spinner, wrong data breaks UX."
             (should (string= (plist-get props :sessionID) "ses_abc"))
             (let ((status (plist-get props :status)))
               (should (string= (plist-get status :type) "busy")))))
-      (remove-hook 'opencode-sse-session-status-hook
+      (remove-hook 'opencode-sse-session-status-hook-global
                    (lambda (event) (setq received event))))))
 
 (ert-deftest opencode-sse-dispatches-session-idle ()
@@ -364,7 +394,7 @@ Idle detection — triggers chat refresh and clears busy indicator."
   (let ((opencode-sse--current-event nil)
         (opencode-sse--last-event-time nil)
         (received nil))
-    (add-hook 'opencode-sse-session-idle-hook
+    (add-hook 'opencode-sse-session-idle-hook-global
               (lambda (event) (setq received event)))
     (unwind-protect
         (progn
@@ -377,7 +407,7 @@ Idle detection — triggers chat refresh and clears busy indicator."
           (should (string= (plist-get received :type) "session.idle"))
           (let ((props (plist-get received :properties)))
             (should (string= (plist-get props :sessionID) "ses_xyz"))))
-      (remove-hook 'opencode-sse-session-idle-hook
+      (remove-hook 'opencode-sse-session-idle-hook-global
                    (lambda (event) (setq received event))))))
 
 ;;; --- Global event format dispatch ---
@@ -388,7 +418,7 @@ CRITICAL: Global SSE wraps events in {directory, payload} — must unwrap."
   (let ((opencode-sse--current-event nil)
         (opencode-sse--last-event-time nil)
         (received nil))
-    (add-hook 'opencode-sse-session-idle-hook
+    (add-hook 'opencode-sse-session-idle-hook-global
               (lambda (event) (setq received event)))
     (unwind-protect
         (progn
@@ -404,7 +434,7 @@ CRITICAL: Global SSE wraps events in {directory, payload} — must unwrap."
                             "/home/user/project"))
           (let ((props (plist-get received :properties)))
             (should (string= (plist-get props :sessionID) "ses_global"))))
-      (remove-hook 'opencode-sse-session-idle-hook
+      (remove-hook 'opencode-sse-session-idle-hook-global
                    (lambda (event) (setq received event))))))
 
 ;;; --- session.diff hook mapping ---
@@ -421,7 +451,7 @@ Diff display — file changes must reach the diff handler to show in UI."
   (let ((opencode-sse--current-event nil)
         (opencode-sse--last-event-time nil)
         (received nil))
-    (add-hook 'opencode-sse-session-diff-hook
+    (add-hook 'opencode-sse-session-diff-hook-global
               (lambda (event) (setq received event)))
     (unwind-protect
         (progn
@@ -435,7 +465,7 @@ Diff display — file changes must reach the diff handler to show in UI."
           (should (string= (plist-get received :type) "session.diff"))
           (let ((props (plist-get received :properties)))
             (should (string= (plist-get props :sessionID) "ses_diff"))))
-      (remove-hook 'opencode-sse-session-diff-hook
+      (remove-hook 'opencode-sse-session-diff-hook-global
                    (lambda (event) (setq received event))))))
 
 ;;; --- Curl transport tests ---
@@ -541,7 +571,7 @@ Global format unwrapping — disposal events wrapped in global format must still
   (let ((opencode-sse--current-event nil)
         (opencode-sse--last-event-time nil)
         (received nil))
-    (add-hook 'opencode-sse-server-instance-disposed-hook
+    (add-hook 'opencode-sse-server-instance-disposed-hook-global
               (lambda (event) (setq received event)))
     (unwind-protect
         (progn
@@ -553,8 +583,8 @@ Global format unwrapping — disposal events wrapped in global format must still
           (opencode-sse--process-line "")
           (should received)
           (should (string= (plist-get received :type) "server.instance.disposed")))
-      (remove-hook 'opencode-sse-server-instance-disposed-hook
-                   (car (last opencode-sse-server-instance-disposed-hook))))))
+      (remove-hook 'opencode-sse-server-instance-disposed-hook-global
+                   (car (last opencode-sse-server-instance-disposed-hook-global))))))
 
 ;;; --- Edge case tests ---
 
@@ -576,7 +606,7 @@ Resilience — malformed server data must be handled gracefully, not crash Emacs
 Fallback routing — events without :type must still reach correct handlers."
   (let ((opencode-sse--last-event-time nil)
         (dispatched nil))
-    (add-hook 'opencode-sse-event-hook
+    (add-hook 'opencode-sse-event-hook-global
               (lambda (event) (setq dispatched event)))
     (unwind-protect
         (progn
@@ -590,7 +620,7 @@ Fallback routing — events without :type must still reach correct handlers."
           ;; The entire JSON becomes :properties
           (should (string= (plist-get (plist-get dispatched :properties) :someKey)
                             "someValue")))
-      (remove-hook 'opencode-sse-event-hook
+      (remove-hook 'opencode-sse-event-hook-global
                    (lambda (event) (setq dispatched event))))))
 
 (ert-deftest opencode-sse-dispatch-missing-properties ()
@@ -598,7 +628,7 @@ Fallback routing — events without :type must still reach correct handlers."
 Defensive coding — sparse events must not crash on missing properties."
   (let ((opencode-sse--last-event-time nil)
         (dispatched nil))
-    (add-hook 'opencode-sse-event-hook
+    (add-hook 'opencode-sse-event-hook-global
               (lambda (event) (setq dispatched event)))
     (unwind-protect
         (progn
@@ -609,7 +639,7 @@ Defensive coding — sparse events must not crash on missing properties."
           (should (string= (plist-get dispatched :type) "session.idle"))
           ;; :properties should be nil, not cause an error
           (should (null (plist-get dispatched :properties))))
-      (remove-hook 'opencode-sse-event-hook
+      (remove-hook 'opencode-sse-event-hook-global
                    (lambda (event) (setq dispatched event))))))
 
 (ert-deftest opencode-sse-process-line-incomplete-event ()
@@ -618,7 +648,7 @@ SSE protocol — no premature dispatch until event boundary (empty line)."
   (let ((opencode-sse--current-event nil)
         (opencode-sse--last-event-time nil)
         (dispatched nil))
-    (add-hook 'opencode-sse-event-hook
+    (add-hook 'opencode-sse-event-hook-global
               (lambda (_event) (setq dispatched t)))
     (unwind-protect
         (progn
@@ -632,7 +662,7 @@ SSE protocol — no premature dispatch until event boundary (empty line)."
           (should (string= (plist-get opencode-sse--current-event :event-type)
                             "session.idle"))
           (should (plist-get opencode-sse--current-event :data)))
-      (remove-hook 'opencode-sse-event-hook
+      (remove-hook 'opencode-sse-event-hook-global
                    (lambda (_event) (setq dispatched t))))))
 
 (ert-deftest opencode-sse-dispatch-default-event-type ()
@@ -641,7 +671,7 @@ SSE spec — default event type is 'message' when event: line is omitted."
   (let ((opencode-sse--current-event nil)
         (opencode-sse--last-event-time nil)
         (dispatched nil))
-    (add-hook 'opencode-sse-event-hook
+    (add-hook 'opencode-sse-event-hook-global
               (lambda (event) (setq dispatched event)))
     (unwind-protect
         (progn
@@ -652,7 +682,7 @@ SSE spec — default event type is 'message' when event: line is omitted."
           (should dispatched)
           ;; The inner JSON :type should be used (instance event format)
           (should (string= (plist-get dispatched :type) "session.idle")))
-      (remove-hook 'opencode-sse-event-hook
+      (remove-hook 'opencode-sse-event-hook-global
                    (lambda (event) (setq dispatched event))))))
 
 (ert-deftest opencode-sse-heartbeat-timeout-detection ()

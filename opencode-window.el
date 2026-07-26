@@ -163,49 +163,97 @@ If it's a floating frame, iconify or delete the frame."
 
 (defun opencode-window--show ()
   "Show the OpenCode window.
-If there's an existing opencode buffer, display it.
-Otherwise, display the session list for the current project."
-  (let ((buf (or (opencode-window--find-buffer)
-                 (let ((dir (or (when-let ((proj (project-current)))
-                                  (project-root proj))
-                                opencode-default-directory
-                                default-directory)))
-                   (opencode-session--ensure-buffer dir)))))
-    (opencode-window-display-buffer buf)))
+Displays an existing opencode buffer, or errors when none exists."
+  (if-let ((buf (opencode-window--find-buffer)))
+      (opencode-window-display-buffer buf)
+    (user-error "No OpenCode buffer exists; use `opencode-chat' or `opencode-toggle-sidebar'")))
 
 (defun opencode-window--find-buffer ()
-  "Find the most recent opencode buffer, preferring chat over sessions."
-  (or (seq-find
-       (lambda (buf)
-         (and (string-prefix-p "*opencode:" (buffer-name buf))
-              (not (string-prefix-p "*opencode: sessions" (buffer-name buf)))
-              (not (string= (buffer-name buf) "*opencode: log*"))
-              (not (string= (buffer-name buf) "*opencode: debug*"))))
-       (buffer-list))
-      (seq-find
-       (lambda (buf)
-         (string-prefix-p "*opencode: sessions" (buffer-name buf)))
-       (buffer-list))))
+  "Find the most recent user-facing opencode buffer."
+  (seq-find
+   (lambda (buf)
+     (and (string-prefix-p "*opencode:" (buffer-name buf))
+          (not (string= (buffer-name buf) "*opencode: log*"))
+          (not (string= (buffer-name buf) "*opencode: debug*"))))
+   (buffer-list)))
 
 ;;; --- Floating frame ---
 
 (defun opencode-window-open-frame (&optional buffer)
   "Open a new floating frame for OpenCode.
-BUFFER is the buffer to display; defaults to session list."
+BUFFER is the buffer to display; defaults to the latest opencode buffer."
   (interactive)
   (let* ((buf (or buffer
                   (opencode-window--find-buffer)
-                  (let ((dir (or (when-let ((proj (project-current)))
-                                   (project-root proj))
-                                 opencode-default-directory
-                                 default-directory)))
-                    (opencode-session--ensure-buffer dir))))
+                  (user-error "No OpenCode buffer exists; use `opencode-chat' first")))
          (frame (make-frame (append opencode-float-frame-alist
-                                    '((name . "OpenCode"))))))
+                                     '((name . "OpenCode"))))))
     (set-frame-parameter frame 'opencode-frame t)
     (with-selected-frame frame
       (switch-to-buffer buf))
     frame))
+
+;;; --- Child frame (subframe hosting a buffer) ---
+
+(defcustom opencode-child-frame-alist
+  '((width . 90) (height . 28))
+  "Default size for opencode child frames (subframes).
+WIDTH/HEIGHT are in columns/lines."
+  :type 'alist
+  :group 'opencode-window)
+
+(defun opencode-window-child-frame (buffer &optional placement)
+  "Display BUFFER in a child frame (subframe) of the selected frame.
+The child frame is anchored to the selected window.  PLACEMENT is
+`top' (default) or `bottom'.  On a non-graphic display (terminal),
+falls back to a bottom side window.  Returns the child frame, or the
+window in the terminal fallback."
+  (if (not (display-graphic-p))
+      (display-buffer-in-side-window
+       buffer '((side . bottom) (slot . 0)
+                (window-parameters (no-other-window . t))))
+    (let* ((parent (selected-frame))
+           (parent-win (selected-window))
+           (width (or (alist-get 'width opencode-child-frame-alist) 90))
+           (height (or (alist-get 'height opencode-child-frame-alist) 28))
+           (frame (make-frame
+                   `((parent-frame . ,parent)
+                     (minibuffer . nil)
+                     (undecorated . t)
+                     (skip-taskbar . t)
+                     (left-fringe . 8)
+                     (right-fringe . 8)
+                     (vertical-scroll-bars . nil)
+                     (horizontal-scroll-bars . nil)
+                     (menu-bar-lines . 0)
+                     (tool-bar-lines . 0)
+                     (tab-bar-lines . 0)
+                     (internal-border-width . 2)
+                     (width . ,width)
+                     (height . ,height)
+                     (visibility . nil)))))
+      (set-frame-parameter frame 'opencode-frame t)
+      (opencode-window--position-child-frame frame parent parent-win
+                                             height (or placement 'top))
+      (with-selected-frame frame
+        (switch-to-buffer buffer))
+      (make-frame-visible frame)
+      (select-frame-set-input-focus frame)
+      frame)))
+
+(defun opencode-window--position-child-frame (frame parent parent-win height placement)
+  "Anchor child FRAME to PARENT-WIN within PARENT at top or bottom per PLACEMENT.
+HEIGHT is the frame height in lines."
+  (let* ((edges (window-inside-pixel-edges parent-win))
+         (char-h (frame-char-height parent))
+         (left (nth 0 edges))
+         (top (nth 1 edges))
+         (bottom (nth 3 edges)))
+    (set-frame-position
+     frame left
+     (if (eq placement 'bottom)
+         (max top (- bottom (* (+ 1 height) char-h)))
+       top))))
 
 ;;; --- Sidebar ---
 
@@ -215,7 +263,8 @@ PROJECT-ROOT overrides the auto-detected project directory.
 If the current buffer is a chat buffer, focuses that session in the sidebar."
   (interactive)
   ;; Capture chat session-id before switching to sidebar context
-  (let* ((prev-session-id (when (bound-and-true-p opencode-chat--state)
+  (let* ((source-win (selected-window))
+         (prev-session-id (when (bound-and-true-p opencode-chat--state)
                             (opencode-chat--session-id)))
          (sidebar-buf (get-buffer opencode-sidebar--buffer-name))
          (sidebar-win (when sidebar-buf (get-buffer-window sidebar-buf)))
@@ -230,11 +279,13 @@ If the current buffer is a chat buffer, focuses that session in the sidebar."
      ;; Already visible and focusing on it → hide it
      ((and sidebar-win (eq sidebar-buf (current-buffer)))
       (delete-window sidebar-win))
-     ;; Already visible but not selected it → focus it
-     (sidebar-win
-      (select-window sidebar-win)
-      (when prev-session-id
-        (opencode-sidebar--focus-session prev-session-id)))
+      ;; Already visible but not selected it → focus it
+      (sidebar-win
+       (with-current-buffer sidebar-buf
+         (opencode-sidebar--remember-main-window source-win))
+       (select-window sidebar-win)
+       (when prev-session-id
+         (opencode-sidebar--focus-session prev-session-id)))
      ;; Buffer exists but not visible → show it
      (sidebar-buf
       ;; Update primary project dir to current context
@@ -248,11 +299,13 @@ If the current buffer is a chat buffer, focuses that session in the sidebar."
           (unless (opencode-api-cache-project-sessions project-dir :cache t)
             (opencode-sidebar--refresh-project project-dir))
           (opencode-sidebar--rerender)))
+      (with-current-buffer sidebar-buf
+        (opencode-sidebar--remember-main-window source-win))
       (when-let ((win (display-buffer-in-side-window
                        sidebar-buf
                        `((side . left)
                          (slot . -1)
-                         (window-width . 45)
+                          (window-width . 35)
                          (window-parameters
                           (no-delete-other-windows . ,opencode-window-persistent))))))
         (select-window win)
@@ -265,11 +318,13 @@ If the current buffer is a chat buffer, focuses that session in the sidebar."
         (user-error "OpenCode server not connected.  Connect first with 'M-x opencode-start' or 'M-x opencode-attach'"))
       (let ((buf (opencode-sidebar--ensure-buffer project-dir)))
         (when buf
+          (with-current-buffer buf
+            (opencode-sidebar--remember-main-window source-win))
           (when-let ((win (display-buffer-in-side-window
                            buf
                            `((side . left)
                              (slot . -1)
-                             (window-width . 45)
+                              (window-width . 35)
                              (window-parameters
                               (no-delete-other-windows . ,opencode-window-persistent))))))
             (select-window win)

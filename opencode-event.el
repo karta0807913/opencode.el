@@ -42,19 +42,22 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'seq)
 (require 'opencode-log)
 (require 'opencode-domain)
+(require 'opencode-backend)
 
 ;; Forward declarations.  opencode.el `require's this module during its
 ;; top-level load; by the time the event routes fire at runtime, every
 ;; referenced symbol below is defined.  These declares keep the
 ;; byte-compiler quiet without introducing circular requires.
 (declare-function opencode--chat-buffer-for-session "opencode" (session-id))
-(declare-function opencode--dispatch-to-chat-buffer "opencode" (session-id handler event))
-(declare-function opencode--dispatch-to-all-chat-buffers "opencode" (handler event))
+(declare-function opencode--all-chat-buffers "opencode" ())
 (declare-function opencode--sidebar-buffer-for-project "opencode" ())
 (declare-function opencode-chat--session-id-from-event "opencode-chat" (event))
-(declare-function opencode-api-get "opencode-api" (path callback &optional query-params))
+(declare-function opencode-sse--hook-for-type "opencode-sse" (type))
+(declare-function opencode-sse--global-hook-for-type "opencode-sse" (type))
+(defvar opencode-sse-after-dispatch-hook-global nil)
 
 ;;; --- Routing table ---
 
@@ -80,6 +83,44 @@ overwrites the first.  HOOK, HANDLER, STRATEGY are stored verbatim."
 
 ;;; --- Dispatch strategies ---
 
+(defun opencode-event--hook-for-event (event)
+  "Return the global SSE hook symbol for EVENT, or nil if unknown."
+  (when-let* ((event-type (plist-get event :type)))
+    (or (and (fboundp 'opencode-sse--hook-for-type)
+             (opencode-sse--hook-for-type event-type))
+        (when-let* ((entry (seq-find (lambda (route)
+                                       (equal (car route) event-type))
+                                     opencode-event-routes)))
+          (nth 1 entry)))))
+
+(defun opencode-event--local-hook-functions (hook)
+  "Return non-nil when HOOK has local listeners in the current buffer."
+  (and hook (local-variable-p hook (current-buffer))))
+
+(defun opencode-event--run-local-sse-hook (event)
+  "Run buffer-local SSE hook listeners for EVENT.
+This is the chat-buffer-local bridge for users who add SSE hooks with
+LOCAL non-nil."
+  (dolist (hook (delq nil (delete-dups
+                           (list 'opencode-sse-event-hook
+                                 (opencode-event--hook-for-event event)))))
+    (when (opencode-event--local-hook-functions hook)
+      (condition-case err
+          (run-hook-with-args hook event)
+        (error
+         (opencode--debug "opencode-event: local hook error in %s: %S"
+                          (buffer-name) err))))))
+
+(defun opencode-event--dispatch-chat-buffer (buf handler event)
+  "Run HANDLER for EVENT inside chat BUF."
+  (when (and buf (buffer-live-p buf))
+    (with-current-buffer buf
+      (condition-case err
+          (funcall handler event)
+        (error
+         (opencode--debug "opencode-event: handler error in %s: %S"
+                          (buffer-name) err))))))
+
 (defun opencode-event--dispatch-chat (handler event)
   "Run HANDLER for EVENT against the chat buffer registered for the session.
 When the event has no session-id, broadcast to every live chat buffer.
@@ -87,10 +128,11 @@ Uses O(1) registry lookup."
   (let ((sid (opencode-chat--session-id-from-event event)))
     (cond
      (sid
-      (when (opencode--chat-buffer-for-session sid)
-        (opencode--dispatch-to-chat-buffer sid handler event)))
+       (opencode-event--dispatch-chat-buffer
+        (opencode--chat-buffer-for-session sid) handler event))
      (t
-      (opencode--dispatch-to-all-chat-buffers handler event)))))
+       (dolist (buf (opencode--all-chat-buffers))
+         (opencode-event--dispatch-chat-buffer buf handler event))))))
 
 (defun opencode-event--dispatch-to-buffer (buf handler event)
   "Run HANDLER for EVENT inside BUF, guarded by `condition-case'."
@@ -101,6 +143,30 @@ Uses O(1) registry lookup."
         (error
          (opencode--debug "opencode-event: handler error in %s: %S"
                           (buffer-name) err))))))
+
+(defun opencode-event--dispatch-local-to-buffer (buf event)
+  "Run only EVENT's buffer-local SSE hook listeners inside BUF."
+  (when (and buf (buffer-live-p buf))
+    (with-current-buffer buf
+      (opencode-event--run-local-sse-hook event))))
+
+(defun opencode-event--forward-local (event)
+  "Forward EVENT to matching chat-buffer-local SSE hook listeners.
+If EVENT has a session-id, dispatch to that session's buffer and its root
+parent buffer when known.  If EVENT has no session-id, broadcast to all
+registered chat buffers."
+  (let* ((sid (opencode-chat--session-id-from-event event))
+         (buf (when sid (opencode--chat-buffer-for-session sid))))
+    (cond
+     (sid
+      (opencode-event--dispatch-local-to-buffer buf event)
+      (let* ((root-id (opencode-domain-find-root-session sid))
+             (root-buf (when (and root-id (not (equal root-id sid)))
+                         (opencode--chat-buffer-for-session root-id))))
+        (opencode-event--dispatch-local-to-buffer root-buf event)))
+     (t
+      (dolist (chat-buf (opencode--all-chat-buffers))
+        (opencode-event--dispatch-local-to-buffer chat-buf event))))))
 
 (defconst opencode-event--popup-max-walk 8
   "Maximum number of /session/:id lookups the popup walk will chain.
@@ -118,13 +184,13 @@ on cache miss; DEPTH is the internal retry counter (nil at entry)."
          (sid (opencode-chat--session-id-from-event event))
          (buf (when sid (opencode--chat-buffer-for-session sid))))
     (cond
-     ;; Direct buffer — dispatch here AND at root parent (if different)
-     (buf
-      (opencode-event--dispatch-to-buffer buf handler event)
-      (let* ((root-id (opencode-domain-find-root-session sid))
-             (root-buf (when (and root-id (not (equal root-id sid)))
-                         (opencode--chat-buffer-for-session root-id))))
-        (opencode-event--dispatch-to-buffer root-buf handler event)))
+      ;; Direct buffer — dispatch here AND at root parent (if different)
+      (buf
+       (opencode-event--dispatch-to-buffer buf handler event)
+       (let* ((root-id (opencode-domain-find-root-session sid))
+              (root-buf (when (and root-id (not (equal root-id sid)))
+                          (opencode--chat-buffer-for-session root-id))))
+         (opencode-event--dispatch-to-buffer root-buf handler event)))
      ;; Depth cap — bail rather than loop
      ((>= depth opencode-event--popup-max-walk)
       (opencode--debug
@@ -137,18 +203,18 @@ on cache miss; DEPTH is the internal retry counter (nil at entry)."
         (if root-buf
             (opencode-event--dispatch-to-buffer root-buf handler event)
           ;; Fetch parentID of the furthest known ancestor and retry.
-          (opencode-api-get
-           (format "/session/%s" root-id)
+          (opencode-backend-get-session
+           root-id
            (lambda (response)
-             (when-let* ((body (plist-get response :body))
-                         (parent-id (plist-get body :parentID))
+             (when-let* ((parent-id (plist-get response :parentID))
                          ;; Defend against server-returned self-parent.
                          ((not (equal parent-id root-id))))
                (opencode-domain-child-parent-put root-id parent-id)
                (opencode-event--dispatch-popup handler event (1+ depth))))))))
-     ;; No session-id — broadcast
-     (t
-      (opencode--dispatch-to-all-chat-buffers handler event)))))
+      ;; No session-id — broadcast
+      (t
+       (dolist (buf (opencode--all-chat-buffers))
+         (opencode-event--dispatch-to-buffer buf handler event))))))
 
 (defun opencode-event--dispatch-sidebar (handler event)
   "Run HANDLER for EVENT inside the global sidebar buffer, if any."
@@ -176,11 +242,14 @@ opencode-event.el does not accumulate duplicate handlers on the hook."
 STRATEGY is one of `chat', `popup', `sidebar', `global' and defaults
 to `chat'.
 
-Creates a stable named symbol via `defalias' so `add-hook' deduplicates
-on reload.  Records the entry in `opencode-event-routes' for test
-introspection.  Safe to call repeatedly at load time."
+Creates a stable named symbol via `defalias' and registers it on HOOK's
+global counterpart (`HOOK-global') so the public HOOK remains local-only.
+Records the entry in `opencode-event-routes' for test introspection.
+Safe to call repeatedly at load time."
   (let ((strat (or strategy 'chat))
-        (sym (opencode-event--dispatcher-symbol event-type)))
+        (sym (opencode-event--dispatcher-symbol event-type))
+        (global-hook (or (opencode-sse--global-hook-for-type event-type)
+                         (intern (format "%s-global" (symbol-name hook))))))
     ;; Install a named dispatcher that invokes the chosen strategy.
     ;; Using `defalias' with a freshly-defined lambda: reload replaces
     ;; the binding but keeps the symbol, so add-hook sees the same
@@ -192,8 +261,10 @@ introspection.  Safe to call repeatedly at load time."
         ('sidebar (lambda (event) (opencode-event--dispatch-sidebar handler event)))
         ('global  (lambda (event) (opencode-event--dispatch-global handler event)))
         (_ (error "opencode-event-route: unknown strategy %S" strat))))
-    (add-hook hook sym)
+    (add-hook global-hook sym)
     (opencode-event--put-route event-type hook handler strat)))
+
+(add-hook 'opencode-sse-after-dispatch-hook-global #'opencode-event--forward-local)
 
 ;;; --- Introspection helpers ---
 

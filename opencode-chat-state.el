@@ -37,6 +37,8 @@ Slots are grouped by the module that originally owned them."
    :documentation "Session ID string for this chat buffer.")
   (session nil
    :documentation "Cached session plist from the server.")
+  (backend nil
+   :documentation "Backend name symbol for this chat buffer.")
   (agent nil
    :documentation "Effective agent name (string or nil).")
   (agent-color nil
@@ -147,6 +149,12 @@ yet confirmed by a `message.updated' SSE event, or nil.")
   (and opencode-chat--state
        (opencode-chat-state-session opencode-chat--state)))
 
+(defun opencode-chat--backend ()
+  "Return the backend name for this chat buffer."
+  (or (and opencode-chat--state
+           (opencode-chat-state-backend opencode-chat--state))
+      'opencode))
+
 (defun opencode-chat--busy ()
   "Return non-nil when waiting for a response."
   (and opencode-chat--state
@@ -176,6 +184,11 @@ new one as soon as the buffer learns about it."
   (when-let* ((sid (and session (plist-get session :id)))
               (parent-id (plist-get session :parentID)))
     (opencode-domain-child-parent-put sid parent-id)))
+
+(defun opencode-chat--set-backend (backend)
+  "Set the backend name to BACKEND."
+  (opencode-chat--state-ensure)
+  (setf (opencode-chat-state-backend opencode-chat--state) backend))
 
 (defun opencode-chat--set-busy (busy)
   "Set the busy flag to BUSY."

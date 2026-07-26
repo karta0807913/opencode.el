@@ -22,6 +22,7 @@
 (require 'opencode-util)
 (require 'opencode-faces)
 (require 'opencode-session)
+(require 'opencode-backend)
 (require 'opencode-api-cache)
 (require 'opencode-chat-state)
 
@@ -71,6 +72,9 @@ trick treemacs uses (`treemacs--buffer-name-prefix' is \" *Treemacs-\").")
 (defvar-local opencode-sidebar--primary-project-dir nil
   "Primary project directory (the project from which sidebar was opened).
 This project group defaults to expanded.")
+
+(defvar-local opencode-sidebar--last-main-window nil
+  "Most recent non-sidebar window that focused the sidebar.")
 
 (defvar-local opencode-sidebar--status-store (make-hash-table :test 'equal)
   "Hash: session-id (string) → status symbol.
@@ -298,12 +302,23 @@ Shows \"(refreshing)\" indicator when a fetch is in-flight."
 Explicitly skips sidebar buffer windows and minibuffer.
 If no suitable window exists, split the frame to create one."
   (let ((sidebar-buf (current-buffer)))
-    (let ((win (seq-find
-                (lambda (w)
-                  (and (not (eq (window-buffer w) sidebar-buf))
-                       (not (window-minibuffer-p w))))
-                (window-list))))
-      (or win (split-window (frame-root-window) nil 'right)))))
+    (or (and (window-live-p opencode-sidebar--last-main-window)
+             (not (eq (window-buffer opencode-sidebar--last-main-window) sidebar-buf))
+             (not (window-minibuffer-p opencode-sidebar--last-main-window))
+             opencode-sidebar--last-main-window)
+        (seq-find
+         (lambda (w)
+           (and (not (eq (window-buffer w) sidebar-buf))
+                (not (window-minibuffer-p w))))
+         (window-list))
+        (split-window (frame-root-window) nil 'right))))
+
+(defun opencode-sidebar--remember-main-window (window)
+  "Remember WINDOW as the main content window for sidebar RET actions."
+  (when (and (window-live-p window)
+             (not (eq (window-buffer window) (current-buffer)))
+             (not (window-minibuffer-p window)))
+    (setq opencode-sidebar--last-main-window window)))
 
 (defun opencode-sidebar--display-buffer-other-window (buffer)
   "Display BUFFER in a non-sidebar window and select it."
@@ -381,12 +396,7 @@ File nodes show a diff buffer; session/message-turn nodes open the chat."
 (defun opencode-sidebar--open-session-in-window (item target-win)
   "Open the session described by ITEM in TARGET-WIN."
   (let ((session-id (plist-get item :session-id))
-        (project-dir (opencode-sidebar--session-project-dir item))
-        (display-buffer-overriding-action
-         `((display-buffer-reuse-window
-            display-buffer-same-window)
-           (reusable-frames . visible)
-           (inhibit-same-window . nil))))
+        (project-dir (opencode-sidebar--session-project-dir item)))
     (select-window target-win)
     (opencode-chat-open session-id project-dir)))
 
@@ -597,8 +607,8 @@ Reads from the project session cache for PROJECT-DIR."
         (buf (current-buffer)))
     (opencode-sidebar--log "EXPAND >>> sid=%s" session-id)
     (let ((opencode-default-directory (or project-dir opencode-default-directory)))
-      (opencode-api-get
-       (format "/session/%s/diff" session-id)
+      (opencode-backend-get-diff
+       session-id
        (lambda (response)
          (when (buffer-live-p buf)
            (with-current-buffer buf
@@ -615,8 +625,8 @@ Reads from the project session cache for PROJECT-DIR."
                    (let ((inhibit-read-only t))
                      (funcall callback children)))
                (error
-                (opencode-sidebar--log "EXPAND error: %s"
-                                        (error-message-string err))))))))))
+                 (opencode-sidebar--log "EXPAND error: %s"
+                                          (error-message-string err))))))))))
   :child-type 'opencode-sidebar-child
   :async? t
   :ret-action #'opencode-sidebar--ret-action)
@@ -995,4 +1005,3 @@ Updates status store, discovers new projects, invalidates caches."
 
 (provide 'opencode-sidebar)
 ;;; opencode-sidebar.el ends here
-

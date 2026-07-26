@@ -36,9 +36,11 @@
 (require 'opencode-chat-message)
 (require 'opencode-chat-input)
 (require 'opencode-api-cache)
+(require 'opencode-backend)
 
 (declare-function opencode--register-chat-buffer "opencode" (session-id buffer))
 (declare-function opencode--deregister-chat-buffer "opencode" (session-id))
+(declare-function opencode-pi-widget-cleanup "opencode-pi-widget" (session-id))
 
 (defgroup opencode-chat nil
   "OpenCode chat buffer."
@@ -272,9 +274,7 @@ Returns nil if the session has no parent."
   "Return child sessions of SESSION-ID from the server.
 Uses the official /session/:id/children endpoint."
   (condition-case err
-      (let ((result (opencode-api-get-sync
-                     (format "/session/%s/children" session-id))))
-        (if (vectorp result) (append result nil) result))
+      (opencode-backend-get-child-sessions session-id (opencode-chat--backend))
     (error
      (opencode--debug "opencode-chat: children fetch failed: %s"
                       (error-message-string err))
@@ -396,9 +396,13 @@ Read-only protection is via text properties.
   (cursor-intangible-mode 1)
   (add-hook 'kill-buffer-hook
             (lambda ()
-              (when (and (opencode-chat--session-id)
-                        (fboundp 'opencode--deregister-chat-buffer))
-                (opencode--deregister-chat-buffer (opencode-chat--session-id))))
+              (when (opencode-chat--session-id)
+                (when (fboundp 'opencode--deregister-chat-buffer)
+                  (opencode--deregister-chat-buffer (opencode-chat--session-id)))
+                ;; Tear down any Pi extension widget surface for this session.
+                (when (and (eq (opencode-chat--backend) 'pi)
+                           (fboundp 'opencode-pi-widget-cleanup))
+                  (opencode-pi-widget-cleanup (opencode-chat--session-id)))))
             nil t))
 
 ;;; --- Header line (sticky, via header-line-format) ---
@@ -607,45 +611,48 @@ Fires two async GET requests in parallel; each callback filters items
 by session-id, merges into the buffer-local queues (deduplicating by
 :id), and calls `opencode-chat--drain-popup-queue' in BUF."
   (opencode--debug "opencode-chat: fetching pending popups")
-    (let ((sid (with-current-buffer buf (opencode-chat--session-id))))
+    (let ((sid (with-current-buffer buf (opencode-chat--session-id)))
+          (backend (with-current-buffer buf (opencode-chat--backend))))
     ;; Fetch pending questions
-    (opencode-api-get
-     "/question"
-     (lambda (response)
-       (when (and (buffer-live-p buf)
-                  (plist-get response :body))
-         (let ((body (plist-get response :body)))
-           (when (length> body 0)
-             (let ((matching (seq-filter
-                              (lambda (item)
-                                (equal (plist-get item :sessionID) sid))
-                              body)))
-               (when matching
-                 (opencode--debug "opencode-chat: got %d pending questions for %s"
-                                  (length matching) sid)
-                 (with-current-buffer buf
-                   (opencode-chat--merge-pending-popups
-                    'opencode-question--pending matching)
-                   (opencode-chat--drain-popup-queue)))))))))
+    (when (opencode-backend-capable-p 'questions backend)
+      (opencode-backend-list-questions
+       (lambda (response)
+         (when (and (buffer-live-p buf)
+                    (plist-get response :body))
+           (let ((body (plist-get response :body)))
+             (when (length> body 0)
+               (let ((matching (seq-filter
+                                (lambda (item)
+                                  (equal (plist-get item :sessionID) sid))
+                                body)))
+                 (when matching
+                   (opencode--debug "opencode-chat: got %d pending questions for %s"
+                                    (length matching) sid)
+                   (with-current-buffer buf
+                     (opencode-chat--merge-pending-popups
+                      'opencode-question--pending matching)
+                     (opencode-chat--drain-popup-queue))))))))
+       backend))
     ;; Fetch pending permissions
-    (opencode-api-get
-     "/permission"
-     (lambda (response)
-       (when (and (buffer-live-p buf)
-                  (plist-get response :body))
-         (let ((body (plist-get response :body)))
-           (when (length> body 0)
-             (let ((matching (seq-filter
-                              (lambda (item)
-                                (equal (plist-get item :sessionID) sid))
-                              body)))
-               (when matching
-                 (opencode--debug "opencode-chat: got %d pending permissions for %s"
-                                  (length matching) sid)
-                 (with-current-buffer buf
-                   (opencode-chat--merge-pending-popups
-                    'opencode-permission--pending matching)
-                   (opencode-chat--drain-popup-queue)))))))))))
+    (when (opencode-backend-capable-p 'permissions backend)
+      (opencode-backend-list-permissions
+       (lambda (response)
+         (when (and (buffer-live-p buf)
+                    (plist-get response :body))
+           (let ((body (plist-get response :body)))
+             (when (length> body 0)
+               (let ((matching (seq-filter
+                                (lambda (item)
+                                  (equal (plist-get item :sessionID) sid))
+                                body)))
+                 (when matching
+                   (opencode--debug "opencode-chat: got %d pending permissions for %s"
+                                    (length matching) sid)
+                   (with-current-buffer buf
+                     (opencode-chat--merge-pending-popups
+                      'opencode-permission--pending matching)
+                     (opencode-chat--drain-popup-queue))))))))
+       backend))))
 
 (defun opencode-chat--merge-pending-popups (queue-sym new-items)
   "Merge NEW-ITEMS into the buffer-local pending queue QUEUE-SYM.
@@ -854,10 +861,11 @@ active inline popup across re-renders — see the `--save-render-state'
 
 (defun opencode-chat--session-id-from-event (event)
   "Extract session-id from SSE EVENT properties.
-Tries flat :sessionID, nested :info :id, then :part
-:sessionID."
+Tries flat :sessionID, nested :info :sessionID, nested :info :id,
+then :part :sessionID."
   (let ((props (plist-get event :properties)))
     (or (plist-get props :sessionID)
+        (plist-get (plist-get props :info) :sessionID)
         (plist-get (plist-get props :info) :id)
         (plist-get (plist-get props :part) :sessionID))))
 
@@ -953,10 +961,11 @@ footer in-place via `opencode-chat-message-update'."
   "Handle a `session.diff' SSE EVENT.
 Invalidates the diff cache and pre-fetches fresh diffs asynchronously."
   (opencode--debug "opencode-chat: on-session-diff session=%s" (opencode-chat--session-id))
-  (opencode-chat-message-invalidate-diffs)
-  (condition-case nil
-      (opencode-chat-message-prefetch-diffs (opencode-chat--session-id))
-    (error nil))
+  (when (opencode-backend-capable-p 'diffs (opencode-chat--backend))
+    (opencode-chat-message-invalidate-diffs)
+    (condition-case nil
+        (opencode-chat-message-prefetch-diffs (opencode-chat--session-id))
+      (error nil)))
   (opencode-chat--schedule-refresh)
   (run-hook-with-args 'opencode-chat-on-session-diff-hook event))
 
@@ -1182,11 +1191,14 @@ and handles chat-level side effects based on the return value."
 
 (defun opencode-chat--fetch-inline-todos ()
   "Fetch todos for the current session asynchronously.
-Updates `(opencode-chat--inline-todos)' and refreshes the inline todo section."
-  (when-let* ((session-id (opencode-chat--session-id)))
-    (let ((buf (current-buffer)))
-      (opencode-api-get
-       (format "/session/%s/todo" session-id)
+Updates `(opencode-chat--inline-todos)' and refreshes the inline todo section.
+No-op for backends without the `todos' capability (e.g. Pi)."
+  (when (and (opencode-backend-capable-p 'todos (opencode-chat--backend))
+             (opencode-chat--session-id))
+    (let ((session-id (opencode-chat--session-id))
+          (buf (current-buffer)))
+      (opencode-backend-get-todos
+       session-id
        (lambda (response)
          (when (buffer-live-p buf)
            (with-current-buffer buf
@@ -1194,7 +1206,8 @@ Updates `(opencode-chat--inline-todos)' and refreshes the inline todo section."
              (when-let* ((body (plist-get response :body)))
                (opencode-chat--set-inline-todos body)
                (opencode-chat--refresh-inline-todos body))
-             (opencode-chat--debug-cursor-trace "todo-cb-exit"))))))))
+              (opencode-chat--debug-cursor-trace "todo-cb-exit"))))
+       (opencode-chat--backend)))))
 
 
 (defun opencode-chat--refresh (&optional initial)
@@ -1234,18 +1247,18 @@ refresh.  This ensures at most two overlapping request chains."
         ;; end of render-messages (or the callback itself) picks them up.
         (opencode-chat--fetch-pending-popups buf)
         ;; Fetch messages asynchronously
-        (opencode-api-get
-         (format "/session/%s/message" session-id)
+        (opencode-backend-get-messages
+         session-id
          (lambda (response)
            (opencode--debug "opencode-chat: refresh messages status=%s msg-count=%s"
-                    (plist-get response :status)
-                    (and (plist-get response :body)
-                         (length (plist-get response :body))))
+                            (plist-get response :status)
+                            (and (plist-get response :body)
+                                 (length (plist-get response :body))))
            (when (buffer-live-p buf)
              (with-current-buffer buf
                (let ((messages (plist-get response :body)))
                  ;; Also refresh session info (with stale-on-timeout fallback)
-                 (opencode-api-cache-get-session
+                 (opencode-backend-get-session
                   session-id
                   (lambda (session-data)
                     (when (buffer-live-p buf)
@@ -1277,8 +1290,10 @@ refresh.  This ensures at most two overlapping request chains."
                         (when (opencode-chat--refresh-end)
                           (opencode--debug "opencode-chat: re-firing pending refresh sid=%s"
                                            (opencode-chat--session-id))
-                          (opencode-chat--refresh))))))))))
-         (list (cons "limit" (number-to-string opencode-chat-message-limit)))))))))
+                          (opencode-chat--refresh)))))
+                  (opencode-chat--backend))))))
+         (list (cons "limit" (number-to-string opencode-chat-message-limit)))
+         (opencode-chat--backend)))))))
 
 (defun opencode-chat--debug-cursor-trace (label)
   "Log a single-line cursor-state snapshot tagged with LABEL."
@@ -1302,11 +1317,11 @@ INITIAL has the same meaning as in `opencode-chat--refresh'.
 Use only for initial load or testing; prefer `opencode-chat--refresh'."
   (when (opencode-chat--session-id)
     (condition-case err
-        (let ((messages (opencode-api-get-sync
-                        (format "/session/%s/message" (opencode-chat--session-id)))))
+        (let ((messages (opencode-backend-get-messages-sync
+                         (opencode-chat--session-id) nil (opencode-chat--backend))))
           (opencode-chat--set-session
-           (opencode-api-get-sync
-            (format "/session/%s" (opencode-chat--session-id))))
+           (opencode-backend-get-session-sync
+            (opencode-chat--session-id) (opencode-chat--backend)))
           (opencode-chat--state-init (when initial messages))
           (opencode-chat--render-messages messages)
           (opencode-chat--recompute-cached-tokens-from-store)
@@ -1318,21 +1333,35 @@ Use only for initial load or testing; prefer `opencode-chat--refresh'."
 
 ;;; --- Open chat buffer ---
 
-(defun opencode-chat-open (session-id &optional directory _display-action)
+(declare-function opencode-window-child-frame "opencode-window" (buffer &optional placement))
+
+(defun opencode-chat--display-buffer (buffer display-action)
+  "Show BUFFER per DISPLAY-ACTION.
+`child-frame' hosts BUFFER in a child frame (subframe); any other value
+shows it in the selected window via `switch-to-buffer' (the historical
+default — chat buffers replace the current window)."
+  (if (and (eq display-action 'child-frame)
+           (fboundp 'opencode-window-child-frame))
+      (opencode-window-child-frame buffer)
+    (switch-to-buffer buffer)))
+
+(defun opencode-chat-open (session-id &optional directory display-action backend)
   "Open a chat buffer for SESSION-ID.
 Fetches session data asynchronously -- the buffer appears immediately
 with a loading indicator, then populates when data arrives.
 DIRECTORY, if non-nil, pins the X-OpenCode-Directory header so that
 API calls use the correct project even for cross-project sessions.
-The buffer is always displayed in the current window via
-`display-buffer-same-window'.  The third argument is accepted for
-backward compatibility and ignored."
+DISPLAY-ACTION controls how the buffer is shown: `child-frame' hosts it
+in a child frame (subframe) via `opencode-window-child-frame'; any other
+value (the default) shows it in the selected window.  BACKEND defaults
+to `opencode-backend-current'."
   (interactive "sSession ID: ")
   ;; Check for existing buffer first
-  (let ((existing (opencode-chat--find-buffer session-id)))
+  (let* ((backend (or backend opencode-backend-current))
+         (existing (opencode-chat--find-buffer session-id backend)))
     (if existing
         (progn
-          (pop-to-buffer existing '(display-buffer-same-window))
+          (opencode-chat--display-buffer existing display-action)
           (with-current-buffer existing
             (opencode-chat--refresh)))
       ;; Create a temporary buffer name, then rename after session loads
@@ -1341,7 +1370,8 @@ backward compatibility and ignored."
              (buf (get-buffer-create tmp-name)))
         (with-current-buffer buf
           (unless (eq major-mode 'opencode-chat-mode)
-            (opencode-chat-mode))
+           (opencode-chat-mode))
+           (opencode-chat--set-backend backend)
            (opencode-chat--set-session-id session-id)
           (opencode--register-chat-buffer session-id (current-buffer))
           ;; Pin directory header IMMEDIATELY so the initial GET
@@ -1365,44 +1395,82 @@ backward compatibility and ignored."
                                 'read-only t)))
           ;; Note: SSE hooks are registered at module load time (see line ~2150)
           )
-        (pop-to-buffer buf '(display-buffer-same-window))
+        (opencode-chat--display-buffer buf display-action)
         ;; Retry cache load if it failed during startup
         (opencode-api-cache-ensure-loaded)
         ;; Fetch session info async, then rename buffer and load messages
-        (opencode-api-get
-         (format "/session/%s" session-id)
-         (lambda (response)
+        (opencode-backend-get-session
+         session-id
+         (lambda (session)
            (when (buffer-live-p buf)
              (with-current-buffer buf
-               (let ((session (plist-get response :body)))
-                 (when session
-                    (opencode-chat--set-session session)
-                   ;; Pin API directory from session's authoritative data.
-                   ;; The server stores the correct project directory;
-                   ;; opencode-default-directory may differ (e.g. $HOME).
-                   (when-let ((dir (plist-get session :directory)))
-                     (setq-local opencode-api-directory (directory-file-name dir))
-                     (setq default-directory (file-name-as-directory dir)))
-                   ;; Rename buffer to proper name
-                   (let ((proper-name (opencode-chat--buffer-name session)))
-                     (unless (get-buffer proper-name)
-                       (rename-buffer proper-name)))))
-               (opencode-chat--refresh t)))))))))  ;; initial open
+               (when session
+                 (opencode-chat--set-session session)
+                 ;; Pin API directory from session's authoritative data.
+                 ;; The server stores the correct project directory;
+                 ;; opencode-default-directory may differ (e.g. $HOME).
+                 (when-let ((dir (plist-get session :directory)))
+                   (setq-local opencode-api-directory (directory-file-name dir))
+                   (setq default-directory (file-name-as-directory dir)))
+                 ;; Rename buffer to proper name
+                 (let ((proper-name (opencode-chat--buffer-name session)))
+                   (unless (get-buffer proper-name)
+                     (rename-buffer proper-name))))
+               (opencode-chat--refresh t))))
+         backend)))))  ;; initial open
+
+;;; --- /btw side conversation (OpenCode) ---
+
+(declare-function opencode-session-fork "opencode-session" (session-id &optional message-id))
+
+(defun opencode-chat--btw (text)
+  "Open an OpenCode `/btw' side conversation seeded from the current session.
+Forks the current session (server-side copy; the original is untouched),
+opens the fork in a child frame, and -- when TEXT is non-empty -- sends
+TEXT as the first prompt in the fork.
+
+This is the OpenCode implementation of `/btw'.  Pi buffers do NOT call
+this; they defer to the `pi-btw' extension (the slash text is forwarded
+as a prompt)."
+  (let* ((session-id (opencode-chat--session-id))
+         (directory opencode-api-directory))
+    (unless session-id
+      (user-error "No active session to branch from"))
+    (let ((fork (opencode-session-fork session-id)))
+      (unless fork
+        (user-error "Fork failed"))
+      (let ((fork-id (plist-get fork :id))
+            (fork-dir (or (plist-get fork :directory) directory)))
+        (opencode-chat-open fork-id fork-dir 'child-frame 'opencode)
+        (when (and text (not (string-empty-p (string-trim text))))
+          (when-let* ((buf (opencode-chat--find-buffer fork-id 'opencode)))
+            (with-current-buffer buf
+              (opencode-chat--send text))))
+        fork-id))))
 
 ;;; --- Buffer lookup ---
 
-(defun opencode-chat--find-buffer (session-id)
+(defun opencode-chat--find-buffer (session-id &optional backend)
   "Find the chat buffer for SESSION-ID, or nil.
+When BACKEND is non-nil, only return a buffer using that backend.
 Tries the buffer registry for O(1) lookup first, then
 falls back to scanning `buffer-list'."
-  (or (and (fboundp 'opencode--chat-buffer-for-session)
-           (opencode--chat-buffer-for-session session-id))
-      (seq-find
-       (lambda (buf)
-         (with-current-buffer buf
-           (and (eq major-mode 'opencode-chat-mode)
-                (string= (opencode-chat--session-id) session-id))))
-       (buffer-list))))
+  (let ((registered (and (fboundp 'opencode--chat-buffer-for-session)
+                         (opencode--chat-buffer-for-session session-id))))
+    (or (and registered
+             (buffer-live-p registered)
+             (with-current-buffer registered
+               (or (null backend)
+                   (eq (opencode-chat--backend) backend)))
+             registered)
+        (seq-find
+         (lambda (buf)
+           (with-current-buffer buf
+             (and (eq major-mode 'opencode-chat-mode)
+                  (string= (opencode-chat--session-id) session-id)
+                  (or (null backend)
+                      (eq (opencode-chat--backend) backend)))))
+         (buffer-list)))))
 
 (provide 'opencode-chat)
 ;;; opencode-chat.el ends here

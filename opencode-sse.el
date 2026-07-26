@@ -23,6 +23,7 @@
 (require 'json)
 (require 'opencode-log)
 (require 'opencode-util)
+(require 'opencode-backend)
 (require 'map)
 
 (declare-function opencode-server-url "opencode-server" (&optional path))
@@ -58,89 +59,180 @@ OpenCode sends heartbeats every ~30s."
 ;;; --- Hook variables ---
 
 (defvar opencode-sse-event-hook nil
-  "Hook run for ALL SSE events.
+  "Chat-buffer-local hook run for all SSE events routed to that chat.
 Each function receives one argument: the event plist
 with :type, :properties, and optionally :directory.")
 
+(defvar opencode-sse-event-hook-global nil
+  "Global hook run for ALL SSE events.
+Each function receives one argument: the event plist
+with :type, :properties, and optionally :directory.")
+
+(defvar opencode-sse-after-dispatch-hook-global nil
+  "Hook run after global SSE hooks have processed an event.
+Each function receives one argument: the event plist.  This is intended
+for internal routing such as forwarding to chat-buffer-local SSE hooks.")
+
 (defvar opencode-sse-server-connected-hook nil
+  "Chat-buffer-local hook run when `server.connected' event is received.")
+
+(defvar opencode-sse-server-connected-hook-global nil
   "Hook run when `server.connected' event is received.")
 
 (defvar opencode-sse-server-heartbeat-hook nil
+  "Chat-buffer-local hook run when `server.heartbeat' event is received.")
+
+(defvar opencode-sse-server-heartbeat-hook-global nil
   "Hook run when `server.heartbeat' event is received.")
 
 (defvar opencode-sse-session-updated-hook nil
-  "Hook run when `session.updated' event is received.
+  "Chat-buffer-local hook run when `session.updated' event is received.
+Functions receive the event plist with :properties containing :sessionID.")
+
+(defvar opencode-sse-session-updated-hook-global nil
+  "Global hook run when `session.updated' event is received.
 Functions receive the event plist with :properties containing :sessionID.")
 
 (defvar opencode-sse-message-updated-hook nil
-  "Hook run when `message.updated' event is received.
+  "Chat-buffer-local hook run when `message.updated' event is received.
+Functions receive the event plist.")
+
+(defvar opencode-sse-message-updated-hook-global nil
+  "Global hook run when `message.updated' event is received.
 Functions receive the event plist.")
 
 (defvar opencode-sse-message-part-updated-hook nil
-  "Hook run when `message.part.updated' event is received.
+  "Chat-buffer-local hook run when `message.part.updated' event is received.
+This is the core streaming event.  Functions receive the event plist
+with :properties containing :sessionID, :messageID, and :part.")
+
+(defvar opencode-sse-message-part-updated-hook-global nil
+  "Global hook run when `message.part.updated' event is received.
 This is the core streaming event.  Functions receive the event plist
 with :properties containing :sessionID, :messageID, and :part.")
 
 (defvar opencode-sse-message-part-removed-hook nil
-  "Hook run when `message.part.removed' event is received.")
+  "Chat-buffer-local hook run when `message.part.removed' event is received.")
+
+(defvar opencode-sse-message-part-removed-hook-global nil
+  "Global hook run when `message.part.removed' event is received.")
 
 (defvar opencode-sse-message-removed-hook nil
-  "Hook run when `message.removed' event is received.")
+  "Chat-buffer-local hook run when `message.removed' event is received.")
+
+(defvar opencode-sse-message-removed-hook-global nil
+  "Global hook run when `message.removed' event is received.")
 
 (defvar opencode-sse-session-status-hook nil
-  "Hook run when `session.status' event is received.
+  "Chat-buffer-local hook run when `session.status' event is received.
+Functions receive event plist with :sessionID and :status.")
+
+(defvar opencode-sse-session-status-hook-global nil
+  "Global hook run when `session.status' event is received.
 Functions receive event plist with :sessionID and :status.")
 
 (defvar opencode-sse-session-idle-hook nil
-  "Hook run when `session.idle' event is received.
+  "Chat-buffer-local hook run when `session.idle' event is received.
+Functions receive the event plist with :properties containing :sessionID.")
+
+(defvar opencode-sse-session-idle-hook-global nil
+  "Global hook run when `session.idle' event is received.
 Functions receive the event plist with :properties containing :sessionID.")
 
 (defvar opencode-sse-session-diff-hook nil
-  "Hook run when `session.diff' event is received.")
+  "Chat-buffer-local hook run when `session.diff' event is received.")
+
+(defvar opencode-sse-session-diff-hook-global nil
+  "Global hook run when `session.diff' event is received.")
 
 (defvar opencode-sse-question-asked-hook nil
-  "Hook run when `question.asked' event is received.")
+  "Chat-buffer-local hook run when `question.asked' event is received.")
+
+(defvar opencode-sse-question-asked-hook-global nil
+  "Global hook run when `question.asked' event is received.")
 
 (defvar opencode-sse-permission-asked-hook nil
-  "Hook run when `permission.asked' event is received.")
+  "Chat-buffer-local hook run when `permission.asked' event is received.")
+
+(defvar opencode-sse-permission-asked-hook-global nil
+  "Global hook run when `permission.asked' event is received.")
 
 (defvar opencode-sse-global-disposed-hook nil
-  "Hook run when `global.disposed' event is received.")
+  "Chat-buffer-local hook run when `global.disposed' event is received.")
+
+(defvar opencode-sse-global-disposed-hook-global nil
+  "Global hook run when `global.disposed' event is received.")
 
 (defvar opencode-sse-server-instance-disposed-hook nil
-  "Hook run when `server.instance.disposed' event is received.
+  "Chat-buffer-local hook run when `server.instance.disposed' event is received.
+The server disposes instances when files change or the project reloads.
+This is informational only — the global SSE connection remains alive.")
+
+(defvar opencode-sse-server-instance-disposed-hook-global nil
+  "Global hook run when `server.instance.disposed' event is received.
 The server disposes instances when files change or the project reloads.
 This is informational only — the global SSE connection remains alive.")
 
 (defvar opencode-sse-session-deleted-hook nil
-  "Hook run when `session.deleted' event is received.")
+  "Chat-buffer-local hook run when `session.deleted' event is received.")
+
+(defvar opencode-sse-session-deleted-hook-global nil
+  "Global hook run when `session.deleted' event is received.")
 
 (defvar opencode-sse-session-error-hook nil
-  "Hook run when `session.error' event is received.")
+  "Chat-buffer-local hook run when `session.error' event is received.")
+
+(defvar opencode-sse-session-error-hook-global nil
+  "Global hook run when `session.error' event is received.")
 
 (defvar opencode-sse-session-compacted-hook nil
-  "Hook run when `session.compacted' event is received.")
+  "Chat-buffer-local hook run when `session.compacted' event is received.")
+
+(defvar opencode-sse-session-compacted-hook-global nil
+  "Global hook run when `session.compacted' event is received.")
 
 (defvar opencode-sse-session-created-hook nil
-  "Hook run when `session.created' event is received.")
+  "Chat-buffer-local hook run when `session.created' event is received.")
+
+(defvar opencode-sse-session-created-hook-global nil
+  "Global hook run when `session.created' event is received.")
 
 (defvar opencode-sse-todo-updated-hook nil
-  "Hook run when `todo.updated' event is received.")
+  "Chat-buffer-local hook run when `todo.updated' event is received.")
+
+(defvar opencode-sse-todo-updated-hook-global nil
+  "Global hook run when `todo.updated' event is received.")
 
 (defvar opencode-sse-permission-replied-hook nil
-  "Hook run when `permission.replied' event is received.")
+  "Chat-buffer-local hook run when `permission.replied' event is received.")
+
+(defvar opencode-sse-permission-replied-hook-global nil
+  "Global hook run when `permission.replied' event is received.")
 
 (defvar opencode-sse-question-replied-hook nil
-  "Hook run when `question.replied' event is received.")
+  "Chat-buffer-local hook run when `question.replied' event is received.")
+
+(defvar opencode-sse-question-replied-hook-global nil
+  "Global hook run when `question.replied' event is received.")
 
 (defvar opencode-sse-question-rejected-hook nil
-  "Hook run when `question.rejected' event is received.")
+  "Chat-buffer-local hook run when `question.rejected' event is received.")
+
+(defvar opencode-sse-question-rejected-hook-global nil
+  "Global hook run when `question.rejected' event is received.")
 
 (defvar opencode-sse-installation-update-available-hook nil
-  "Hook run when `installation.update-available' event is received.")
+  "Chat-buffer-local hook run for `installation.update-available'.")
+
+(defvar opencode-sse-installation-update-available-hook-global nil
+  "Global hook run when `installation.update-available' event is received.")
 
 (defvar opencode-sse-tui-toast-show-hook nil
-  "Hook run when `tui.toast.show' event is received.
+  "Chat-buffer-local hook run when `tui.toast.show' event is received.
+Functions receive the event plist with :properties containing :message.")
+
+(defvar opencode-sse-tui-toast-show-hook-global nil
+  "Global hook run when `tui.toast.show' event is received.
 Functions receive the event plist with :properties containing :message.")
 ;;; --- Internal state ---
 
@@ -193,9 +285,9 @@ Public API."
 
 (defun opencode-sse--ensure-buffer ()
   "Ensure the SSE accumulation buffer exists and return it."
-  (or (and opencode-sse--buffer
-           (buffer-live-p opencode-sse--buffer)
-           opencode-sse--buffer)
+  (or (and (bufferp opencode-sse--buffer)
+            (buffer-live-p opencode-sse--buffer)
+            opencode-sse--buffer)
       (setq opencode-sse--buffer
             (let ((buf (generate-new-buffer " *opencode-sse-accum*")))
               (with-current-buffer buf
@@ -274,19 +366,23 @@ every handler run."
   (condition-case err
       (let ((event (opencode-sse--parse-event event-type data-string id)))
         (when event
+          (plist-put event :backend-event
+                     (opencode-backend-normalize-event event))
           (opencode-sse--run-hooks event)))
     (error
      (opencode--debug "opencode-sse: Error dispatching event %s: %s"
               event-type (error-message-string err)))))
 
 (defun opencode-sse--parse-event (event-type data-string id)
-  "Parse DATA-STRING into a normalized event plist, or nil to skip.
+  "Parse DATA-STRING into a native event plist, or nil to skip.
 Handles two envelope formats:
   - Global:   {directory, payload: {type, properties}}
   - Instance: {type, properties}
 Sync envelopes ({payload: {type: \"sync\", syncEvent: {...}}}) return
 nil: the server re-publishes every sync event as a bus event for
-backwards compatibility, so processing both duplicates handler calls."
+backwards compatibility, so processing both duplicates handler calls.
+`opencode-sse--dispatch-event' attaches `:backend-event' after parsing;
+that canonical event is the adapter seam for non-OpenCode backends."
   (let* ((json-data (opencode--json-parse data-string))
          (payload (plist-get json-data :payload)))
     (cond
@@ -304,10 +400,10 @@ backwards compatibility, so processing both duplicates handler calls."
       (list :type (plist-get json-data :type)
             :properties (plist-get json-data :properties)
             :id id))
-     ;; Fallback: use the SSE event-type field
-     (t (list :type event-type
-              :properties json-data
-              :id id)))))
+      ;; Fallback: use the SSE event-type field
+      (t (list :type event-type
+               :properties json-data
+               :id id)))))
 
 (defun opencode-sse--run-hooks (event)
   "Run the catch-all and type-specific hooks for EVENT."
@@ -317,11 +413,12 @@ backwards compatibility, so processing both duplicates handler calls."
              (plist-get event :directory)
              (and (plist-get event :properties)
                   (map-keys (plist-get event :properties))))
-    (run-hook-with-args 'opencode-sse-event-hook event)
-    (when-let* ((hook (opencode-sse--hook-for-type type)))
+    (run-hook-with-args 'opencode-sse-event-hook-global event)
+    (when-let* ((hook (opencode-sse--global-hook-for-type type)))
       (opencode--debug "opencode-sse: dispatching to %s (%d listeners)"
                hook (length (symbol-value hook)))
-      (run-hook-with-args hook event))))
+      (run-hook-with-args hook event))
+    (run-hook-with-args 'opencode-sse-after-dispatch-hook-global event)))
 
 (defconst opencode-sse--type->hook
   '(("server.connected"              . opencode-sse-server-connected-hook)
@@ -356,6 +453,11 @@ backwards compatibility, so processing both duplicates handler calls."
   "Return the hook variable for event TYPE string, or nil."
   (cdr (assoc type opencode-sse--type->hook)))
 
+(defun opencode-sse--global-hook-for-type (type)
+  "Return the global hook variable for event TYPE string, or nil."
+  (when-let* ((hook (opencode-sse--hook-for-type type)))
+    (intern (format "%s-global" (symbol-name hook)))))
+
 ;;; --- Process filter ---
 
 (defun opencode-sse--filter (_process output)
@@ -371,33 +473,37 @@ Two key optimizations:
    region once.  Per-line delete-region is O(remaining-size) each,
    giving O(k*n) for k lines; one bulk delete is O(n) total."
   (let ((accum-buf (opencode-sse--ensure-buffer))
-        (has-nl (string-search "\n" output)))
+        (has-nl (string-search "\n" output))
+        lines bytes-remaining)
     (with-current-buffer accum-buf
       ;; O(1) append — gap buffer moves gap to end
       (goto-char (point-max))
       (insert output)
       (when has-nl
         (goto-char (point-min))
-        (let ((line-count 0)
-              (consumed-end (point-min)))
-          ;; Scan forward collecting lines — don't delete yet.
+        (let ((consumed-end (point-min)))
+          ;; Scan forward collecting lines, then delete before dispatch.
+          ;; Dispatch hooks can reconnect/reset SSE state, which can kill or
+          ;; replace this accumulator buffer.  Holding buffer positions across
+          ;; hook dispatch can therefore make `delete-region' see stale bounds.
           (while (search-forward "\n" nil t)
             (let* ((nl-pos (point))
                    (raw-line (buffer-substring-no-properties
-                              consumed-end (1- nl-pos)))
-                   (line (if (and (> (length raw-line) 0)
-                                 (eq (aref raw-line (1- (length raw-line))) ?\r))
-                             (substring raw-line 0 -1)
-                           raw-line)))
-              (setq consumed-end nl-pos)
-              (setq line-count (1+ line-count))
-              (opencode-sse--process-line line)))
-          ;; Single bulk delete of all consumed data
+                              consumed-end (1- nl-pos))))
+              (push (if (and (> (length raw-line) 0)
+                             (eq (aref raw-line (1- (length raw-line))) ?\r))
+                        (substring raw-line 0 -1)
+                      raw-line)
+                    lines)
+              (setq consumed-end nl-pos)))
           (when (> consumed-end (point-min))
             (delete-region (point-min) consumed-end))
-          (when (> line-count 0)
-            (opencode--debug "opencode-sse: processed %d lines, %d bytes remaining"
-                             line-count (- (point-max) (point-min)))))))))
+          (setq bytes-remaining (- (point-max) (point-min))))))
+    (dolist (line (nreverse lines))
+      (opencode-sse--process-line line))
+    (when lines
+      (opencode--debug "opencode-sse: processed %d lines, %d bytes remaining"
+                       (length lines) bytes-remaining))))
 
 ;;; --- Sentinel ---
 

@@ -30,15 +30,10 @@
            opencode-tool-success
            opencode-tool-error
            opencode-tool-duration
-           opencode-session-active
-           opencode-session-idle
-           opencode-session-archived
-           opencode-session-title
-           opencode-session-time
-           opencode-session-id
-           opencode-session-stats
-           opencode-project-header
-           opencode-diff-added
+            opencode-session-active
+            opencode-session-idle
+            opencode-session-archived
+            opencode-diff-added
            opencode-diff-removed
            opencode-diff-hunk-header
            opencode-diff-file-header

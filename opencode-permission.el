@@ -14,7 +14,9 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'opencode-api)
+(require 'opencode-backend)
 (require 'opencode-faces)
 (require 'opencode-popup)
 (require 'opencode-log)
@@ -87,7 +89,7 @@ Runs in the chat buffer context (dispatched by session-id)."
 ;;; --- Display ---
 
 
-(defun opencode-permission--format-patterns-short (patterns permission)
+(cl-defun opencode-permission--format-patterns-short (&key patterns permission)
   "Format PATTERNS as a short semicolon-separated string for button labels.
 Each individual pattern is truncated to 20 chars.  Falls back to PERMISSION
 if PATTERNS is empty.  Uses `opencode--truncate-string' from opencode-util."
@@ -161,8 +163,9 @@ The standalone buffer is only used by `render-standalone' for tests."
       (insert (propertize " a Allow once " 'face 'opencode-popup-option))
       (insert " ")
       (let* ((always-pats (plist-get request :always))
-             (pattern-str (opencode-permission--format-patterns-short
-                           (or always-pats patterns) permission)))
+              (pattern-str (opencode-permission--format-patterns-short
+                            :patterns (or always-pats patterns)
+                            :permission permission)))
         (insert (propertize (format " A Allow always (%s) " pattern-str)
                             'face 'opencode-popup-option)))
       (insert " ")
@@ -211,8 +214,9 @@ The standalone buffer is only used by `render-standalone' for tests."
                 perm-id "\n\n")
         ;; Key hints
         (let* ((always-pats (plist-get request :always))
-               (pattern-str (opencode-permission--format-patterns-short
-                             (or always-pats patterns) permission)))
+                (pattern-str (opencode-permission--format-patterns-short
+                              :patterns (or always-pats patterns)
+                              :permission permission)))
           (insert (propertize "[a]" 'face 'opencode-popup-key)
                   " Allow once  "
                   (propertize "[A]" 'face 'opencode-popup-key)
@@ -231,23 +235,41 @@ The standalone buffer is only used by `render-standalone' for tests."
 
 ;;; --- Reply ---
 
-(defun opencode-permission--reply (choice &optional message)
+(cl-defun opencode-permission-reply (&key id choice message)
+  "Reply to permission request ID with CHOICE.
+CHOICE is \"once\", \"always\", or \"reject\".  MESSAGE is an optional
+reply message.  This is the public API for users handling permission
+requests from SSE hooks."
+  (opencode-backend-reply-permission id choice message))
+
+(cl-defun opencode-permission--default-always-message (&key request)
+  "Return the default always-allow message for permission REQUEST."
+  (let* ((always-pats (plist-get request :always))
+         (patterns (plist-get request :patterns))
+         (permission (or (plist-get request :permission) "unknown")))
+    (if (and always-pats (length> always-pats 0))
+        (mapconcat #'identity always-pats ", ")
+      (if (and patterns (length> patterns 0))
+          (mapconcat #'identity patterns ", ")
+        permission))))
+
+(cl-defun opencode-permission--reply (&key choice message id request)
   "Send CHOICE reply for the current permission request.
 CHOICE is \"once\", \"always\", or \"reject\".
-MESSAGE is an optional rejection reason string."
-  (unless opencode-permission--current
+MESSAGE is an optional rejection reason string.
+ID and REQUEST let Lisp callers reply to a specific request instead of
+the currently displayed popup."
+  (unless (or request opencode-permission--current)
     (user-error "No active permission request"))
-  (let* ((perm-id (plist-get opencode-permission--current :id))
-         (body (if message
-                   (list :reply choice :message message)
-                 (list :reply choice)))
+  (let* ((target (or request opencode-permission--current))
+         (perm-id (or id (plist-get target :id)))
          (saved-current opencode-permission--current))
-    (opencode--debug "opencode-permission: replying id=%s choice=%s body=%S" perm-id choice body)
+    (opencode--debug "opencode-permission: replying id=%s choice=%s message=%S" perm-id choice message)
     (condition-case err
-        (opencode-api--request
-         "POST"
-         (format "/permission/%s/reply" perm-id)
-         body)
+        (opencode-permission-reply
+         :id perm-id
+         :choice choice
+         :message message)
       (opencode-api-error
        (message "opencode-permission: reply failed: %s" (error-message-string err))))
     ;; Clean up — but only if on-replied didn't already handle it.
@@ -264,36 +286,31 @@ MESSAGE is an optional rejection reason string."
 
 ;;; --- Interactive commands ---
 
-(defun opencode-permission--allow-once ()
+(defun opencode-permission--allow-once (&optional id)
   "Allow the current permission request once."
   (interactive)
-  (opencode-permission--reply "once"))
+  (opencode-permission--reply :choice "once" :id id))
 
 (defun opencode-permission--allow-always ()
   "Allow the current permission request always.
 Sends the pattern being approved in the message field so the user
 can see exactly what was always-allowed in the permission popup."
   (interactive)
-  (let* ((always-pats (plist-get opencode-permission--current :always))
-         (patterns (plist-get opencode-permission--current :patterns))
-         (permission (or (plist-get opencode-permission--current :permission) "unknown"))
-         (pattern-str (if (and always-pats (length> always-pats 0))
-                          (mapconcat #'identity always-pats ", ")
-                        (if (and patterns (length> patterns 0))
-                            (mapconcat #'identity patterns ", ")
-                          permission))))
-    (opencode-permission--reply "always" pattern-str)))
+  (opencode-permission--reply
+   :choice "always"
+   :message (opencode-permission--default-always-message
+             :request opencode-permission--current)))
 
 (defun opencode-permission--reject ()
   "Reject the current permission request."
   (interactive)
-  (opencode-permission--reply "reject"))
+  (opencode-permission--reply :choice "reject"))
 
 (defun opencode-permission--reject-with-message ()
   "Reject the current permission request with a reason message."
   (interactive)
   (let ((msg (read-string "Rejection reason: ")))
-    (opencode-permission--reply "reject" msg)))
+    (opencode-permission--reply :choice "reject" :message msg)))
 
 ;;; --- SSE replied handler ---
 

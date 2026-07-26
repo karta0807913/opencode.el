@@ -16,6 +16,7 @@ These client-side commands are available via `C-p` (opencode-command-select) in 
 | `/unshare` | Revoke the shareable URL | `POST /session/:id/unshare` |
 | `/undo` | Revert to the previous user message | `POST /session/:id/revert` |
 | `/redo` | Restore the reverted message | `POST /session/:id/unrevert` |
+| `/btw` | Side conversation. OpenCode: fork the session into a child-frame aside. Pi: forwarded to the `pi-btw` extension | `POST /session/:id/fork` (OpenCode) / prompt passthrough (Pi) |
 
 ## Build & Test
 
@@ -48,6 +49,10 @@ opencode.el          Entry point, requires all modules, keymaps, defgroup
 opencode-server.el   Server subprocess lifecycle, health check, port parsing
 opencode-api.el      HTTP client (url.el), JSON parse/serialize, prompt body builder
 opencode-api-cache.el  Cache facade: micro-cache (agents/config/providers), session stale-on-timeout, startup-safe load/retry
+opencode-backend.el  Backend abstraction: registry, capability declarations, normalized session/message/part/event shapes
+opencode-pi-rpc.el   Pi backend transport: `pi --mode rpc` subprocess, LF-only JSONL framing, request/response correlation, extension-UI replies
+opencode-pi.el       Pi backend adapter: message/event normalizers, RPC command mapping, conn registry, extension-UI->popup bridge, runtime event router, on-disk session enumeration, `opencode-pi` entry point
+opencode-pi-widget.el  Pi extension widget surface: keyed setWidget/setStatus replace-on-update model, GUI child frame / terminal bottom side-window (drives `/btw` output)
 opencode-sse.el      SSE transport via curl subprocess (--no-buffer), event dispatch to global hooks
 opencode-chat.el     Chat buffer, SSE event routing, session state, refresh orchestration, queued indicator lifecycle
 opencode-chat-state.el  Consolidated buffer-local state struct + accessors (busy, queued, pending-msg-ids, tokens, agent/model)
@@ -351,7 +356,125 @@ opencode-chat--find-buffer    ; cross-module internal
 - **Buffer-local vars**: Declare with `defvar-local`. Initialize in mode function
 - **Cross-module refs**: Use `(declare-function ...)` to avoid byte-compile warnings without circular requires
 - **Right-alignment**: Use `(space :align-to (- right N))` display property. `mode-line-format-right-align` does NOT work in `header-line-format` (Emacs bug #71835)
-- **Marker insertion types**: When creating markers that must stay before subsequently-inserted content (e.g. `messages-end` before the input area), use `nil` insertion type initially, render surrounding content, THEN switch to `t` with `set-marker-insertion-type`
+ - **Marker insertion types**: When creating markers that must stay before subsequently-inserted content (e.g. `messages-end` before the input area), use `nil` insertion type initially, render surrounding content, THEN switch to `t` with `set-marker-insertion-type`
+
+## Pi Backend (`opencode-pi`)
+
+opencode.el supports a second backend, **Pi** (https://github.com/earendil-works/pi),
+selected per chat buffer (`opencode-chat--backend` → `'pi`).  Pi has **no HTTP
+server** — it is a per-session `pi --mode rpc` subprocess speaking
+newline-delimited JSON over stdin/stdout.  The backend facade
+(`opencode-backend-*`) and the chat/popup UI are unchanged; only the registered
+`pi` backend's `*-fn` slots and a stdio transport differ from OpenCode.
+
+Start with `M-x opencode-pi` (offers a resume picker over on-disk sessions, or a
+new session).
+
+### Transport vs OpenCode
+
+| Axis | OpenCode | Pi |
+|------|----------|----|
+| Process | One HTTP server, many sessions | One `pi --mode rpc` subprocess **per session/buffer** |
+| Commands | HTTP request/response | JSON line on subprocess **stdin** |
+| Events | SSE `GET /global/event` (curl) | JSON line on subprocess **stdout** (no `id`) |
+| Session id | server `ses_…` | Pi `sessionId` UUID / JSONL file path |
+| Sessions list | `GET /session` | enumerate `~/.pi/agent/sessions/**/*.jsonl` |
+| Permissions/questions | dedicated events + POST reply | `extension_ui_request`/`extension_ui_response` (push only) |
+| Diffs / todos | `GET …/diff` / `…/todo` | **none** (capability off; UI gated) |
+| Streaming unit | `message.part.updated` (+`delta`) | `message_update` w/ `assistantMessageEvent` |
+| Busy / idle | `session.status` busy/idle | `agent_start` / `agent_end` |
+| Prompt while busy | server queues | `steer` (default) or `follow_up` (`opencode-pi-steering-mode`) |
+
+### Modules
+
+- **`opencode-pi-rpc.el`** — transport only.  `opencode-pi-rpc-start` spawns the
+  subprocess; the stdout filter frames JSONL (LF-only, strip trailing `\r`) and
+  routes: `type:"response"` → pending request callback (by `id`),
+  `type:"extension_ui_request"` → ui-handler, everything else → event-handler.
+  `opencode-pi-rpc-send` / `-request-sync` write commands; the sentinel fails
+  pending requests on exit.  **Reentrancy rule (same as `opencode-sse--filter`):
+  collect complete lines, delete the consumed region, THEN dispatch outside the
+  work buffer** — a handler may stop the conn mid-dispatch.
+- **`opencode-pi.el`** — adapter.  Pure normalizers (`opencode-pi--message`,
+  `opencode-pi--event`), RPC command fns, conn registry
+  (`opencode-pi-bind-conn` / `opencode-pi-conn-for`), the extension-UI→popup
+  bridge, the runtime event router (`opencode-pi--route-event`), on-disk session
+  enumeration (`opencode-pi-list-sessions`), and the `opencode-pi` entry point.
+
+### Pi event → chat handler map (runtime router)
+
+`opencode-pi--route-event` converts each raw Pi event into the OpenCode-shaped
+SSE event the chat handlers already consume, dispatched by session id:
+
+| Pi event | Chat handler | Synthetic event |
+|----------|--------------|-----------------|
+| `agent_start` | `on-session-status` + `on-message-updated` | busy status + assistant bootstrap |
+| `agent_end` | `on-session-idle` | leave busy |
+| `message_update` (text/thinking/toolcall delta) | `on-part-updated` | `:part {type,messageID}` + `:delta` |
+| `message_start`/`message_end`/`turn_end` | `on-message-updated` | refresh bounce |
+| `compaction_start`/`compaction_end` | `on-session-compacted` | history rewrite |
+| `extension_error` | `on-session-error` | error |
+
+Streaming parts carry a stable `:messageID` (`<sid>/asst`) so the chat
+bootstrap (`:need-msg`) can create an owning message; `agent_start` pre-emits
+that assistant `message.updated` so the first delta has a section to insert into.
+
+### Extension-UI ↔ popup bridge
+
+Pi has no permission/question API.  `extension_ui_request` events drive the
+existing popups:
+
+| Pi UI method | Popup | Reply |
+|--------------|-------|-------|
+| `confirm` | permission popup | `extension_ui_response {confirmed}` (once/always→t, reject→nil) |
+| `select` | question popup (options) | `extension_ui_response {value}` |
+| `input`/`editor` | question popup (free text) | `extension_ui_response {value}` |
+| `setWidget` | widget surface (`opencode-pi-widget`) | none (fire-and-forget) |
+| `setStatus` | widget status line | none |
+| `notify` | echo area (`message`) | none |
+| `setTitle`/`set_editor_text` | ignored | none |
+
+`opencode-pi--ui-requests` maps request id → conn so the popup reply
+(registered `reply-permission-fn` / `reply-question-fn` / `reject-question-fn`)
+reaches the right subprocess.  A killed popup sends `cancelled:t`.
+
+The fire-and-forget `setWidget`/`setStatus` methods are the surface that
+extensions like **`pi-btw`** (a third-party `/btw` side-conversation extension —
+NOT built into Pi, NOT a fork) use to stream their output.  `/btw` runs an
+in-process sub-session inside the `pi` subprocess (seeded from the current
+branch, kept out of the main agent context, journaled as invisible `custom`
+JSONL entries), so it has **zero** effect on opencode.el's session/cache model —
+the only client work is rendering the widget events via `opencode-pi-widget.el`
+(GUI child frame, terminal bottom side-window; keyed, replace-on-update).
+
+### `/btw` is backend-split
+
+`opencode-chat--send` intercepts `/btw` (exact `/btw` or `/btw <args>`; NOT
+`/btwxyz` or pi-btw's `/btw:tangent` lifecycle forms) only when the buffer
+backend is **`opencode`** — it forks the session and opens the fork in a child
+frame (`opencode-chat--btw` → `opencode-session-fork` → `opencode-chat-open …
+'child-frame`).  On **Pi** the interception is skipped and `/btw …` falls
+through to the normal slash send, reaching the user's `pi-btw` extension (whose
+output we render via the widget surface above).  The `opencode-command-select`
+picker lists `/btw`; its callback (`opencode-command--btw`) is backend-aware and
+dispatches the same way.  `opencode-chat-open`'s `display-action` arg now honors
+`child-frame` (via `opencode-chat--display-buffer` → `opencode-window-child-frame`);
+other values keep the prior selected-window behavior.
+
+### Pi capability flags
+
+Registered: `sessions messages streaming tools models permissions questions`.
+Permissions/questions are **push-driven** (no list pull → `list-questions-fn` /
+`list-permissions-fn` stay nil).  `diffs` and `todos` are **off** — guarded in
+`opencode-chat--on-session-diff` and `opencode-chat--fetch-inline-todos` via
+`opencode-backend-capable-p`.
+
+### Pi defcustoms
+
+- `opencode-pi-program` (default `"pi"`)
+- `opencode-pi-session-dir` (default `~/.pi/agent/sessions/`)
+- `opencode-pi-steering-mode` (`steer` | `follow-up`, default `steer`)
+- `opencode-pi-request-timeout` (sync RPC wait, default 10s)
 
 ## OpenCode Server Architecture
 

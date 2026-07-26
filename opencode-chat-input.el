@@ -25,6 +25,7 @@
 (require 'opencode-log)
 (require 'opencode-util)
 (require 'opencode-api)
+(require 'opencode-backend)
 (require 'opencode-agent)
 (require 'opencode-config)
 (require 'opencode-session)
@@ -1191,16 +1192,33 @@ present."
                        mentions images new-msg-id context)))
     (opencode--debug "opencode-chat: sending prompt_async sid=%s body=%S"
                      session-id prompt-body)
-    (opencode-api-post
-     (format "/session/%s/prompt_async" session-id)
+    (opencode-backend-send-prompt
+     session-id
      prompt-body
      (lambda (response)
        (opencode--debug "opencode-chat: prompt_async callback status=%s body=%S"
                         (plist-get response :status)
                         (plist-get response :body))
        ;; Response and state handled via SSE events + hooks
-       nil))
+       nil)
+     (opencode-chat--backend)
+     (opencode-chat--busy))
     (message "Sent")))
+
+(declare-function opencode-chat--btw "opencode-chat" (text))
+
+(defun opencode-chat--btw-command-p (text)
+  "Return non-nil if TEXT is a `/btw' command (exactly /btw or /btw <args>).
+Does not match `/btw:foo' lifecycle variants (those are pi-btw's), nor
+other commands that merely start with the letters btw."
+  (and (stringp text)
+       (string-match-p "\\`/btw\\(?:[ \t]\\|\\'\\)" text)))
+
+(defun opencode-chat--btw-args (text)
+  "Return the argument string after `/btw' in TEXT (may be empty)."
+  (if (string-match "\\`/btw[ \t]+\\(.*\\)\\'" text)
+      (string-trim (match-string 1 text))
+    ""))
 
 (defun opencode-chat--send (&optional text-override)
   "Send the current input as a message.
@@ -1219,6 +1237,29 @@ If the input starts with \"/\", route via `--send-slash-command' (POST
     (when (and (or (null text) (string-empty-p text))
                (null images))
       (user-error "Nothing to send"))
+    (if (and text
+             (opencode-chat--btw-command-p text)
+             (eq (opencode-chat--backend) 'opencode))
+        ;; Backend-aware /btw interception (OpenCode only): fork into a
+        ;; child-frame aside instead of sending to the current session.  Pi
+        ;; defers to its `pi-btw' extension via the normal slash path below.
+        (progn
+          (unless text-override
+            (opencode-chat--input-history-push text)
+            (opencode-chat--clear-input))
+          (opencode-chat--btw (opencode-chat--btw-args text)))
+      (opencode-chat--send-normal text text-override mentions images
+                                  new-msg-id session-id)))
+  (opencode-chat--drain-popup-queue)
+  ;; Move cursor to editable input position (after "> " prompt)
+  (when-let* ((start (opencode-chat--input-content-start)))
+    (goto-char start)))
+
+(defun opencode-chat--send-normal (text text-override mentions images new-msg-id session-id)
+  "Send TEXT to SESSION-ID the normal way (optimistic insert + dispatch).
+TEXT-OVERRIDE, MENTIONS, IMAGES, NEW-MSG-ID carry the send context.
+Slash commands route via `--send-slash-command'; otherwise `--send-prompt'."
+  (let ((text text))
     ;; Push to input history before clearing
     (unless text-override
       (opencode-chat--input-history-push text)
@@ -1251,11 +1292,7 @@ If the input starts with \"/\", route via `--send-slash-command' (POST
                               :session-id session-id
                               :message-id new-msg-id
                               :mentions mentions
-                              :images images)))
-  (opencode-chat--drain-popup-queue)
-  ;; Move cursor to editable input position (after "> " prompt)
-  (when-let* ((start (opencode-chat--input-content-start)))
-    (goto-char start)))
+                              :images images))))
 
 (defun opencode-chat-abort ()
   "Abort the current generation."

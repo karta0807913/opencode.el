@@ -417,6 +417,57 @@ Buffer-local hooks run in the chat buffer context:
             (message "Sent message: %s" msg-id)))
 ```
 
+### Example: Handle Permissions Yourself
+
+If you do not want to use the built-in popup, listen to the SSE hook and
+call the public reply API yourself:
+
+```elisp
+(add-hook 'opencode-sse-permission-asked-hook
+          (lambda (event)
+            (let* ((props (plist-get event :properties))
+                   (id (plist-get props :id))
+                   (permission (plist-get props :permission)))
+              (when (string= permission "file.read")
+                (opencode-permission-reply
+                 :id id
+                 :choice "once")))))
+```
+
+Use `:choice "once"`, `:choice "always"`, or `:choice "reject"`.
+Pass `:message` when you want OpenCode to see a reason or scope note.
+
+### Example: Handle Questions Yourself
+
+Question events can be answered or rejected from hooks without using the
+built-in popup:
+
+```elisp
+(add-hook 'opencode-sse-question-asked-hook
+          (lambda (event)
+            (let* ((props (plist-get event :properties))
+                   (id (plist-get props :id)))
+              (opencode-question-reply
+               :id id
+               :answers '(("Use existing tests"))))))
+```
+
+For multiple questions, pass one answer list per question:
+
+```elisp
+(opencode-question-reply
+ :id "question_123"
+ :answers '(("PostgreSQL") ("Add migration tests")))
+```
+
+To reject:
+
+```elisp
+(opencode-question-reject
+ :id "question_123"
+ :message "Not relevant for this project")
+```
+
 ## Sub-Agent Sessions
 
 OpenCode supports sub-agents — child sessions spawned by a parent session's `task` tool call. Child sessions have full input areas, allowing you to send messages directly to the sub-agent.
@@ -441,6 +492,12 @@ When OpenCode needs your input, a popup appears inline in the chat buffer:
 - **Questions**: Answer multiple-choice or open-ended questions
 
 Use the displayed keys to respond. The popup appears in both the parent and child session buffers when applicable.
+
+Question popups support extra context:
+
+- Select an option and press `m` (`More`) to edit a prefilled answer like `Option - `.
+- Select `Others` and press `m` to type a free-form answer with no prefix.
+- Press `RET` to submit the selected or edited answer.
 
 ## Server Status
 

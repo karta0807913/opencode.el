@@ -139,53 +139,21 @@ On GUI frames, uses dashed underline (Emacs 30)."
   "Face for tool call duration (e.g., 0.3s)."
   :group 'opencode-faces)
 
-;;; --- Session list faces ---
+;;; --- Session state faces ---
 
 (defface opencode-session-active
   '((t :inherit success :weight bold))
-  "Face for active (busy) sessions in session list."
+  "Face for active (busy) sessions."
   :group 'opencode-faces)
 
 (defface opencode-session-idle
   '((t :inherit default))
-  "Face for idle sessions in session list."
+  "Face for idle sessions."
   :group 'opencode-faces)
 
 (defface opencode-session-archived
   '((t :inherit font-lock-comment-face))
-  "Face for archived sessions in session list."
-  :group 'opencode-faces)
-
-(defface opencode-session-title
-  '((t :inherit bold))
-  "Face for session titles."
-  :group 'opencode-faces)
-
-(defface opencode-session-time
-  '((t :inherit font-lock-comment-face))
-  "Face for session timestamps (e.g., 2 min ago)."
-  :group 'opencode-faces)
-
-(defface opencode-session-id
-  '((t :inherit font-lock-comment-face :slant italic))
-  "Face for session IDs."
-  :group 'opencode-faces)
-
-(defface opencode-session-stats
-  '((t :inherit font-lock-number-face))
-  "Face for session stats (e.g., +8 -3  2 files)."
-  :group 'opencode-faces)
-
-(defface opencode-session-empty
-  '((t :inherit font-lock-comment-face :slant italic))
-  "Face for empty session list message."
-  :group 'opencode-faces)
-
-;;; --- Project group faces ---
-
-(defface opencode-project-header
-  '((t :inherit font-lock-constant-face :weight bold :height 1.1))
-  "Face for project group headers in session list."
+  "Face for archived sessions."
   :group 'opencode-faces)
 
 ;;; --- Diff faces ---

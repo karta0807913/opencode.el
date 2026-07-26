@@ -20,6 +20,7 @@
 (require 'opencode-log)
 (require 'opencode-util)
 (require 'opencode-api)
+(require 'opencode-backend)
 (require 'opencode-diff)
 (require 'opencode-agent)
 (require 'opencode-chat-state)
@@ -1234,14 +1235,17 @@ frees all markers."
 
 (defun opencode-chat-message-prefetch-diffs (session-id)
   "Async fetch diffs for SESSION-ID and populate cache."
-  (opencode-api-get
-   (format "/session/%s/diff" session-id)
+  (opencode-backend-get-diff
+   session-id
    (lambda (diffs)
-     (when (and diffs (arrayp diffs))
-       (seq-doseq (d diffs)
-         (let ((msg-id (plist-get d :messageID)))
-           (when msg-id
-             (puthash msg-id d (opencode-chat--diff-cache)))))))))
+     (let ((body (or (plist-get diffs :body) diffs)))
+       (when (and body (arrayp body))
+         (seq-doseq (d body)
+           (let ((msg-id (plist-get d :messageID)))
+             (when msg-id
+               (puthash msg-id d (opencode-chat--diff-cache))))))))
+   nil
+   (when (fboundp 'opencode-chat--backend) (opencode-chat--backend))))
 
 (defun opencode-chat-message-render-all (messages)
   "Render all MESSAGES in sequence.

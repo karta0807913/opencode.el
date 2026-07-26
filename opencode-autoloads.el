@@ -63,15 +63,13 @@ Interactively, prompts for URL; with prefix arg also prompts for DIRECTORY.
 (fn URL &optional DIRECTORY)" t)
 (autoload 'opencode-chat "opencode" "\
 Open a chat buffer for SESSION-ID.
-If SESSION-ID is nil, prompts for a session from the list.
+If SESSION-ID is nil, prompts for a session.
 The completion list includes a \"★ New session\" option at the top.
 Auto-connects to the server if `opencode-server-port' is set.
-The session list is scoped to the current buffer's project (via
+The picker is scoped to the current buffer's project (via
 `project-current'), so switching projects shows the right sessions.
 
 (fn &optional SESSION-ID)" t)
-(autoload 'opencode-list-sessions "opencode" "\
-Open the session list buffer for the current project." t)
 (autoload 'opencode-new-session "opencode" "\
 Create a new session with optional TITLE and open it.
 
@@ -194,7 +192,7 @@ Must be called from an `opencode-chat-mode' buffer." t)
 (autoload 'opencode-command-select-global "opencode-command" "\
 Select and execute an OpenCode command, creating a session if needed.
 If not in a chat buffer, creates a new session first." t)
-(register-definition-prefixes "opencode-command" '("opencode-command--"))
+(register-definition-prefixes "opencode-command" '("opencode-command-"))
 
 
 ;;; Generated autoloads from opencode-chat-input.el
@@ -209,12 +207,37 @@ If not in a chat buffer, creates a new session first." t)
 
 ;;; Generated autoloads from opencode-chat-state.el
 
-(register-definition-prefixes "opencode-chat-state" '("opencode-chat--"))
+(register-definition-prefixes "opencode-chat-state" '("opencode-chat-"))
 
 
 ;;; Generated autoloads from opencode-api-cache.el
 
 (register-definition-prefixes "opencode-api-cache" '("opencode-"))
+
+
+;;; Generated autoloads from opencode-chat-resolve.el
+
+(register-definition-prefixes "opencode-chat-resolve" '("opencode-chat--resolve-defaults"))
+
+
+;;; Generated autoloads from opencode-domain.el
+
+(register-definition-prefixes "opencode-domain" '("opencode-domain-"))
+
+
+;;; Generated autoloads from opencode-event.el
+
+(register-definition-prefixes "opencode-event" '("opencode-event-"))
+
+
+;;; Generated autoloads from opencode-tool-render.el
+
+(register-definition-prefixes "opencode-tool-render" '("opencode-chat-"))
+
+
+;;; Generated autoloads from opencode-ui.el
+
+(register-definition-prefixes "opencode-ui" '("opencode-ui--"))
 
 ;;; End of scraped data
 

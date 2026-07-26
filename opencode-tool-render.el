@@ -37,6 +37,7 @@
 (require 'seq)
 (require 'json)
 (require 'opencode-domain)
+(require 'opencode-backend)
 (require 'opencode-faces)
 (require 'opencode-diff)
 (require 'opencode-todo)
@@ -50,9 +51,23 @@
 (declare-function opencode-chat--diff-shown "opencode-chat-state" ())
 (declare-function opencode-chat--current-message-id "opencode-chat-state" ())
 (declare-function opencode-chat--schedule-refresh "opencode-chat" ())
-(declare-function opencode-api-get "opencode-api" (path callback))
+(declare-function opencode-chat--backend "opencode-chat-state" ())
 
 (defvar opencode-chat-message-file-map)
+
+;;; --- Customization ---
+
+(defcustom opencode-chat-tool-output-max-lines -1
+  "Maximum number of lines to render for tool output.
+When set to -1, render all lines without a line-count limit."
+  :type 'integer
+  :group 'opencode-chat)
+
+(defcustom opencode-chat-tool-output-max-chars -1
+  "Maximum number of characters to render for tool output.
+When set to -1, render all characters without a character-count limit."
+  :type 'integer
+  :group 'opencode-chat)
 
 ;;; --- Registry ---
 
@@ -201,33 +216,51 @@ Returns a concise human-readable string, or nil."
 
 ;;; --- Shared output rendering ---
 
+(defun opencode-chat--tool-output-apply-limits (output)
+  "Return OUTPUT truncated according to tool output custom variables.
+`opencode-chat-tool-output-max-chars' and
+`opencode-chat-tool-output-max-lines' use -1 to mean unlimited.  If
+both limits are set, truncation happens as soon as either one is hit."
+  (let* ((max-chars opencode-chat-tool-output-max-chars)
+         (max-lines opencode-chat-tool-output-max-lines)
+         (char-limit-p (and (integerp max-chars) (>= max-chars 0)))
+         (line-limit-p (and (integerp max-lines) (>= max-lines 0)))
+         (char-truncated-p (and char-limit-p (> (length output) max-chars)))
+         (char-limited (if char-truncated-p
+                           (substring output 0 max-chars)
+                         output))
+         (lines (string-lines char-limited))
+         (line-truncated-p (and line-limit-p (length> lines max-lines)))
+         (display-lines (if line-truncated-p
+                            (take max-lines lines)
+                          lines)))
+    (list :lines display-lines
+          :truncated (or char-truncated-p line-truncated-p))))
+
 (defun opencode-chat--render-tool-output (output metadata)
   "Render shared tool OUTPUT display with METADATA.output streaming fallback.
 While a tool is still running, the final `:output' slot is nil and
 progressive stdout lives under `metadata.output' — fall back to it so
 the user sees output stream in as the command prints, instead of a
-blank tool box until completion.  Truncates to 20 lines."
+blank tool box until completion.  Output is truncated when either
+`opencode-chat-tool-output-max-lines' or
+`opencode-chat-tool-output-max-chars' is reached; -1 means unlimited."
   (let ((display-output
          (cond
           ((and output (stringp output) (not (string-empty-p output)))
            output)
           ((when-let* ((m-out (and metadata (plist-get metadata :output)))
-                       ((stringp m-out))
-                       ((not (string-empty-p m-out))))
-             m-out)))))
+                        ((stringp m-out))
+                        ((not (string-empty-p m-out))))
+              m-out)))))
     (when display-output
-      (let* ((max-lines 20)
-             (lines (string-lines display-output))
-             (truncated (length> lines max-lines))
-             (display-lines (if truncated (take max-lines lines) lines)))
-        (dolist (line display-lines)
+      (let ((limited (opencode-chat--tool-output-apply-limits display-output)))
+        (dolist (line (plist-get limited :lines))
           (insert (propertize (format "   %s\n" line)
                               'face 'font-lock-comment-face)))
-        (when truncated
-          (insert (propertize
-                   (format "   ... (%d more lines)\n"
-                           (- (length lines) max-lines))
-                   'face 'font-lock-comment-face)))))))
+        (when (plist-get limited :truncated)
+          (insert (propertize "   ... (output truncated)\n"
+                              'face 'font-lock-comment-face)))))))
 
 ;;; --- Built-in body renderers ---
 
@@ -435,8 +468,8 @@ asynchronously if cache is missing, avoiding main-thread blocking."
     (when (and (null diffs)
                (not (gethash "__fetching__" (opencode-chat--diff-cache))))
       (puthash "__fetching__" t (opencode-chat--diff-cache))
-      (opencode-api-get
-       (format "/session/%s/diff" sid)
+      (opencode-backend-get-diff
+       sid
        (lambda (response)
          (when (buffer-live-p buf)
            (with-current-buffer buf
@@ -444,7 +477,9 @@ asynchronously if cache is missing, avoiding main-thread blocking."
              (when-let* ((body (plist-get response :body)))
                (when (vectorp body)
                  (puthash "__session__" body (opencode-chat--diff-cache))
-                 (opencode-chat--schedule-refresh))))))))
+                  (opencode-chat--schedule-refresh))))))
+       nil
+       (when (fboundp 'opencode-chat--backend) (opencode-chat--backend))))
     (let ((file-diff (when (and path diffs (length> diffs 0))
                        (seq-find
                         (lambda (d)

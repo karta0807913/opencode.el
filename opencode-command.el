@@ -21,9 +21,11 @@
 (require 'opencode-config)
 (require 'opencode-log)
 
-(declare-function opencode-chat-open "opencode-chat" (session-id &optional directory display-action))
+(declare-function opencode-chat-open "opencode-chat" (session-id &optional directory display-action backend))
 (declare-function opencode-chat--refresh-footer "opencode-chat-input" ())
 (declare-function opencode-chat--recompute-cached-tokens-from-store "opencode-chat" ())
+(declare-function opencode-chat-message-info "opencode-chat-message" (msg-id))
+(declare-function opencode-chat-message-sorted-ids "opencode-chat-message" ())
 
 ;;; --- Variables ---
 
@@ -77,8 +79,24 @@
    (list :name "redo" :description "Redo the last undone message"
          :callback (lambda ()
                      (opencode-session-unrevert (opencode-chat--session-id))
-                     (message "Redo executed"))))
+                     (message "Redo executed")))
+   (list :name "btw" :description "Side conversation (fork on OpenCode; pi-btw on Pi)"
+         :hints '("question")
+         :callback #'opencode-command--btw))
   "List of local client-side commands.")
+
+(declare-function opencode-chat--btw "opencode-chat" (text))
+(declare-function opencode-chat--send "opencode-chat-input" (&optional text-override))
+
+(defun opencode-command--btw (&optional args)
+  "Run `/btw' for the current buffer's backend.
+On OpenCode, fork into a child-frame aside (`opencode-chat--btw').  On any
+other backend (e.g. Pi), forward `/btw ARGS' as a prompt so the backend's
+own extension (e.g. `pi-btw') handles it.  ARGS is the question text."
+  (let ((args (or args "")))
+    (if (eq (opencode-chat--backend) 'opencode)
+        (opencode-chat--btw args)
+      (opencode-chat--send (string-trim (concat "/btw " args))))))
 
 ;;; --- Command selection ---
 
@@ -215,10 +233,14 @@ Must be called from an `opencode-chat-mode' buffer."
     (when (and selected (not (string-empty-p selected)))
       (let* ((name (opencode-command--parse-candidate selected))
              (cmd (gethash selected table))
-             (callback (plist-get cmd :callback)))
+             (callback (plist-get cmd :callback))
+             (hints (plist-get cmd :hints)))
         (when callback
           (opencode--debug "opencode-command: executing local /%s" name)
-          (funcall callback)
+          (if (and hints (> (length hints) 0))
+              ;; Argument-taking command: read args and pass them.
+              (funcall callback (opencode-command--read-arguments cmd))
+            (funcall callback))
           (message "Executed /%s" name))))))
 
 ;;;###autoload

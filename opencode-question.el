@@ -7,14 +7,16 @@
 
 ;; SSE-driven question popup.  When the agent asks a question,
 ;; the input area of the chat buffer is replaced with a numbered
-;; option list.  Press 1-9 to select, RET to submit, r to reject, m to reject with message.
+;; option list.  Press 1-9 to select, RET to submit, r to reject, m to add more.
 ;; After answering, the original input text is restored.
 ;;
 ;; Falls back to a standalone buffer when no chat buffer is found.
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'opencode-api)
+(require 'opencode-backend)
 (require 'opencode-faces)
 (require 'opencode-popup)
 (require 'opencode-log)
@@ -64,7 +66,7 @@ buffer via `opencode-event--dispatch-chat'.")
   (keymap-set map "RET" #'opencode-question--submit)
   (keymap-set map "DEL" #'opencode-question--go-back)
   (keymap-set map "r" #'opencode-question--reject)
-  (keymap-set map "m" #'opencode-question--reject-with-message)
+  (keymap-set map "m" #'opencode-question--add-more)
   (keymap-set map "q" #'opencode-question--reject)
   (keymap-set map "<escape>" #'opencode-question--reject))
 
@@ -151,16 +153,35 @@ Returns nil if the buffer has no valid input area (child session / loading)."
 
 ;;; --- Shared option rendering ---
 
+(defun opencode-question--effective-options (options custom)
+  "Return OPTIONS plus an Others option when CUSTOM is non-nil."
+  (if custom
+      (vconcat options (vector (list :label "Others")))
+    options))
+
+(defun opencode-question--selected-labels (options)
+  "Return labels selected in OPTIONS according to current selection state."
+  (let (labels)
+    (dotimes (i (length opencode-question--selected))
+      (when (aref opencode-question--selected i)
+        (push (plist-get (aref options i) :label) labels)))
+    (nreverse labels)))
+
+(defun opencode-question--other-label-p (label)
+  "Return non-nil if LABEL is the built-in free-form option."
+  (equal label "Others"))
+
 (defun opencode-question--render-options (options multiple custom standalone)
   "Render OPTIONS list, custom text, and footer hints at point.
 If MULTIPLE is non-nil, show checkbox indicators; otherwise radio buttons.
 If CUSTOM is non-nil, show the custom answer button and any custom text.
 If STANDALONE is non-nil, use standalone buffer formatting; otherwise inline."
-  (let ((num-options (length options))
-        (questions (plist-get opencode-question--current :questions)))
+  (let* ((effective-options (opencode-question--effective-options options custom))
+         (num-options (length effective-options))
+         (questions (plist-get opencode-question--current :questions)))
     ;; Options as face-styled buttons
     (dotimes (i num-options)
-      (let* ((opt (aref options i))
+       (let* ((opt (aref effective-options i))
              (label (plist-get opt :label))
              (desc (plist-get opt :description))
              (selected-p (aref opencode-question--selected i))
@@ -196,7 +217,7 @@ If STANDALONE is non-nil, use standalone buffer formatting; otherwise inline."
       (insert sep)
       (insert (propertize " r Reject " 'face 'opencode-popup-option))
       (insert sep)
-      (insert (propertize " m Reject+msg " 'face 'opencode-popup-option))
+       (insert (propertize " m More " 'face 'opencode-popup-option))
       (when custom
         (insert sep)
         (insert (propertize " c Type answer " 'face 'opencode-popup-option)))
@@ -227,13 +248,17 @@ If STANDALONE is non-nil, use standalone buffer formatting; otherwise inline."
 Returns a plist with keys :header, :question, :options, :custom,
 :multiple, :num-options."
   (let* ((questions (plist-get opencode-question--current :questions))
-         (q (aref questions opencode-question--question-idx)))
+         (q (aref questions opencode-question--question-idx))
+         (options (plist-get q :options))
+         (custom (eq (plist-get q :custom) t))
+         (effective-options (opencode-question--effective-options options custom)))
     (list :header (plist-get q :header)
           :question (plist-get q :question)
-          :options (plist-get q :options)
-          :custom (eq (plist-get q :custom) t)
+          :options options
+          :effective-options effective-options
+          :custom custom
           :multiple (eq (plist-get q :multiple) t)
-          :num-options (length (plist-get q :options)))))
+          :num-options (length effective-options))))
 
 (defun opencode-question--ensure-selected (num-options)
   "Ensure `opencode-question--selected' vector has NUM-OPTIONS slots."
@@ -252,7 +277,7 @@ inserts question content with `opencode-question--inline-map'."
   (let* ((data (opencode-question--current-data))
          (header (plist-get data :header))
          (question-text (plist-get data :question))
-         (options (plist-get data :options))
+            (options (plist-get data :effective-options))
          (custom (plist-get data :custom))
          (multiple (plist-get data :multiple))
          (num-options (plist-get data :num-options)))
@@ -310,7 +335,7 @@ Used by `opencode-question-mode' buffers and tests."
   "Toggle or select option N (1-indexed)."
   (when opencode-question--current
     (let* ((data (opencode-question--current-data))
-           (options (plist-get data :options))
+           (options (plist-get data :effective-options))
            (multiple (plist-get data :multiple))
            (idx (1- n)))
       (when (and (>= idx 0) (< idx (length options)))
@@ -344,6 +369,25 @@ Used by `opencode-question-mode' buffers and tests."
             (opencode-question--render-inline)
           (opencode-question--render-question))))))
 
+(defun opencode-question--add-more ()
+  "Read extra answer text for the selected option or Others."
+  (interactive)
+  (when opencode-question--current
+    (let* ((data (opencode-question--current-data))
+           (options (plist-get data :effective-options))
+           (labels (opencode-question--selected-labels options)))
+      (when (> (length labels) 1)
+        (user-error "Select at most one option before adding more"))
+      (let* ((label (car labels))
+             (prefix (when (and label (not (opencode-question--other-label-p label)))
+                       (concat label " - ")))
+             (text (read-string "More answer: " prefix)))
+        (when (and opencode-question--current text (not (string-empty-p text)))
+          (dotimes (i (length opencode-question--selected))
+            (aset opencode-question--selected i nil))
+          (setq opencode-question--custom-text text)
+          (opencode-question--submit))))))
+
 (defun opencode-question--go-back ()
   "Go back to the previous question in a multi-question flow.
 Pops the last accumulated answer and restores the previous question's
@@ -359,9 +403,9 @@ selection state.  Does nothing on the first question."
       (setq opencode-question--answers
             (butlast opencode-question--answers))
       ;; Restore selection state from the popped answer
-      (let* ((data (opencode-question--current-data))
-             (options (plist-get data :options))
-             (num-options (length options)))
+       (let* ((data (opencode-question--current-data))
+              (options (plist-get data :effective-options))
+              (num-options (length options)))
         (opencode-question--ensure-selected num-options)
         ;; Clear all selections first
         (dotimes (i num-options)
@@ -391,15 +435,12 @@ selection state.  Does nothing on the first question."
   (when opencode-question--current
     (let* ((data (opencode-question--current-data))
            (questions (plist-get opencode-question--current :questions))
-           (options (plist-get data :options))
+           (options (plist-get data :effective-options))
            (labels (list)))
       ;; Collect selected labels
       (if opencode-question--custom-text
           (setq labels (list opencode-question--custom-text))
-        (dotimes (i (length opencode-question--selected))
-          (when (aref opencode-question--selected i)
-            (push (plist-get (aref options i) :label) labels)))
-        (setq labels (nreverse labels)))
+        (setq labels (opencode-question--selected-labels options)))
       ;; Must have at least one selection
       (unless labels
         (user-error "Select at least one option or provide a custom answer"))
@@ -417,7 +458,7 @@ selection state.  Does nothing on the first question."
               (opencode-question--render-question)))
         ;; Last question — send reply
         (let ((saved-current opencode-question--current))
-          (opencode-question--reply opencode-question--answers)
+          (opencode-question--reply :answers opencode-question--answers)
           ;; Clean up — but only if on-replied didn't already handle it.
           ;; The sync HTTP call in --reply can trigger accept-process-output,
           ;; which lets the SSE question.replied event fire --on-replied
@@ -433,7 +474,7 @@ selection state.  Does nothing on the first question."
           (id (plist-get opencode-question--current :id)))
       (opencode--debug "opencode-question: rejecting id=%s" id)
       (condition-case err
-          (opencode-api-post-sync (format "/question/%s/reject" id))
+          (opencode-question-reject :id id)
         (opencode-api-error
          (message "opencode-question: reject failed: %s" (error-message-string err))))
       ;; Clean up — but only if on-rejected didn't already handle it.
@@ -453,27 +494,41 @@ selection state.  Does nothing on the first question."
               (id (plist-get opencode-question--current :id)))
           (opencode--debug "opencode-question: rejecting with message id=%s" id)
           (condition-case err
-              (opencode-api-post-sync (format "/question/%s/reject" id)
-                                      (list :message msg))
+              (opencode-question-reject :id id :message msg)
             (opencode-api-error
              (message "opencode-question: reject failed: %s" (error-message-string err))))
           ;; Clean up — but only if on-rejected didn't already handle it.
           (when (eq opencode-question--current saved-current)
             (opencode-question--cleanup)))))))
 
-(defun opencode-question--reply (answers)
+(cl-defun opencode-question-reply (&key id answers)
+  "Reply to question request ID with ANSWERS.
+ANSWERS is a list of answer lists or a vector of answer vectors.  This is
+the public API for users handling question requests from SSE hooks."
+  (when (listp answers)
+    (setq answers (vconcat
+                   (mapcar (lambda (ans) (if (vectorp ans) ans (vconcat ans)))
+                           answers))))
+  (opencode-backend-reply-question id answers))
+
+(cl-defun opencode-question-reject (&key id message)
+  "Reject question request ID.
+MESSAGE is an optional rejection reason.  This is the public API for
+users handling question requests from SSE hooks."
+  (opencode-backend-reject-question id message))
+
+(cl-defun opencode-question--reply (&key answers request id)
   "Send ANSWERS to the server for the current question.
 ANSWERS is a list of lists of label strings.
 Converts to vectors for JSON serialization: [[\"a\"]] → array of arrays."
-  (let* ((id (plist-get opencode-question--current :id))
+  (let* ((target (or request opencode-question--current))
+         (question-id (or id (plist-get target :id)))
          (vec-answers (vconcat
-                       (mapcar (lambda (ans) (vconcat ans))
-                               answers))))
-    (opencode--debug "opencode-question: replying id=%s answers=%S" id vec-answers)
+                        (mapcar (lambda (ans) (vconcat ans))
+                                answers))))
+    (opencode--debug "opencode-question: replying id=%s answers=%S" question-id vec-answers)
     (condition-case err
-        (opencode-api-post-sync
-         (format "/question/%s/reply" id)
-         (list :answers vec-answers))
+        (opencode-question-reply :id question-id :answers vec-answers)
       (opencode-api-error
        (message "opencode-question: reply failed: %s" (error-message-string err))))))
 

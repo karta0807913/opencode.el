@@ -87,7 +87,6 @@ Prefix key dispatch — `C-c o` (or similar) must be a keymap for subcommands."
 Keybinding completeness — no dead keys in the command map."
   (should (commandp (keymap-lookup opencode-command-map "o")))
   (should (commandp (keymap-lookup opencode-command-map "c")))
-  (should (commandp (keymap-lookup opencode-command-map "l")))
   (should (commandp (keymap-lookup opencode-command-map "n")))
   (should (commandp (keymap-lookup opencode-command-map "a")))
   (should (commandp (keymap-lookup opencode-command-map "t")))
@@ -99,7 +98,6 @@ Keybinding completeness — no dead keys in the command map."
 Keybinding correctness — keys must invoke the right command."
   (should (eq (keymap-lookup opencode-command-map "o") #'opencode-start))
   (should (eq (keymap-lookup opencode-command-map "c") #'opencode-chat))
-  (should (eq (keymap-lookup opencode-command-map "l") #'opencode-list-sessions))
   (should (eq (keymap-lookup opencode-command-map "n") #'opencode-new-session))
   (should (eq (keymap-lookup opencode-command-map "a") #'opencode-abort))
   (should (eq (keymap-lookup opencode-command-map "t") #'opencode-toggle-sidebar))
@@ -110,10 +108,9 @@ Keybinding correctness — keys must invoke the right command."
 
 (ert-deftest opencode-commands-interactive ()
   "Verify all user-facing commands are interactive.
-`M-x` discoverability — all commands must be interactive for `M-x` completion."
+  `M-x` discoverability — all commands must be interactive for `M-x` completion."
   (should (commandp 'opencode-start))
   (should (commandp 'opencode-chat))
-  (should (commandp 'opencode-list-sessions))
   (should (commandp 'opencode-new-session))
   (should (commandp 'opencode-abort))
   (should (commandp 'opencode-toggle-sidebar))
@@ -291,7 +288,7 @@ Pre-create directory resolution — new sessions are correctly associated with t
               ((symbol-function 'opencode--ensure-directory)
                (lambda () (setq ensure-called t)))
               ((symbol-function 'opencode-session-create)
-               (lambda (&optional _title)
+               (lambda (&optional _title _parent-id _backend)
                  (list :id "ses_test" :title "test")))
               ((symbol-function 'opencode-chat-open) #'ignore))
       (unwind-protect
@@ -299,6 +296,29 @@ Pre-create directory resolution — new sessions are correctly associated with t
             (opencode-mode 1)
             (opencode-new-session "test")
             (should ensure-called))
+        (opencode-mode -1)))))
+
+(ert-deftest opencode-new-session-passes-backend-through ()
+  "Verify `opencode-new-session' passes explicit backend to create and open.
+Without this, new sessions would always bind chat buffers to the global backend,
+breaking multiple backend use in the same Emacs instance."
+  (let ((created-backend nil)
+        (opened-backend nil))
+    (cl-letf (((symbol-function 'opencode-server-ensure) #'ignore)
+              ((symbol-function 'opencode--ensure-directory) #'ignore)
+              ((symbol-function 'opencode-session-create)
+               (lambda (&optional _title _parent-id backend)
+                 (setq created-backend backend)
+                 (list :id "ses_test" :directory "/tmp/project")))
+              ((symbol-function 'opencode-chat-open)
+               (lambda (_session-id _directory _display-action backend)
+                 (setq opened-backend backend))))
+      (unwind-protect
+          (progn
+            (opencode-mode 1)
+            (opencode-new-session "test" 'fake-backend)
+            (should (eq created-backend 'fake-backend))
+            (should (eq opened-backend 'fake-backend)))
         (opencode-mode -1)))))
 
 (ert-deftest opencode-chat-ensure-directory-sets-for-api ()
@@ -537,6 +557,123 @@ cause repeated failed dispatch attempts."
           ;; Entry should be auto-cleaned
           (should-not (opencode--chat-buffer-for-session "ses_dead_d")))
       (opencode--deregister-chat-buffer "ses_dead_d")
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest opencode-sse-after-dispatch-runs-chat-local-specific-hook ()
+  "Buffer-local SSE hooks run in the matching chat buffer after global dispatch.
+This lets users attach session-scoped listeners with LOCAL non-nil, such as
+auto-approval handlers on `opencode-sse-permission-asked-hook'."
+  (let ((buf-a (get-buffer-create "*opencode: local-hook-A*"))
+        (buf-b (get-buffer-create "*opencode: local-hook-B*"))
+        (saved-registry (copy-hash-table opencode--chat-registry))
+        called)
+    (unwind-protect
+        (progn
+          (clrhash opencode--chat-registry)
+          (with-current-buffer buf-a
+            (opencode-chat-mode)
+            (add-hook 'opencode-sse-permission-asked-hook
+                      (lambda (event)
+                        (push (list (buffer-name) event) called))
+                      nil t))
+          (with-current-buffer buf-b
+            (opencode-chat-mode)
+            (add-hook 'opencode-sse-permission-asked-hook
+                      (lambda (event)
+                        (push (list (buffer-name) event) called))
+                      nil t))
+          (opencode--register-chat-buffer "ses_local_a" buf-a)
+          (opencode--register-chat-buffer "ses_local_b" buf-b)
+          (let ((event (list :type "permission.asked"
+                             :properties (list :id "perm_local"
+                                               :sessionID "ses_local_a"))))
+            (opencode-sse--run-hooks event)
+            (should (= 1 (length called)))
+            (should (string= "*opencode: local-hook-A*" (caar called)))
+            (should (eq event (cadar called)))))
+      (setq opencode--chat-registry saved-registry)
+      (when (buffer-live-p buf-a) (kill-buffer buf-a))
+      (when (buffer-live-p buf-b) (kill-buffer buf-b)))))
+
+(ert-deftest opencode-sse-after-dispatch-runs-chat-local-event-hook ()
+  "Buffer-local catch-all SSE hooks run only in the matching chat buffer.
+Without forwarding `opencode-sse-event-hook' locally, users would have to
+install global listeners and manually filter every event by session id."
+  (let ((buf (get-buffer-create "*opencode: local-event-hook*"))
+        (saved-registry (copy-hash-table opencode--chat-registry))
+        called)
+    (unwind-protect
+        (progn
+          (clrhash opencode--chat-registry)
+          (with-current-buffer buf
+            (opencode-chat-mode)
+            (add-hook 'opencode-sse-event-hook
+                      (lambda (event)
+                        (setq called (list (current-buffer) event)))
+                      nil t))
+          (opencode--register-chat-buffer "ses_local_event" buf)
+          (let ((event (list :type "session.status"
+                             :properties (list :sessionID "ses_local_event"
+                                               :status (list :type "busy")))))
+            (opencode-sse--run-hooks event)
+            (should (eq buf (car called)))
+            (should (eq event (cadr called)))))
+      (setq opencode--chat-registry saved-registry)
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest opencode-sse-process-dispatch-forwards-chat-local-hook ()
+  "Process-level SSE dispatch forwards to the matching chat buffer's local hook.
+This guards the real path (`opencode-sse--run-hooks'), not just direct calls
+to the event router, so local permission listeners work when curl delivers
+events from outside any chat buffer."
+  (let ((chat-buf (get-buffer-create "*opencode: process-local-chat*"))
+        (dispatch-buf (get-buffer-create "*opencode: process-local-dispatch*"))
+        (saved-registry (copy-hash-table opencode--chat-registry))
+        called)
+    (unwind-protect
+        (progn
+          (clrhash opencode--chat-registry)
+          (with-current-buffer chat-buf
+            (opencode-chat-mode)
+            (add-hook 'opencode-sse-permission-asked-hook
+                      (lambda (_event)
+                        (push (buffer-name) called))
+                      nil t))
+          (opencode--register-chat-buffer "ses_process_local" chat-buf)
+          (with-current-buffer dispatch-buf
+            (opencode-sse--run-hooks
+             (list :type "permission.asked"
+                   :properties (list :id "perm_process"
+                                     :sessionID "ses_process_local"))))
+          (should (equal called '("*opencode: process-local-chat*"))))
+      (setq opencode--chat-registry saved-registry)
+      (when (buffer-live-p chat-buf) (kill-buffer chat-buf))
+      (when (buffer-live-p dispatch-buf) (kill-buffer dispatch-buf)))))
+
+(ert-deftest opencode-sse-process-dispatch-in-chat-runs-local-hook-once ()
+  "Process-level SSE dispatch from a chat buffer must not double-run local hooks.
+If global hook dispatch sees the current buffer's local hook and the
+after-dispatch bridge forwards to the same buffer again, auto-approval
+listeners would run twice for one permission event."
+  (let ((buf (get-buffer-create "*opencode: process-local-once*"))
+        (saved-registry (copy-hash-table opencode--chat-registry))
+        (count 0))
+    (unwind-protect
+        (progn
+          (clrhash opencode--chat-registry)
+          (with-current-buffer buf
+            (opencode-chat-mode)
+            (add-hook 'opencode-sse-permission-asked-hook
+                      (lambda (_event)
+                        (cl-incf count))
+                      nil t)
+            (opencode--register-chat-buffer "ses_process_once" buf)
+            (opencode-sse--run-hooks
+             (list :type "permission.asked"
+                   :properties (list :id "perm_process_once"
+                                     :sessionID "ses_process_once"))))
+          (should (= count 1)))
+      (setq opencode--chat-registry saved-registry)
       (when (buffer-live-p buf) (kill-buffer buf)))))
 
 (ert-deftest opencode-registry-chat-re-register-overwrites ()

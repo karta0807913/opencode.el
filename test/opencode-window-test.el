@@ -84,31 +84,15 @@ returning stale or wrong windows causes display corruption."
 
 ;;; --- Buffer finding ---
 
-(ert-deftest opencode-window-find-buffer-prefers-chat ()
-  "Verify find-buffer prefers chat buffers over session list buffers.
-Chat buffers are the primary UI; users expect them to be selected first —
-wrong priority causes session list to steal focus from active chats."
-  (let* ((session-name (opencode-session--buffer-name opencode-window-test-project-dir))
-         (chat-buf (get-buffer-create "*opencode: test/Chat*"))
-         (session-buf (get-buffer-create session-name)))
+(ert-deftest opencode-window-find-buffer-finds-chat ()
+  "Verify find-buffer finds user-facing chat buffers.
+Window toggling should return to an existing chat rather than internal logs."
+  (let ((chat-buf (get-buffer-create "*opencode: test/Chat*")))
     (unwind-protect
         (let ((found (opencode-window--find-buffer)))
           (should found)
           (should (string= (buffer-name found) "*opencode: test/Chat*")))
-      (kill-buffer chat-buf)
-      (kill-buffer session-buf))))
-
-(ert-deftest opencode-window-find-buffer-falls-back-to-sessions ()
-  "Verify find-buffer falls back to session list when no chat buffer exists.
-When no chat is open, session list is the next best opencode buffer —
-returning nil when sessions exist breaks window navigation commands."
-  (let* ((session-name (opencode-session--buffer-name opencode-window-test-project-dir))
-         (session-buf (get-buffer-create session-name)))
-    (unwind-protect
-        (let ((found (opencode-window--find-buffer)))
-          (should found)
-          (should (string= (buffer-name found) session-name)))
-      (kill-buffer session-buf))))
+      (kill-buffer chat-buf))))
 
 (ert-deftest opencode-window-find-buffer-skips-log ()
   "Verify find-buffer excludes the log buffer from results.
@@ -174,8 +158,8 @@ missing entry causes buffers to appear in random windows."
 
 ;;; --- Toggle sidebar ---
 
-(ert-deftest opencode-window-toggle-sidebar-width-45 ()
-  "Verify toggle-sidebar uses width 45 for the side window."
+(ert-deftest opencode-window-toggle-sidebar-width-35 ()
+  "Verify toggle-sidebar uses width 35 for the side window."
   (let ((display-alist nil)
         (sidebar-name opencode-sidebar--buffer-name))
     (cl-letf (((symbol-function 'project-current)
@@ -195,7 +179,7 @@ missing entry causes buffers to appear in random windows."
           (progn
             (opencode-window-toggle-sidebar)
             (should display-alist)
-            (should (= (alist-get 'window-width display-alist) 45)))
+            (should (= (alist-get 'window-width display-alist) 35)))
         (when-let ((buf (get-buffer sidebar-name)))
           (kill-buffer buf))))))
 
@@ -244,8 +228,8 @@ missing entry causes buffers to appear in random windows."
       (when-let ((buf (get-buffer sidebar-name)))
         (kill-buffer buf)))))
 
-(ert-deftest opencode-window-toggle-sidebar-reshow-width-45 ()
-  "Verify re-showing existing sidebar buffer uses width 45."
+(ert-deftest opencode-window-toggle-sidebar-reshow-width-35 ()
+  "Verify re-showing existing sidebar buffer uses width 35."
   (let ((display-alist nil)
         (sidebar-name opencode-sidebar--buffer-name))
     (unwind-protect
@@ -260,8 +244,53 @@ missing entry causes buffers to appear in random windows."
                        nil)))
             (opencode-window-toggle-sidebar)
             (should display-alist)
-            (should (= (alist-get 'window-width display-alist) 45))))
+            (should (= (alist-get 'window-width display-alist) 35))))
       (when-let ((buf (get-buffer sidebar-name)))
+        (kill-buffer buf)))))
+
+;;; --- Child frame ---
+
+(ert-deftest opencode-window-child-frame-terminal-fallback ()
+  "On a non-graphic display, the child-frame helper uses a bottom side window.
+Terminal Emacs cannot show child frames; /btw and the widget must still
+display somewhere instead of erroring."
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil)))
+    (let ((buf (generate-new-buffer "*test-child-frame*"))
+          (captured nil))
+      (unwind-protect
+          (cl-letf (((symbol-function 'display-buffer-in-side-window)
+                     (lambda (b alist) (setq captured (cons b alist)) (selected-window))))
+            (opencode-window-child-frame buf)
+            (should (eq (car captured) buf))
+            (should (eq (alist-get 'side (cdr captured)) 'bottom)))
+        (kill-buffer buf)))))
+
+(ert-deftest opencode-window-child-frame-gui-uses-parent-frame ()
+  "On a graphic display, the helper builds a child frame with `parent-frame'.
+Verifies a native subframe (not posframe, not a top-level frame) is created
+and the buffer is shown in it."
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t)))
+    (let ((buf (generate-new-buffer "*test-child-frame*"))
+          (frame-params nil)
+          (switched nil))
+      (unwind-protect
+          (cl-letf (((symbol-function 'make-frame)
+                     (lambda (params) (setq frame-params params) 'fake-frame))
+                    ((symbol-function 'set-frame-parameter) (lambda (&rest _) nil))
+                    ((symbol-function 'opencode-window--position-child-frame)
+                     (lambda (&rest _) nil))
+                    ((symbol-function 'select-frame)
+                     (lambda (&rest _) nil))
+                    ((symbol-function 'switch-to-buffer)
+                     (lambda (b &rest _) (setq switched b)))
+                    ((symbol-function 'make-frame-visible) (lambda (&rest _) nil))
+                    ((symbol-function 'select-frame-set-input-focus)
+                     (lambda (&rest _) nil)))
+            (let ((result (opencode-window-child-frame buf)))
+              (should (eq result 'fake-frame))
+              (should (alist-get 'parent-frame frame-params))
+              (should (eq (alist-get 'undecorated frame-params) t))
+              (should (eq switched buf))))
         (kill-buffer buf)))))
 
 (provide 'opencode-window-test)

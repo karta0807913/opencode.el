@@ -13,6 +13,7 @@
 (require 'opencode-popup)
 (require 'opencode-permission)
 (require 'opencode-question)
+(require 'opencode-pi)
 (require 'seq)
 (require 'opencode-api)
 (require 'opencode-agent)
@@ -350,6 +351,39 @@ They must run before other backends (dabbrev, cape, etc.) to ensure
       (should (opencode-test-buffer-contains-p "✓"))
       ;; Expanded body shows output
       (should (opencode-test-buffer-contains-p "No warnings")))))
+
+(ert-deftest opencode-chat-render-tool-output-unlimited-by-default ()
+  "Tool output renders fully when both output limits are -1."
+  (opencode-test-with-temp-buffer "*test-chat-tool-output-unlimited*"
+    (let ((opencode-chat-tool-output-max-lines -1)
+          (opencode-chat-tool-output-max-chars -1))
+      (opencode-chat--render-tool-output "one\ntwo\nthree" nil)
+      (should (opencode-test-buffer-contains-p "one"))
+      (should (opencode-test-buffer-contains-p "two"))
+      (should (opencode-test-buffer-contains-p "three"))
+      (should-not (opencode-test-buffer-contains-p "output truncated")))))
+
+(ert-deftest opencode-chat-render-tool-output-max-lines ()
+  "Tool output is truncated when the line-count limit is hit."
+  (opencode-test-with-temp-buffer "*test-chat-tool-output-lines*"
+    (let ((opencode-chat-tool-output-max-lines 2)
+          (opencode-chat-tool-output-max-chars -1))
+      (opencode-chat--render-tool-output "one\ntwo\nthree" nil)
+      (should (opencode-test-buffer-contains-p "one"))
+      (should (opencode-test-buffer-contains-p "two"))
+      (should-not (opencode-test-buffer-contains-p "three"))
+      (should (opencode-test-buffer-contains-p "output truncated")))))
+
+(ert-deftest opencode-chat-render-tool-output-max-chars ()
+  "Tool output is truncated when the character-count limit is hit."
+  (opencode-test-with-temp-buffer "*test-chat-tool-output-chars*"
+    (let ((opencode-chat-tool-output-max-lines -1)
+          (opencode-chat-tool-output-max-chars 5))
+      (opencode-chat--render-tool-output "abcdef\nghi" nil)
+      (should (opencode-test-buffer-contains-p "abcde"))
+      (should-not (opencode-test-buffer-contains-p "abcdef"))
+      (should-not (opencode-test-buffer-contains-p "ghi"))
+      (should (opencode-test-buffer-contains-p "output truncated")))))
 
 (ert-deftest opencode-chat-render-tool-part-real-api-read ()
   "Read tool part shows filePath in summary."
@@ -935,6 +969,195 @@ Line-prefix is applied by the message renderer to the entire body region."
 (ert-deftest opencode-chat-find-buffer-not-found ()
   "Find buffer returns nil for non-matching session ID."
   (should (null (opencode-chat--find-buffer "ses_nonexistent_xyz"))))
+
+(ert-deftest opencode-chat-find-buffer-filters-by-backend ()
+  "Buffers with the same session ID can coexist when their backend differs.
+This guards multi-backend use: looking up a Pi-backed buffer must not reuse an
+OpenCode-backed buffer for the same backend-native session identifier."
+  (let ((buf-a (generate-new-buffer "*test-chat-backend-a*"))
+        (buf-b (generate-new-buffer "*test-chat-backend-b*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf-a
+            (opencode-chat-mode)
+            (opencode-chat--set-session-id "ses_same")
+            (opencode-chat--set-backend 'opencode))
+          (with-current-buffer buf-b
+            (opencode-chat-mode)
+            (opencode-chat--set-session-id "ses_same")
+            (opencode-chat--set-backend 'pi))
+          (should (eq (opencode-chat--find-buffer "ses_same" 'opencode) buf-a))
+          (should (eq (opencode-chat--find-buffer "ses_same" 'pi) buf-b)))
+      (kill-buffer buf-a)
+      (kill-buffer buf-b))))
+
+(ert-deftest opencode-chat-pi-backend-skips-todos ()
+  "A Pi-backed buffer must not fetch todos (Pi has no todos capability).
+Without the capability guard, Pi sessions would issue an unsupported
+`get_todos' RPC and error.  OpenCode buffers must still fetch."
+  (opencode-test-with-temp-buffer "*test-chat-pi-todos*"
+    (opencode-chat-mode)
+    (opencode-chat--set-session-id "ses_pi")
+    (opencode-chat--set-backend 'pi)
+    (let ((called nil))
+      (cl-letf (((symbol-function 'opencode-backend-get-todos)
+                 (lambda (&rest _) (setq called t))))
+        (opencode-chat--fetch-inline-todos)
+        (should-not called)))))
+
+(ert-deftest opencode-chat-opencode-backend-fetches-todos ()
+  "An OpenCode-backed buffer still fetches todos.
+Guards against the capability check over-blocking the default backend."
+  (opencode-test-with-temp-buffer "*test-chat-oc-todos*"
+    (opencode-chat-mode)
+    (opencode-chat--set-session-id "ses_oc")
+    (opencode-chat--set-backend 'opencode)
+    (let ((called nil))
+      (cl-letf (((symbol-function 'opencode-backend-get-todos)
+                 (lambda (&rest _) (setq called t))))
+        (opencode-chat--fetch-inline-todos)
+        (should called)))))
+
+;;; --- /btw side conversation (OpenCode) ---
+
+(ert-deftest opencode-chat-btw-forks-and-opens-child-frame ()
+  "OpenCode /btw forks the current session and opens the fork in a child frame.
+The aside must branch from a NEW session (original untouched) and be
+displayed as a subframe, not in the main window."
+  (opencode-test-with-temp-buffer "*test-chat-btw*"
+    (opencode-chat-mode)
+    (opencode-chat--set-session-id "ses_main")
+    (opencode-chat--set-backend 'opencode)
+    (let ((forked-from nil)
+          (opened nil))
+      (cl-letf (((symbol-function 'opencode-session-fork)
+                 (lambda (sid &optional _mid)
+                   (setq forked-from sid)
+                   (list :id "ses_fork" :directory "/proj")))
+                ((symbol-function 'opencode-chat-open)
+                 (lambda (sid dir action backend)
+                   (setq opened (list sid dir action backend))))
+                ((symbol-function 'opencode-chat--find-buffer)
+                 (lambda (&rest _) nil)))
+        (opencode-chat--btw "")
+        (should (equal "ses_main" forked-from))
+        (should (equal "ses_fork" (nth 0 opened)))
+        (should (eq 'child-frame (nth 2 opened)))
+        (should (eq 'opencode (nth 3 opened)))))))
+
+(ert-deftest opencode-chat-btw-sends-aside-text ()
+  "When /btw is given text, it is sent as the first prompt in the fork.
+Empty text just opens the fork; non-empty text seeds the aside question."
+  (opencode-test-with-temp-buffer "*test-chat-btw-text*"
+    (opencode-chat-mode)
+    (opencode-chat--set-session-id "ses_main")
+    (opencode-chat--set-backend 'opencode)
+    (let ((sent nil)
+          (fork-buf (generate-new-buffer "*test-fork-buf*")))
+      (with-current-buffer fork-buf
+        (opencode-chat-mode)
+        (opencode-chat--set-session-id "ses_fork")
+        (opencode-chat--set-backend 'opencode))
+      (unwind-protect
+          (cl-letf (((symbol-function 'opencode-session-fork)
+                     (lambda (&rest _) (list :id "ses_fork" :directory "/proj")))
+                    ((symbol-function 'opencode-chat-open) (lambda (&rest _) nil))
+                    ((symbol-function 'opencode-chat--find-buffer)
+                     (lambda (sid _backend)
+                       (and (equal sid "ses_fork") fork-buf)))
+                    ((symbol-function 'opencode-chat--send)
+                     (lambda (text) (setq sent text))))
+            (opencode-chat--btw "why does this fail?")
+            (should (equal "why does this fail?" sent)))
+        (kill-buffer fork-buf)))))
+
+;;; --- /btw command parsing + backend routing ---
+
+(ert-deftest opencode-chat-btw-command-p-matches ()
+  "`/btw' and `/btw <args>' are recognized; lookalikes are not.
+Prevents intercepting `/btwxyz' or pi-btw's `/btw:tangent' lifecycle forms."
+  (should (opencode-chat--btw-command-p "/btw"))
+  (should (opencode-chat--btw-command-p "/btw what is this"))
+  (should (opencode-chat--btw-command-p "/btw   spaced"))
+  (should-not (opencode-chat--btw-command-p "/btwxyz"))
+  (should-not (opencode-chat--btw-command-p "/btw:tangent foo"))
+  (should-not (opencode-chat--btw-command-p "hello /btw"))
+  (should-not (opencode-chat--btw-command-p "/other")))
+
+(ert-deftest opencode-chat-btw-args-extracts-question ()
+  "`/btw' argument extraction returns the trimmed question text.
+Bare /btw yields empty string (opens an empty aside)."
+  (should (equal "" (opencode-chat--btw-args "/btw")))
+  (should (equal "hello world" (opencode-chat--btw-args "/btw hello world")))
+  (should (equal "trimmed" (opencode-chat--btw-args "/btw   trimmed  "))))
+
+(ert-deftest opencode-chat-send-routes-btw-on-opencode ()
+  "On OpenCode, typing /btw intercepts to the fork handler, not a normal send.
+Without this, /btw would post to the current session as a slash command."
+  (opencode-test-with-temp-buffer "*test-chat-send-btw-oc*"
+    (opencode-chat-mode)
+    (opencode-chat--set-session-id "ses_main")
+    (opencode-chat--set-backend 'opencode)
+    (let ((btw-called nil) (normal-called nil))
+      (cl-letf (((symbol-function 'opencode-chat--btw)
+                 (lambda (args) (setq btw-called args)))
+                ((symbol-function 'opencode-chat--send-normal)
+                 (lambda (&rest _) (setq normal-called t)))
+                ((symbol-function 'opencode-chat--drain-popup-queue) #'ignore)
+                ((symbol-function 'opencode-chat--input-history-push) #'ignore)
+                ((symbol-function 'opencode-chat--clear-input) #'ignore))
+        (opencode-chat--send "/btw why")
+        (should (equal "why" btw-called))
+        (should-not normal-called)))))
+
+(ert-deftest opencode-chat-send-does-not-route-btw-on-pi ()
+  "On Pi, /btw is NOT intercepted; it falls through to the normal slash send.
+Pi defers to its pi-btw extension, so the slash text must reach the backend."
+  (opencode-test-with-temp-buffer "*test-chat-send-btw-pi*"
+    (opencode-chat-mode)
+    (opencode-chat--set-session-id "ses_pi")
+    (opencode-chat--set-backend 'pi)
+    (let ((btw-called nil) (normal-text nil))
+      (cl-letf (((symbol-function 'opencode-chat--btw)
+                 (lambda (_args) (setq btw-called t)))
+                ((symbol-function 'opencode-chat--send-normal)
+                 (lambda (text &rest _) (setq normal-text text)))
+                ((symbol-function 'opencode-chat--drain-popup-queue) #'ignore))
+        (opencode-chat--send "/btw why")
+        (should-not btw-called)
+        (should (equal "/btw why" normal-text))))))
+
+;;; --- display-buffer routing ---
+
+(ert-deftest opencode-chat-display-buffer-default-uses-switch-to-buffer ()
+  "Default display-action uses `switch-to-buffer' (replace current window).
+Regression guard: `C-o c' and sidebar re-open rely on chat buffers
+replacing the current window; using `pop-to-buffer' here broke that."
+  (let ((buf (generate-new-buffer "*test-disp*"))
+        (popped nil) (switched nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'pop-to-buffer)
+                   (lambda (b &rest _) (setq popped b)))
+                  ((symbol-function 'switch-to-buffer)
+                   (lambda (b &rest _) (setq switched b))))
+          (opencode-chat--display-buffer buf nil)
+          (should (eq switched buf))
+          (should-not popped))
+      (kill-buffer buf))))
+
+(ert-deftest opencode-chat-display-buffer-child-frame ()
+  "`child-frame' display-action routes to the child-frame helper.
+This is the /btw aside path."
+  (let ((buf (generate-new-buffer "*test-disp-cf*"))
+        (hosted nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'opencode-window-child-frame)
+                   (lambda (b &rest _) (setq hosted b)))
+                  ((symbol-function 'pop-to-buffer)
+                   (lambda (&rest _) (error "should not pop"))))
+          (opencode-chat--display-buffer buf 'child-frame)
+          (should (eq hosted buf)))
+      (kill-buffer buf))))
 
 ;;; --- Part tracking ---
 

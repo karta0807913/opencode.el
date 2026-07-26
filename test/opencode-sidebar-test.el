@@ -278,6 +278,32 @@ is \" *Treemacs-\")."
 
 ;;; --- Split-window session open ---
 
+(ert-deftest opencode-sidebar-find-main-window-prefers-remembered-window ()
+  "RET from the sidebar must open in the window that invoked the sidebar.
+Without the remembered main window, Emacs picks the leftmost non-sidebar
+window and opens chats in the wrong pane when multiple main windows exist."
+  (save-window-excursion
+    (let ((sidebar-buf (get-buffer-create opencode-sidebar--buffer-name))
+          (main-a (generate-new-buffer "*opencode-test-main-a*"))
+          (main-b (generate-new-buffer "*opencode-test-main-b*")))
+      (unwind-protect
+          (progn
+            (delete-other-windows)
+            (switch-to-buffer sidebar-buf)
+            (split-window-right)
+            (other-window 1)
+            (switch-to-buffer main-a)
+            (split-window-right)
+            (other-window 1)
+            (switch-to-buffer main-b)
+            (let ((target (selected-window)))
+              (with-current-buffer sidebar-buf
+                (setq opencode-sidebar--last-main-window target)
+                (should (eq (opencode-sidebar--find-main-window) target)))))
+        (when (buffer-live-p sidebar-buf) (kill-buffer sidebar-buf))
+        (when (buffer-live-p main-a) (kill-buffer main-a))
+        (when (buffer-live-p main-b) (kill-buffer main-b))))))
+
 (ert-deftest opencode-sidebar-open-in-split-right ()
   "`opencode-sidebar-open-vsplit' splits the main window to the right
 and opens the session in the new split.
