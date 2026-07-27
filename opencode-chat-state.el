@@ -106,8 +106,6 @@ Lazily initialised by `--state-ensure'.")
    :documentation "ID of the part currently receiving streaming deltas, or nil.")
   (streaming-msg-id nil
    :documentation "ID of the message whose part is streaming, or nil.")
-  (streaming-fontify-timer nil
-   :documentation "Idle timer for deferred markdown fontify of the streaming region.")
   (streaming-region-start nil
    :documentation "Marker at the start of the current streaming region, or nil.")
   (messages-end nil
@@ -439,7 +437,6 @@ writes always have somewhere to land."
 (opencode-chat-state--define-slot current-message-id)
 (opencode-chat-state--define-slot streaming-part-id)
 (opencode-chat-state--define-slot streaming-msg-id)
-(opencode-chat-state--define-slot streaming-fontify-timer)
 (opencode-chat-state--define-slot streaming-region-start)
 (opencode-chat-state--define-slot messages-end)
 

@@ -44,17 +44,12 @@ Set to nil to disable the limit."
   :type '(choice integer (const nil))
   :group 'opencode)
 
-(defcustom opencode-markdown-fontify-max-size 32768
-  "Maximum region size (chars) for synchronous markdown fontification.
-Regions larger than this are deferred to an idle timer to avoid blocking.
-Set to nil to always fontify synchronously."
-  :type '(choice integer (const nil))
-  :group 'opencode)
-
-(defcustom opencode-markdown-fontify-defer-delay 0.2
-  "Idle seconds before a deferred oversized region is fontified."
-  :type 'number
-  :group 'opencode)
+(defvar opencode-markdown-fontify-max-size 32768
+  "Obsolete.  Region size that used to trigger deferred fontification.
+`jit-lock' now decides what to fontify and when, so there is no size at
+which a region is handled differently.")
+(make-obsolete-variable 'opencode-markdown-fontify-max-size
+                        "fontification is driven by jit-lock." "0.2.0")
 
 ;;; --- Internal: Bold-Italic ---
 
@@ -399,127 +394,119 @@ Also removes `invisible' property with value `opencode-md'."
             (remove-text-properties pos next '(invisible nil)))
           (setq pos next))))))
 
-;;; --- Internal: Deferred fontification ---
+;;; --- Internal: jit-lock integration ---
 
-;; Oversized regions are fontified from an idle timer.  Two things make this
-;; delicate, and both used to be wrong:
+;; Markdown fontification is driven by `jit-lock', not by explicit calls from
+;; the renderer.  The renderer marks the spans it wants treated as markdown
+;; with the `opencode-markdown' text property; jit-lock then calls
+;; `opencode-markdown-jit-fontify' for whatever part of the buffer is about to
+;; be displayed, and re-calls it after a change invalidates a span.
 ;;
-;; 1. The timer fires ~`opencode-markdown-fontify-defer-delay' seconds after
-;;    the request, and SSE deltas keep inserting into the chat buffer in the
-;;    meantime.  Integer positions captured at request time therefore denote a
-;;    different span by the time the timer runs, and the wrong text gets
-;;    fontified.  Positions must be markers so they track the insertions.
-;; 2. Every oversized request used to schedule its own timer, so a streaming
-;;    response queued one redundant full-region pass per delta.  Requests are
-;;    now accumulated into a pending list drained by a single timer.
-;;
-;; The shared `opencode--debounce' helper is deliberately not used here: it
-;; cancels the superseded timer outright, which would both drop pending
-;; regions belonging to other messages and leak their markers.  Keeping this
-;; self-contained also keeps `opencode-markdown' loadable (and testable)
-;; without the rest of the package.
+;; This replaces a hand-rolled idle timer that captured region bounds and
+;; fontified them ~0.2s later.  That design had to solve, badly, three problems
+;; jit-lock already solves: positions drifting while SSE deltas insert into the
+;; buffer before the timer fires, redundant passes queued once per delta, and
+;; fontifying transcript that the user cannot see.  Nothing crosses a timer
+;; here, so none of them can recur.
 
-(defvar-local opencode-markdown--deferred-timer nil
-  "Idle timer draining `opencode-markdown--deferred-regions', or nil.")
+(defconst opencode-markdown--fence-re "^ ?```\\w*$"
+  "Regexp matching an opening or closing fenced code block line.
+Tolerates the renderer's leading space so a fence is recognised whether
+the gutter is a literal character or a `line-prefix' display property.")
 
-(defvar-local opencode-markdown--deferred-regions nil
-  "Pending deferred fontification regions, as a list of marker conses.
-Each element is (START-MARKER . END-MARKER).  The end marker has
-insertion type t so text streamed onto the tail of a region is
-fontified along with it.")
+(defun opencode-markdown-mark-region (start end)
+  "Mark START..END as markdown for `jit-lock' to fontify later.
+Called by the renderer in place of fontifying inline.  Marking is O(1)
+in the size of the span and defers all matching work to the point where
+the text is actually about to be displayed."
+  (put-text-property start end 'opencode-markdown t)
+  ;; A freshly marked span has never been through `jit-lock'; clearing
+  ;; `fontified' is what makes it ask us about this text on next redisplay.
+  (put-text-property start end 'fontified nil))
 
-(defun opencode-markdown--release-region (region)
-  "Free the markers held by REGION, a (START-MARKER . END-MARKER) cons."
-  (set-marker (car region) nil)
-  (set-marker (cdr region) nil))
+(defun opencode-markdown--run-bounds (pos limit)
+  "Return (RUN-START . RUN-END) of the marked run covering POS, or nil.
+LIMIT bounds the forward search.  A run is a maximal span carrying a
+non-nil `opencode-markdown' property."
+  (when (get-text-property pos 'opencode-markdown)
+    (cons (or (previous-single-property-change (1+ pos) 'opencode-markdown)
+              (point-min))
+          (or (next-single-property-change pos 'opencode-markdown nil limit)
+              limit))))
 
-(defun opencode-markdown--enqueue-region (start end)
-  "Add START..END to the pending deferred fontification set.
-Regions already covered by a pending entry are dropped, and pending
-entries covered by START..END are replaced, so a streaming response
-that repeatedly re-requests its own growing region accumulates one
-entry rather than one per delta."
-  (let ((covered nil)
-        (kept nil))
-    (dolist (region opencode-markdown--deferred-regions)
-      (let ((rs (marker-position (car region)))
-            (re (marker-position (cdr region))))
-        (cond
-         ;; Pending region is dead or subsumed by the new one --- drop it.
-         ((or (null rs) (null re) (and (<= start rs) (<= re end)))
-          (opencode-markdown--release-region region))
-         (t
-          (when (and (<= rs start) (<= end re))
-            (setq covered t))
-          (push region kept)))))
-    (setq opencode-markdown--deferred-regions (nreverse kept))
-    (unless covered
-      (push (cons (copy-marker start nil) (copy-marker end t))
-            opencode-markdown--deferred-regions))))
+(defun opencode-markdown--widen-to-fences (run-start run-end start end)
+  "Widen START..END so no fenced code block is cut in half.
+Bounded by RUN-START..RUN-END.  Fences are the only construct here that
+spans lines, so everything else needs no more than whole-line bounds.
+Widening to the enclosing fence rather than to the whole run is what
+keeps a large message lazy: only the fences actually on screen are
+processed."
+  (save-excursion
+    (let ((beg (max run-start (progn (goto-char start) (pos-bol))))
+          (fin (min run-end (progn (goto-char end) (pos-bol 2))))
+          (open nil))
+      ;; Odd number of fences between the run start and BEG means BEG is
+      ;; inside a block; rewind to that block's opening fence.
+      (goto-char run-start)
+      (while (re-search-forward opencode-markdown--fence-re beg t)
+        (setq open (unless open (match-beginning 0))))
+      (when open (setq beg open))
+      ;; Likewise, a fence left open at FIN must be followed to its close.
+      (setq open nil)
+      (goto-char beg)
+      (while (re-search-forward opencode-markdown--fence-re fin t)
+        (setq open (unless open (match-beginning 0))))
+      (when open
+        (goto-char fin)
+        (setq fin (if (re-search-forward opencode-markdown--fence-re run-end t)
+                      (min run-end (1+ (match-end 0)))
+                    run-end)))
+      (cons beg fin))))
 
-(defun opencode-markdown--flush-deferred (buffer)
-  "Fontify every region pending in BUFFER, then free its markers.
-Runs from the idle timer scheduled by `opencode-markdown-fontify-region'.
-Does nothing if BUFFER has been killed while the timer was pending."
-  (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (let ((regions (nreverse opencode-markdown--deferred-regions)))
-        ;; Clear state first: `--fontify-region-impl' traps its own errors,
-        ;; but a quit here must not strand the queue or re-run these regions.
-        (setq opencode-markdown--deferred-timer nil
-              opencode-markdown--deferred-regions nil)
-        (unwind-protect
-            (dolist (region regions)
-              (let ((start (marker-position (car region)))
-                    (end (marker-position (cdr region))))
-                (when (and start end (< start end))
-                  (opencode-markdown--fontify-region-impl start end))))
-          (mapc #'opencode-markdown--release-region regions))))))
+(defun opencode-markdown-jit-fontify (start end)
+  "Fontify marked markdown spans overlapping START..END.
+The `jit-lock' worker installed by `opencode-markdown-setup'.  Spans the
+renderer never marked (tool output, headers, footers) are skipped, so
+markdown syntax appearing in them is left alone."
+  (when opencode-markdown-fontify-enabled
+    (let ((pos start)
+          (limit (point-max)))
+      (while (< pos end)
+        (if-let* ((run (opencode-markdown--run-bounds pos limit)))
+            (let ((bounds (opencode-markdown--widen-to-fences
+                           (car run) (cdr run) pos (min end (cdr run)))))
+              (opencode-markdown--fontify-region-impl (car bounds) (cdr bounds))
+              ;; Tell jit-lock about text we fontified beyond what it asked
+              ;; for, so widening does not cost a second pass over the same
+              ;; fence when the next chunk scrolls in.
+              (put-text-property (car bounds) (cdr bounds) 'fontified t)
+              (setq pos (max (cdr bounds) (1+ pos))))
+          (setq pos (or (next-single-property-change pos 'opencode-markdown nil end)
+                        end)))))))
 
-(defun opencode-markdown-cancel-deferred ()
-  "Drop any pending deferred fontification in the current buffer.
-Callers that are about to erase or re-render the buffer should invoke
-this so stale regions are not fontified against the new contents."
-  (when (timerp opencode-markdown--deferred-timer)
-    (cancel-timer opencode-markdown--deferred-timer))
-  (setq opencode-markdown--deferred-timer nil)
-  (mapc #'opencode-markdown--release-region opencode-markdown--deferred-regions)
-  (setq opencode-markdown--deferred-regions nil))
+(defun opencode-markdown-setup ()
+  "Install markdown fontification in the current buffer via `jit-lock'."
+  (jit-lock-register #'opencode-markdown-jit-fontify))
 
 ;;; --- Public API ---
 
 (defun opencode-markdown-fontify-region (start end)
-  "Fontify markdown elements in region START to END.
+  "Fontify markdown elements in region START to END, synchronously.
 Idempotent: strips any previously-applied markdown faces before
 re-applying, so calling this multiple times on the same region
 does not cause face accumulation (e.g. compounding :height).
 Processes fenced code blocks first (with syntax highlighting),
 then inline markdown on non-code-block regions.
-For regions exceeding `opencode-markdown-fontify-max-size' characters,
-fontification is deferred to an idle timer to avoid blocking.
+
+In the chat buffer, fontification is driven by `jit-lock' via
+`opencode-markdown-mark-region' instead; this entry point remains for
+callers that need a region fontified right now regardless of what is
+on screen.
   code-blocks (first, returns exclusion ranges) ->
   bold-italic -> bold -> italic -> inline-code ->
   headers -> blockquotes -> lists -> horizontal rules."
   (when opencode-markdown-fontify-enabled
-    (if (and opencode-markdown-fontify-max-size
-             (> (- end start) opencode-markdown-fontify-max-size))
-        ;; Defer large regions to an idle timer.  START and END are recorded as
-        ;; markers, not integers: streaming inserts into this buffer before the
-        ;; timer fires and integer positions would name the wrong span by then.
-        ;; Covered by `opencode-markdown-deferred-tracks-insertions'.
-        (let ((buf (current-buffer)))
-          (opencode-markdown--enqueue-region start end)
-          ;; Only schedule when nothing is pending.  Rescheduling on every
-          ;; request would let a sustained stream starve the flush indefinitely.
-          (unless (timerp opencode-markdown--deferred-timer)
-            (setq opencode-markdown--deferred-timer
-                  (run-with-idle-timer
-                   opencode-markdown-fontify-defer-delay nil
-                   #'opencode-markdown--flush-deferred buf)))
-          (cl-assert (or (null opencode-markdown--deferred-regions)
-                         (timerp opencode-markdown--deferred-timer))
-                     t "pending fontify regions with no timer to drain them"))
-      (opencode-markdown--fontify-region-impl start end))))
+    (opencode-markdown--fontify-region-impl start end)))
 
 (defun opencode-markdown--fontify-region-impl (start end)
   "Internal: synchronously fontify markdown in region START to END."

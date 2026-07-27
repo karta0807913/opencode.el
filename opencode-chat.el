@@ -53,11 +53,12 @@ Lower values make the UI more responsive but increase CPU usage."
   :type 'number
   :group 'opencode-chat)
 
-(defcustom opencode-chat-streaming-fontify-delay 0.4
-  "Debounce delay in seconds for markdown fontification during streaming.
-Fontification runs this many seconds after the last delta arrives."
-  :type 'number
-  :group 'opencode-chat)
+(defvar opencode-chat-streaming-fontify-delay 0.4
+  "Obsolete.  Debounce delay that used to gate fontification during streaming.
+`jit-lock' invalidates and refontifies a streamed span on its own, so
+there is no longer a debounce to tune.")
+(make-obsolete-variable 'opencode-chat-streaming-fontify-delay
+                        "fontification is driven by jit-lock." "0.2.0")
 
 (defcustom opencode-chat-message-limit 100
   "Maximum number of messages to fetch from the server.
@@ -370,6 +371,9 @@ Read-only protection is via text properties.
         buffer-read-only nil)  ; We use text-property 'read-only instead
   (add-to-invisibility-spec 'opencode-section)
   (add-to-invisibility-spec 'opencode-md)
+  ;; Markdown fontification runs from jit-lock over spans the renderer
+  ;; marked, so only transcript that is about to be displayed is matched.
+  (opencode-markdown-setup)
   ;; Register our CAPFs with negative depth so they run BEFORE any
   ;; other completion backends (e.g. dabbrev, cape, corfu) that might
   ;; intercept @-mention or /slash completions.
@@ -719,9 +723,6 @@ Nils the input-start marker BEFORE rendering messages: after
 `after-change-functions' hook would otherwise force the whole new
 message area into the input keymap, clobbering edit-tool file-path
 and message-map bindings."
-  ;; Drop deferred fontification before the erase: its markers would otherwise
-  ;; collapse to point-min and the flush would run against the redrawn buffer.
-  (opencode-markdown-cancel-deferred)
   (erase-buffer)
   (opencode-chat-message-clear-all)
   (when (opencode-chat--input-start)
@@ -1157,7 +1158,8 @@ and handles chat-level side effects based on the return value."
        (when-let* ((timer (opencode-chat--refresh-timer)))
          (cancel-timer timer)
          (opencode-chat--set-refresh-timer nil))
-       (opencode-chat--schedule-streaming-fontify))
+       ;; Nothing to schedule: `jit-lock' refontifies the streamed span.
+       nil)
       (:need-msg
        (when-let* ((timer (opencode-chat--refresh-timer)))
          (cancel-timer timer)
@@ -1172,10 +1174,8 @@ and handles chat-level side effects based on the return value."
                                :time (list :created (* (float-time) 1000))))))
            (opencode-chat-message-upsert msg-id info)
            ;; Retry now that message exists
-           (when (eq :streamed
-                     (opencode-chat-message-update-part
-                      msg-id part-id part-type part delta))
-             (opencode-chat--schedule-streaming-fontify)))))
+           (opencode-chat-message-update-part
+            msg-id part-id part-type part delta))))
       (:upserted nil)
       (:rendered nil)
       ('nil nil)  ; finalized part — no-op

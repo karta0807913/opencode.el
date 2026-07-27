@@ -290,96 +290,89 @@ Without this, star-style lists render differently than dash-style — inconsiste
                   (memq 'opencode-md-list-marker face)
                 (eq face 'opencode-md-list-marker))))))
 
-;;; --- E. Deferred fontification of oversized regions ---
+;;; --- E. jit-lock integration ---
 
-(defun opencode-markdown-test--idle-timers ()
-  "Return a snapshot of `timer-idle-list' for `opencode-markdown-test--drive'."
-  (copy-sequence timer-idle-list))
+(defun opencode-markdown-test--jit-buffer (text)
+  "Insert TEXT into the current buffer marked as markdown, jit-lock style.
+Leaves the span unfontified so a test can drive
+`opencode-markdown-jit-fontify' over a chosen slice of it."
+  (insert text)
+  (opencode-markdown-mark-region (point-min) (point-max)))
 
-(defun opencode-markdown-test--drive (before)
-  "Run every idle timer registered since the BEFORE snapshot.
-Invokes each timer's own callback rather than sleeping, so the test is
-deterministic in batch mode where idle timers never fire on their own.
-Deliberately reaches through `timer-idle-list' instead of this module's
-internals, so the assertions below describe observable behaviour and
-hold against any scheduling implementation."
-  (let ((pending (seq-difference timer-idle-list before)))
-    (should pending)
-    (dolist (timer pending)
-      (cancel-timer timer)
-      (apply (timer--function timer) (timer--args timer)))))
-
-(defun opencode-markdown-test--insert-oversized ()
-  "Insert filler exceeding `opencode-markdown-fontify-max-size', then a needle.
-Returns nothing; the buffer ends with \" text **needle** tail\" so the
-needle sits at the very end of the oversized region."
-  (insert " ")
-  (insert (make-string (+ opencode-markdown-fontify-max-size 1000) ?x))
-  (insert " text **needle** tail"))
-
-(ert-deftest opencode-markdown-deferred-tracks-insertions ()
-  "Verify deferred fontification follows text inserted before its region.
-Oversized regions are fontified from an idle timer.  When the positions
-were captured as integers, any streaming insert landing above the region
-shifted the real text out from under them and the timer fontified the
-wrong span — the tail of the message silently lost its faces."
+(ert-deftest opencode-markdown-jit-marks-without-fontifying ()
+  "Verify marking a region does not fontify it.
+Marking must stay O(1) in span size — the whole point of moving to
+jit-lock is that rendering a message does no matching work."
   (with-temp-buffer
-    (let ((before (opencode-markdown-test--idle-timers)))
-      (opencode-markdown-test--insert-oversized)
-      (opencode-markdown-fontify-region (point-min) (point-max))
-      ;; Nothing is fontified yet — the region was deferred, not rendered.
-      (should (opencode-markdown-test--no-face-p "needle" 'opencode-md-bold))
-      ;; Simulate a streaming append higher up in the transcript.
-      (save-excursion
-        (goto-char (point-min))
-        (insert (make-string 500 ?y)))
-      (opencode-markdown-test--drive before)
-      (should (opencode-markdown-test--has-face-p "needle" 'opencode-md-bold)))))
+    (opencode-markdown-test--jit-buffer " Hello **world** there")
+    (should (opencode-markdown-test--no-face-p "world" 'opencode-md-bold))
+    (should (get-text-property (point-min) 'opencode-markdown))
+    (should-not (get-text-property (point-min) 'fontified))))
 
-(ert-deftest opencode-markdown-deferred-coalesces-timers ()
-  "Verify repeated oversized requests share one idle timer and one region.
-Each request used to schedule an independent timer, so a streaming
-response queued one redundant full-region fontification pass per delta."
+(ert-deftest opencode-markdown-jit-fontifies-marked-region ()
+  "Verify the jit-lock worker fontifies spans the renderer marked."
   (with-temp-buffer
-    (let ((before (opencode-markdown-test--idle-timers)))
-      (opencode-markdown-test--insert-oversized)
-      (dotimes (_ 5)
-        (opencode-markdown-fontify-region (point-min) (point-max)))
-      ;; Five requests, one timer, one region.
-      (should (= 1 (length (seq-difference timer-idle-list before))))
-      (should (= 1 (length opencode-markdown--deferred-regions)))
-      (opencode-markdown-test--drive before)
-      (should (opencode-markdown-test--has-face-p "needle" 'opencode-md-bold)))))
+    (opencode-markdown-test--jit-buffer " Hello **world** there")
+    (opencode-markdown-jit-fontify (point-min) (point-max))
+    (should (opencode-markdown-test--has-face-p "world" 'opencode-md-bold))))
 
-(ert-deftest opencode-markdown-deferred-releases-markers ()
-  "Verify the deferred queue frees its markers after flushing.
-This module releases markers explicitly; leaking them would leave the
-buffer paying insertion-time marker adjustment costs forever."
+(ert-deftest opencode-markdown-jit-skips-unmarked-region ()
+  "Verify markdown syntax outside a marked span is left alone.
+Tool output and headers are rendered without the marker property, and
+stray asterisks in a shell command must not become emphasis."
   (with-temp-buffer
-    (let ((before (opencode-markdown-test--idle-timers)))
-      (opencode-markdown-test--insert-oversized)
-      (opencode-markdown-fontify-region (point-min) (point-max))
-      (let ((region (car opencode-markdown--deferred-regions)))
-        (should (markerp (car region)))
-        (opencode-markdown-test--drive before)
-        (should (null opencode-markdown--deferred-regions))
-        (should (null opencode-markdown--deferred-timer))
-        (should (null (marker-position (car region))))
-        (should (null (marker-position (cdr region))))))))
+    (insert " tool output with **stars** in it")
+    (opencode-markdown-jit-fontify (point-min) (point-max))
+    (should (opencode-markdown-test--no-face-p "stars" 'opencode-md-bold))))
 
-(ert-deftest opencode-markdown-cancel-deferred-drops-pending ()
-  "Verify `opencode-markdown-cancel-deferred' clears the queue and its timer.
-Callers about to erase the buffer use this so a pending region is not
-fontified against contents it never described."
+(ert-deftest opencode-markdown-jit-partial-chunk-fontifies-only-its-lines ()
+  "Verify a jit-lock chunk fontifies its own lines, not the whole span.
+Laziness is the reason for the migration: asking for one line must not
+drag the rest of a long message through the matcher."
   (with-temp-buffer
-    (opencode-markdown-test--insert-oversized)
-    (opencode-markdown-fontify-region (point-min) (point-max))
-    (let ((region (car opencode-markdown--deferred-regions)))
-      (opencode-markdown-cancel-deferred)
-      (should (null opencode-markdown--deferred-timer))
-      (should (null opencode-markdown--deferred-regions))
-      (should (null (marker-position (car region))))
-      (should (opencode-markdown-test--no-face-p "needle" 'opencode-md-bold)))))
+    (opencode-markdown-test--jit-buffer " **first**\n **second**\n")
+    (goto-char (point-min))
+    (opencode-markdown-jit-fontify (point-min) (pos-eol))
+    (should (opencode-markdown-test--has-face-p "first" 'opencode-md-bold))
+    (should (opencode-markdown-test--no-face-p "second" 'opencode-md-bold))))
+
+(ert-deftest opencode-markdown-jit-widens-to-enclosing-code-fence ()
+  "Verify a chunk landing inside a fenced block widens to the whole fence.
+Fences are the only multi-line construct here.  A chunk boundary falling
+between the fences would otherwise leave the block unrecognised and its
+body fontified as prose — the `**not bold**' below would gain emphasis."
+  (with-temp-buffer
+    (opencode-markdown-test--jit-buffer " ```\n **not bold**\n ```\n")
+    ;; Ask only for the middle line, which carries no fence of its own.
+    (goto-char (point-min))
+    (forward-line 1)
+    (opencode-markdown-jit-fontify (point) (pos-eol))
+    (should (opencode-markdown-test--no-face-p "not bold" 'opencode-md-bold))
+    (should (opencode-markdown-test--has-face-p "not bold" 'opencode-md-code-block))))
+
+(ert-deftest opencode-markdown-jit-marks-fontified-after-pass ()
+  "Verify the worker records widened text as fontified.
+jit-lock only clears `fontified' on change, so text fontified beyond the
+requested chunk must be reported or it is matched again on next scroll."
+  (with-temp-buffer
+    (opencode-markdown-test--jit-buffer " **bold**\n")
+    (opencode-markdown-jit-fontify (point-min) (point-max))
+    (should (get-text-property (point-min) 'fontified))))
+
+(ert-deftest opencode-markdown-jit-is-idempotent ()
+  "Verify repeated jit-lock passes do not accumulate faces.
+jit-lock re-calls the worker on the same text after any change, so a
+non-idempotent pass would compound :height on headers."
+  (with-temp-buffer
+    (opencode-markdown-test--jit-buffer " # Title")
+    (dotimes (_ 3)
+      (opencode-markdown-jit-fontify (point-min) (point-max)))
+    (goto-char (point-min))
+    (search-forward "Title")
+    (let ((face (get-text-property (match-beginning 0) 'face)))
+      (should (if (listp face)
+                  (= 1 (seq-count (lambda (f) (eq f 'opencode-md-header-1)) face))
+                (eq face 'opencode-md-header-1))))))
 
 (provide 'opencode-markdown-test)
 ;;; opencode-markdown-test.el ends here

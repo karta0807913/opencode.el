@@ -32,7 +32,6 @@
 ;; Keymap defined in chat.el, used by apply-message-props
 (defvar opencode-chat-message-map)
 ;; Defcustom defined in chat.el
-(defvar opencode-chat-streaming-fontify-delay)
 
 ;;; --- File path keymap (for edit tool sections) ---
 
@@ -275,10 +274,7 @@ set that property so this function knows to skip it."
 
 (defun opencode-chat--clear-streaming-state ()
   "Clear all streaming-related buffer-local state.
-Cancels fontify timer, frees streaming markers, and clears parts hash."
-  (when-let* ((timer (opencode-chat--streaming-fontify-timer)))
-    (cancel-timer timer)
-    (opencode-chat--set-streaming-fontify-timer nil))
+Frees streaming markers and clears parts hash."
   (when-let* ((region-start (opencode-chat--streaming-region-start)))
     (set-marker region-start nil))
   (opencode-chat--set-streaming-part-id nil)
@@ -509,7 +505,7 @@ on the last line is omitted so streaming deltas can append seamlessly."
           (insert "\n"))
         ;; Fontify markdown in assistant text parts (not during streaming)
         (when (eq role 'assistant)
-          (opencode-markdown-fontify-region part-start (point)))))))
+          (opencode-markdown-mark-region part-start (point)))))))
 
 (defun opencode-chat--render-file-part (part role)
   "Render a file mention PART.  ROLE determines the line-prefix stripe."
@@ -578,7 +574,7 @@ The body shows the full prompt text and is collapsed by default."
                 (insert (propertize prefixed 'face 'default))
                 (insert "\n")
                 (put-text-property body-start (point) 'line-prefix stripe)
-                (opencode-markdown-fontify-region body-start (point)))))))
+                (opencode-markdown-mark-region body-start (point)))))))
     ;; Collapse by default
     (when section-ov
       (let* ((start (overlay-start section-ov))
@@ -766,45 +762,12 @@ starts at `bolp' and gets the space prefix)."
                (insert "\n")))
     ;; Apply all shared properties once over the entire inserted region
     (opencode-chat--apply-message-props region-start (point)
-                                        (list 'line-prefix stripe))))
-
-(defun opencode-chat--schedule-streaming-fontify ()
-  "Schedule debounced markdown fontification of the streaming region.
-If a timer is already pending, cancel and reschedule so that
-fontification runs `opencode-chat-streaming-fontify-delay' seconds
-after the last delta arrives."
-  (opencode--debounce (cons #'opencode-chat--streaming-fontify-timer
-                            #'opencode-chat--set-streaming-fontify-timer)
-                      opencode-chat-streaming-fontify-delay
-                      #'opencode-chat--fontify-streaming-region))
-
-(defun opencode-chat--fontify-streaming-region ()
-  "Fontify the current streaming text region with markdown.
-Uses `opencode-chat--streaming-region-start' as the region start
-and the current streaming marker position as the end.
-Only applies inline markdown (bold, italic, headers, code, lists, hr).
-Fenced code block syntax highlighting is deferred to final render."
-  (when-let* ((region-start (opencode-chat--streaming-region-start)))
-    (let* ((start (marker-position region-start))
-           (streaming-msg-id (opencode-chat--streaming-msg-id))
-           (streaming-part-id (opencode-chat--streaming-part-id))
-           (messages-end (opencode-chat--messages-end))
-           (marker (when (and streaming-msg-id streaming-part-id)
-                    (opencode-chat--store-part-marker
-                     streaming-msg-id streaming-part-id)))
-           (end (cond
-                 (marker (marker-position marker))
-                 (messages-end (marker-position messages-end))
-                 (t nil))))
-      (when (and start end (< start end))
-        (condition-case err
-            (let ((inhibit-read-only t))
-              (save-excursion
-                (save-match-data
-                  (opencode-markdown-fontify-region start end))))
-          (error
-           (opencode--debug
-            "opencode-chat: streaming fontify error: %S" err)))))))
+                                        (list 'line-prefix stripe))
+    ;; Assistant prose is markdown; reasoning is not, matching what the
+    ;; non-streaming render path marks.  `jit-lock' refontifies this span
+    ;; on its own after each delta, so no timer is scheduled here.
+    (unless (string= field "reasoning")
+      (opencode-markdown-mark-region region-start (point)))))
 
 (defun opencode-chat--message-insert-pos (msg-id)
   "Return the insertion point for new parts of message MSG-ID (before footer).
