@@ -49,7 +49,7 @@
   "Verify bold **text** gets `opencode-md-bold' face applied.
 Without this, bold emphasis renders as plain text — users lose visual distinction."
   (with-temp-buffer
-    (insert " Hello **world** there")
+    (insert "Hello **world** there")
     (opencode-markdown-fontify-region (point-min) (point-max))
     (should (opencode-markdown-test--has-face-p "world" 'opencode-md-bold))))
 
@@ -57,7 +57,7 @@ Without this, bold emphasis renders as plain text — users lose visual distinct
   "Verify italic *text* gets `opencode-md-italic' face applied.
 Without this, italic emphasis renders as plain text — users lose visual distinction."
   (with-temp-buffer
-    (insert " Hello *world* there")
+    (insert "Hello *world* there")
     (opencode-markdown-fontify-region (point-min) (point-max))
     (should (opencode-markdown-test--has-face-p "world" 'opencode-md-italic))))
 
@@ -65,7 +65,7 @@ Without this, italic emphasis renders as plain text — users lose visual distin
   "Verify ***text*** gets `opencode-md-bold-italic' face applied.
 Without this, combined bold-italic renders as plain text — users lose visual distinction."
   (with-temp-buffer
-    (insert " Hello ***world*** there")
+    (insert "Hello ***world*** there")
     (opencode-markdown-fontify-region (point-min) (point-max))
     (should (opencode-markdown-test--has-face-p "world" 'opencode-md-bold-italic))))
 
@@ -73,7 +73,7 @@ Without this, combined bold-italic renders as plain text — users lose visual d
   "Verify backtick `code` gets `opencode-md-inline-code' face applied.
 Without this, inline code renders as plain text — code snippets lack visual distinction."
   (with-temp-buffer
-    (insert " Hello `code` there")
+    (insert "Hello `code` there")
     (opencode-markdown-fontify-region (point-min) (point-max))
     (should (opencode-markdown-test--has-face-p "code" 'opencode-md-inline-code))))
 
@@ -85,7 +85,7 @@ Without this, headers render at body text size — document structure becomes in
                   (3 "opencode-md-header-3" "### Title")
                   (4 "opencode-md-header-4" "#### Title")))
     (with-temp-buffer
-      (insert (concat " " (nth 2 spec)))
+      (insert (nth 2 spec))
       (opencode-markdown-fontify-region (point-min) (point-max))
       (should (opencode-markdown-test--has-face-p
                "Title" (intern (nth 1 spec)))))))
@@ -94,7 +94,7 @@ Without this, headers render at body text size — document structure becomes in
   "Verify > quoted text gets `opencode-md-blockquote' face applied.
 Without this, blockquotes render as plain text — quoted content loses visual distinction."
   (with-temp-buffer
-    (insert " > quoted text")
+    (insert "> quoted text")
     (opencode-markdown-fontify-region (point-min) (point-max))
     (should (opencode-markdown-test--has-face-p "quoted text" 'opencode-md-blockquote))))
 
@@ -102,7 +102,7 @@ Without this, blockquotes render as plain text — quoted content loses visual d
   "Verify - marker gets `opencode-md-list-marker' face applied.
 Without this, list markers blend with content — list structure becomes harder to scan."
   (with-temp-buffer
-    (insert " - item text")
+    (insert "- item text")
     (opencode-markdown-fontify-region (point-min) (point-max))
     (should (opencode-markdown-test--has-face-p "-" 'opencode-md-list-marker))))
 
@@ -110,7 +110,7 @@ Without this, list markers blend with content — list structure becomes harder 
   "Verify --- horizontal rule gets `opencode-md-hr' face applied.
 Without this, horizontal rules render as plain dashes — section breaks lose visual weight."
   (with-temp-buffer
-    (insert " ---")
+    (insert "---")
     (opencode-markdown-fontify-region (point-min) (point-max))
     (should (opencode-markdown-test--has-face-p "---" 'opencode-md-hr))))
 
@@ -120,7 +120,7 @@ Without this, horizontal rules render as plain dashes — section breaks lose vi
   "Verify bold ** markers get invisible property `opencode-md'.
 Without this, raw ** markers clutter the display — bold text shows ugly syntax markers."
   (with-temp-buffer
-    (insert " Hello **world** there")
+    (insert "Hello **world** there")
     (opencode-markdown-fontify-region (point-min) (point-max))
     ;; Opening **
     (goto-char (point-min))
@@ -134,7 +134,7 @@ Without this, raw ** markers clutter the display — bold text shows ugly syntax
   "Verify hidden markers also have `opencode-md-marker' face as fallback.
 Without this, revealed markers (when invisibility disabled) have no styling — look broken."
   (with-temp-buffer
-    (insert " Hello **world** there")
+    (insert "Hello **world** there")
     (opencode-markdown-fontify-region (point-min) (point-max))
     ;; Opening ** should have marker face
     (goto-char (point-min))
@@ -142,7 +142,7 @@ Without this, revealed markers (when invisibility disabled) have no styling — 
     (should (opencode-markdown-test--has-face-p "**" 'opencode-md-marker))
     ;; Inline code backticks
     (erase-buffer)
-    (insert " Hello `code` there")
+    (insert "Hello `code` there")
     (opencode-markdown-fontify-region (point-min) (point-max))
     (goto-char (point-min))
     (search-forward "`")
@@ -155,9 +155,9 @@ Without this, revealed markers (when invisibility disabled) have no styling — 
   "Verify header ## marker is hidden with invisible `opencode-md'.
 Without this, raw ## prefixes clutter display — headers show ugly syntax markers."
   (with-temp-buffer
-    (insert " ## Title")
+    (insert "## Title")
     (opencode-markdown-fontify-region (point-min) (point-max))
-    ;; The "## " marker (after the leading space) should be invisible
+    ;; The "## " marker should be invisible
     (goto-char (point-min))
     (search-forward "##")
     (should (eq (get-text-property (match-beginning 0) 'invisible) 'opencode-md))))
@@ -168,7 +168,7 @@ Without this, raw ## prefixes clutter display — headers show ugly syntax marke
   "Verify fontification composes with existing face via `add-face-text-property'.
 Without this, markdown faces override base faces — assistant body styling lost on formatted text."
   (with-temp-buffer
-    (insert " Hello **world** there")
+    (insert "Hello **world** there")
     ;; Pre-apply a base face to the entire region
     (add-face-text-property (point-min) (point-max) 'opencode-assistant-body)
     (opencode-markdown-fontify-region (point-min) (point-max))
@@ -186,7 +186,7 @@ Without this, markdown faces override base faces — assistant body styling lost
   "Verify code block content gets `opencode-md-code-block' face applied.
 Without this, fenced code blocks render as plain text — code snippets lack visual distinction."
   (with-temp-buffer
-    (insert " ```elisp\n (defun foo ())\n ```")
+    (insert "```elisp\n(defun foo ())\n```")
     (opencode-markdown-fontify-region (point-min) (point-max))
     (should (opencode-markdown-test--has-face-p "(defun foo ())" 'opencode-md-code-block))))
 
@@ -194,7 +194,7 @@ Without this, fenced code blocks render as plain text — code snippets lack vis
   "Verify fence lines (```) are hidden with invisible `opencode-md'.
 Without this, raw ``` fences clutter display — code blocks show ugly boundary markers."
   (with-temp-buffer
-    (insert " ```elisp\n (defun foo ())\n ```")
+    (insert "```elisp\n(defun foo ())\n```")
     (opencode-markdown-fontify-region (point-min) (point-max))
     ;; Opening fence should be invisible
     (goto-char (point-min))
@@ -202,14 +202,14 @@ Without this, raw ``` fences clutter display — code blocks show ugly boundary 
     ;; Closing fence should be invisible
     (goto-char (point-max))
     (search-backward "```" nil t)
-    ;; The closing fence starts with " ```" — check the space before it
+    ;; The closing fence line is invisible in full
     (should (eq (get-text-property (point) 'invisible) 'opencode-md))))
 
 (ert-deftest opencode-markdown-code-block-no-language ()
   "Verify code block without language tag still gets fontified.
 Without this, language-less code blocks render as plain text — breaks common markdown usage."
   (with-temp-buffer
-    (insert " ```\n some code\n ```")
+    (insert "```\nsome code\n```")
     (opencode-markdown-fontify-region (point-min) (point-max))
     (should (opencode-markdown-test--has-face-p "some code" 'opencode-md-code-block))))
 
@@ -217,7 +217,7 @@ Without this, language-less code blocks render as plain text — breaks common m
   "Verify inline markdown (**bold**) is not fontified inside code blocks.
 Without this, code examples with markdown syntax get garbled — breaks code display integrity."
   (with-temp-buffer
-    (insert " ```python\n x = **not bold**\n ```")
+    (insert "```python\nx = **not bold**\n```")
     (opencode-markdown-fontify-region (point-min) (point-max))
     ;; "not bold" should NOT have bold face
     (should (opencode-markdown-test--no-face-p "not bold" 'opencode-md-bold))))
@@ -228,7 +228,7 @@ Without this, code examples with markdown syntax get garbled — breaks code dis
   "Verify when `opencode-markdown-fontify-enabled' is nil, no faces are applied.
 Without this, users cannot disable fontification — no escape hatch for rendering issues."
   (with-temp-buffer
-    (insert " Hello **world** there\n # Title\n > quote")
+    (insert "Hello **world** there\n # Title\n > quote")
     (let ((opencode-markdown-fontify-enabled nil))
       (opencode-markdown-fontify-region (point-min) (point-max)))
     (should (opencode-markdown-test--no-face-p "world" 'opencode-md-bold))
@@ -247,7 +247,7 @@ Without this, empty buffers crash the fontification engine — breaks robustness
   "Verify plain text without markdown gets no markdown faces.
 Without this, random text triggers false positive matches — breaks display of normal prose."
   (with-temp-buffer
-    (insert " Just some plain text without any markdown.")
+    (insert "Just some plain text without any markdown.")
     (opencode-markdown-fontify-region (point-min) (point-max))
     (should (opencode-markdown-test--no-face-p "plain text" 'opencode-md-bold))
     (should (opencode-markdown-test--no-face-p "plain text" 'opencode-md-italic))
@@ -258,7 +258,7 @@ Without this, random text triggers false positive matches — breaks display of 
   "Verify italic * markers get invisible property `opencode-md'.
 Without this, raw * markers clutter display — italic text shows ugly syntax markers."
   (with-temp-buffer
-    (insert " Hello *world* there")
+    (insert "Hello *world* there")
     (opencode-markdown-fontify-region (point-min) (point-max))
     ;; Opening * — the italic regex captures the * in group 1
     (goto-char (point-min))
@@ -269,7 +269,7 @@ Without this, raw * markers clutter display — italic text shows ugly syntax ma
   "Verify inline code backtick markers get invisible property `opencode-md'.
 Without this, raw backticks clutter display — inline code shows ugly syntax markers."
   (with-temp-buffer
-    (insert " Hello `code` there")
+    (insert "Hello `code` there")
     (opencode-markdown-fontify-region (point-min) (point-max))
     ;; Opening backtick
     (goto-char (point-min))
@@ -280,11 +280,10 @@ Without this, raw backticks clutter display — inline code shows ugly syntax ma
   "Verify star list marker (* item) gets `opencode-md-list-marker' face.
 Without this, star-style lists render differently than dash-style — inconsistent list display."
   (with-temp-buffer
-    (insert " * item text")
+    (insert "* item text")
     (opencode-markdown-fontify-region (point-min) (point-max))
-    ;; The * at position 2 (after leading space) should have list-marker face
+    ;; The * opens the line, at column 0
     (goto-char (point-min))
-    (forward-char 1) ;; skip leading space
     (should (let ((face (get-text-property (point) 'face)))
               (if (listp face)
                   (memq 'opencode-md-list-marker face)
@@ -304,7 +303,7 @@ Leaves the span unfontified so a test can drive
 Marking must stay O(1) in span size — the whole point of moving to
 jit-lock is that rendering a message does no matching work."
   (with-temp-buffer
-    (opencode-markdown-test--jit-buffer " Hello **world** there")
+    (opencode-markdown-test--jit-buffer "Hello **world** there")
     (should (opencode-markdown-test--no-face-p "world" 'opencode-md-bold))
     (should (get-text-property (point-min) 'opencode-markdown))
     (should-not (get-text-property (point-min) 'fontified))))
@@ -312,7 +311,7 @@ jit-lock is that rendering a message does no matching work."
 (ert-deftest opencode-markdown-jit-fontifies-marked-region ()
   "Verify the jit-lock worker fontifies spans the renderer marked."
   (with-temp-buffer
-    (opencode-markdown-test--jit-buffer " Hello **world** there")
+    (opencode-markdown-test--jit-buffer "Hello **world** there")
     (opencode-markdown-jit-fontify (point-min) (point-max))
     (should (opencode-markdown-test--has-face-p "world" 'opencode-md-bold))))
 
@@ -321,7 +320,7 @@ jit-lock is that rendering a message does no matching work."
 Tool output and headers are rendered without the marker property, and
 stray asterisks in a shell command must not become emphasis."
   (with-temp-buffer
-    (insert " tool output with **stars** in it")
+    (insert "tool output with **stars** in it")
     (opencode-markdown-jit-fontify (point-min) (point-max))
     (should (opencode-markdown-test--no-face-p "stars" 'opencode-md-bold))))
 
@@ -330,7 +329,7 @@ stray asterisks in a shell command must not become emphasis."
 Laziness is the reason for the migration: asking for one line must not
 drag the rest of a long message through the matcher."
   (with-temp-buffer
-    (opencode-markdown-test--jit-buffer " **first**\n **second**\n")
+    (opencode-markdown-test--jit-buffer "**first**\n**second**\n")
     (goto-char (point-min))
     (opencode-markdown-jit-fontify (point-min) (pos-eol))
     (should (opencode-markdown-test--has-face-p "first" 'opencode-md-bold))
@@ -342,7 +341,7 @@ Fences are the only multi-line construct here.  A chunk boundary falling
 between the fences would otherwise leave the block unrecognised and its
 body fontified as prose — the `**not bold**' below would gain emphasis."
   (with-temp-buffer
-    (opencode-markdown-test--jit-buffer " ```\n **not bold**\n ```\n")
+    (opencode-markdown-test--jit-buffer "```\n**not bold**\n```\n")
     ;; Ask only for the middle line, which carries no fence of its own.
     (goto-char (point-min))
     (forward-line 1)
@@ -355,7 +354,7 @@ body fontified as prose — the `**not bold**' below would gain emphasis."
 jit-lock only clears `fontified' on change, so text fontified beyond the
 requested chunk must be reported or it is matched again on next scroll."
   (with-temp-buffer
-    (opencode-markdown-test--jit-buffer " **bold**\n")
+    (opencode-markdown-test--jit-buffer "**bold**\n")
     (opencode-markdown-jit-fontify (point-min) (point-max))
     (should (get-text-property (point-min) 'fontified))))
 
@@ -364,7 +363,7 @@ requested chunk must be reported or it is matched again on next scroll."
 jit-lock re-calls the worker on the same text after any change, so a
 non-idempotent pass would compound :height on headers."
   (with-temp-buffer
-    (opencode-markdown-test--jit-buffer " # Title")
+    (opencode-markdown-test--jit-buffer "# Title")
     (dotimes (_ 3)
       (opencode-markdown-jit-fontify (point-min) (point-max)))
     (goto-char (point-min))

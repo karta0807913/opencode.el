@@ -492,12 +492,12 @@ on the last line is omitted so streaming deltas can append seamlessly."
                             (plist-get time-data :start)
                             (not (plist-get time-data :end)))))
     (unless (string-empty-p text)
-      (let* ((stripe (propertize opencode--stripe-char 'face block-face))
+      (let* ((stripe (opencode--prose-prefix block-face))
              (part-start (point))
-             ;; Build the entire text block as one string with space-prefixed lines
-             (prefixed (mapconcat (lambda (l) (concat " " l))
-                                  (string-lines text) "\n")))
-        (insert (propertize prefixed 'face body-face))
+             ;; Normalise line endings exactly as before; the gutter that used
+             ;; to be prepended per line now lives in the line-prefix.
+             (body (string-join (string-lines text) "\n")))
+        (insert (propertize body 'face body-face))
         ;; Single property call for the entire block
         (put-text-property part-start (point) 'line-prefix stripe)
         ;; Trailing newline: omit only for unfinished (streaming) parts
@@ -569,11 +569,13 @@ The body shows the full prompt text and is collapsed by default."
             ;; Body: full prompt text with markdown rendering
             (when (and prompt (stringp prompt) (not (string-empty-p prompt)))
               (let ((body-start (point))
-                    (prefixed (mapconcat (lambda (l) (concat " " l))
-                                        (string-lines prompt) "\n")))
-                (insert (propertize prefixed 'face 'default))
+                    (body (string-join (string-lines prompt) "\n")))
+                (insert (propertize body 'face 'default))
                 (insert "\n")
-                (put-text-property body-start (point) 'line-prefix stripe)
+                ;; Prompt text is prose; the header above it is chrome and
+                ;; keeps the bare stripe.
+                (put-text-property body-start (point) 'line-prefix
+                                   (opencode--prose-prefix block-face))
                 (opencode-markdown-mark-region body-start (point)))))))
     ;; Collapse by default
     (when section-ov
@@ -737,25 +739,22 @@ Uses assistant block face for left border."
 
 (defun opencode-chat--insert-streaming-delta (text field)
   "Insert streaming delta TEXT for FIELD type.
-Each line gets a space prefix (if at bolp), assistant-body (or reasoning)
-face, line-prefix stripe with opencode-assistant-block, read-only, and keymap.
+Each line gets assistant-body (or reasoning) face, a prose line-prefix
+with opencode-assistant-block, read-only, and keymap.
 Uses `split-string' instead of `string-lines' to preserve trailing newlines
 in deltas (e.g. \"Hello\\n\" must insert the newline so the next delta
-starts at `bolp' and gets the space prefix)."
+starts on a line of its own)."
   (let* ((inhibit-read-only t)
          (body-face (if (string= field "reasoning")
                         'opencode-reasoning
                       'opencode-assistant-body))
-         (stripe (propertize opencode--stripe-char 'face 'opencode-assistant-block))
+         (stripe (opencode--prose-prefix 'opencode-assistant-block))
          (lines (split-string text "\n"))
          (num-lines (length lines))
          (region-start (point)))
     (cl-loop for line in lines
              for i from 0
              do
-             ;; Add space prefix at beginning of line
-             (when (bolp)
-               (setq line (concat " " line)))
              (insert (propertize line 'face body-face))
              ;; Insert newline between lines (not after the last one)
              (when (< i (1- num-lines))

@@ -14,9 +14,10 @@
 ;; headers (H1-H4), blockquotes, unordered lists, horizontal rules,
 ;; fenced code blocks (```lang ... ```).
 ;;
-;; IMPORTANT: Each rendered line starts with " " (one space) because
-;; `opencode-chat--render-text-part' does (concat " " line).  All
-;; regexes account for this leading space.
+;; IMPORTANT: Rendered prose lines start at column 0.  The one-column
+;; gutter is a `line-prefix' display property applied by
+;; `opencode--prose-prefix', not a character in the buffer, so every
+;; regex below anchors with a plain `^'.
 
 ;;; Code:
 
@@ -148,11 +149,10 @@ Matches `code` patterns."
 
 (defun opencode-markdown--fontify-headers (start end)
   "Apply header faces and hide markers in region START to END.
-Matches # through #### headers.  Note: each line has a leading
-space from the renderer, so `# Title' appears as ` # Title'."
+Matches # through #### headers."
   (save-excursion
     (goto-char start)
-    (while (re-search-forward "^ \\(#\\{1,4\\}\\) +\\(.+\\)$" end t)
+    (while (re-search-forward "^\\(#\\{1,4\\}\\) +\\(.+\\)$" end t)
       (let* ((hashes (match-string 1))
              (level (length hashes))
              (face (pcase level
@@ -175,10 +175,10 @@ space from the renderer, so `# Title' appears as ` # Title'."
 
 (defun opencode-markdown--fontify-blockquotes (start end)
   "Apply blockquote face in region START to END.
-Matches `> text' patterns (with leading space from renderer)."
+Matches `> text' patterns."
   (save-excursion
     (goto-char start)
-    (while (re-search-forward "^ \\(>\\) +\\(.+\\)$" end t)
+    (while (re-search-forward "^\\(>\\) +\\(.+\\)$" end t)
       ;; Apply blockquote face to the text content
       (add-face-text-property (match-beginning 2) (match-end 2)
                               'opencode-md-blockquote )
@@ -190,10 +190,10 @@ Matches `> text' patterns (with leading space from renderer)."
 
 (defun opencode-markdown--fontify-lists (start end)
   "Apply list marker face in region START to END.
-Matches `- item' and `* item' patterns (with leading space)."
+Matches `- item' and `* item' patterns."
   (save-excursion
     (goto-char start)
-    (while (re-search-forward "^ \\([*-]\\) +" end t)
+    (while (re-search-forward "^\\([*-]\\) +" end t)
       ;; Only apply face to the marker character, not the content
       (add-face-text-property (match-beginning 1) (match-end 1)
                               'opencode-md-list-marker ))))
@@ -202,10 +202,10 @@ Matches `- item' and `* item' patterns (with leading space)."
 
 (defun opencode-markdown--fontify-hr (start end)
   "Apply horizontal rule face in region START to END.
-Matches `---', `***', `___' patterns (with leading space)."
+Matches `---', `***', `___' patterns."
   (save-excursion
     (goto-char start)
-    (while (re-search-forward "^ \\([-*_]\\{3,\\}\\) *$" end t)
+    (while (re-search-forward "^\\([-*_]\\{3,\\}\\) *$" end t)
       (add-face-text-property (match-beginning 1) (match-end 1)
                               'opencode-md-hr ))))
 
@@ -283,19 +283,17 @@ Skips if CODE exceeds `opencode-markdown-max-code-block-lines'."
 
 (defun opencode-markdown--fontify-code-blocks (start end)
   "Fontify fenced code blocks in region START to END.
-Returns list of (BLOCK-START . BLOCK-END) ranges for exclusion.
-Each line has a leading space from the renderer, so fences
-appear as ` ```lang' and ` ```'."
+Returns list of (BLOCK-START . BLOCK-END) ranges for exclusion."
   (let ((ranges nil)
         (count 0))
     (save-excursion
       (goto-char start)
-      (while (re-search-forward "^ ```\\(\\w*\\)$" end t)
+      (while (re-search-forward "^```\\(\\w*\\)$" end t)
         (let ((fence-open-start (match-beginning 0))
               (fence-open-end (1+ (match-end 0)))  ; include newline
               (lang (match-string 1)))
           ;; Find matching closing fence
-          (when (re-search-forward "^ ```$" end t)
+          (when (re-search-forward "^```$" end t)
             (let* ((fence-close-start (match-beginning 0))
                    (fence-close-end (min (1+ (match-end 0)) end))
                    (code-start fence-open-end)
@@ -409,10 +407,8 @@ Also removes `invisible' property with value `opencode-md'."
 ;; fontifying transcript that the user cannot see.  Nothing crosses a timer
 ;; here, so none of them can recur.
 
-(defconst opencode-markdown--fence-re "^ ?```\\w*$"
-  "Regexp matching an opening or closing fenced code block line.
-Tolerates the renderer's leading space so a fence is recognised whether
-the gutter is a literal character or a `line-prefix' display property.")
+(defconst opencode-markdown--fence-re "^```\\w*$"
+  "Regexp matching an opening or closing fenced code block line.")
 
 (defun opencode-markdown-mark-region (start end)
   "Mark START..END as markdown for `jit-lock' to fontify later.

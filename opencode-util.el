@@ -278,6 +278,21 @@ Signals `user-error' if DATA exceeds MAX-SIZE."
 (defconst opencode--stripe-char "\u258E"
   "Left block stripe character (▎) used for message borders.")
 
+(defun opencode--prose-prefix (block-face)
+  "Return the `line-prefix' for a prose line striped in BLOCK-FACE.
+Carries both the block stripe and the one-column gutter.  Prose lines ---
+assistant and user message text, subtask prompts, streaming deltas ---
+keep the gutter here rather than as a literal leading space so their
+buffer text starts at column 0: `^'-anchored search, meaning isearch,
+occur and `rgrep', and markdown's own line-anchored regexes then match
+message text directly, which they cannot do through an inserted space.
+
+Chrome lines, meaning tool headers and bodies, message footers and
+reasoning headers, deliberately keep their literal indentation and a
+bare `opencode--stripe-char' prefix: nothing anchors patterns against
+them, and their indentation is structural rather than a uniform gutter."
+  (concat (propertize opencode--stripe-char 'face block-face) " "))
+
 (provide 'opencode-util)
 
 ;;; opencode-util.el ends here

@@ -926,7 +926,7 @@ Line-prefix is applied by the message renderer to the entire body region."
       (when (search-forward "block text" nil t)
         (let ((lp (get-text-property (match-beginning 0) 'line-prefix)))
           (should lp)
-          (should (string= (substring-no-properties lp) "▎"))
+          (should (string= (substring-no-properties lp) "▎ "))
           ;; The line-prefix string should carry the block face
           (let ((lp-face (get-text-property 0 'face lp)))
             (should (eq lp-face 'opencode-user-block))))))))
@@ -944,7 +944,7 @@ Line-prefix is applied by the message renderer to the entire body region."
       (when (search-forward "assistant text" nil t)
         (let ((lp (get-text-property (match-beginning 0) 'line-prefix)))
           (should lp)
-          (should (string= (substring-no-properties lp) "▎"))
+          (should (string= (substring-no-properties lp) "▎ "))
           ;; The line-prefix string should carry the block face
           (let ((lp-face (get-text-property 0 'face lp)))
             (should (eq lp-face 'opencode-assistant-block))))))))
@@ -1398,54 +1398,76 @@ Without this, users could accidentally edit rendered tool output."
 
 ;;; --- Header line: align-to display property ---
 
+(ert-deftest opencode-chat-prose-starts-at-column-zero ()
+  "Verify rendered prose starts at column 0 with the gutter in `line-prefix'.
+The one-column gutter used to be a literal space inserted on every line,
+which broke every `^'-anchored search over message text: isearch, occur
+and `rgrep' could not match a markdown heading or list marker at the
+start of a line, and neither could markdown's own regexes."
+  (opencode-test-with-temp-buffer "*test-chat-col0*"
+    (opencode-chat-mode)
+    (let* ((inhibit-read-only t)
+           (part (list :id "p_col0" :type "text"
+                       :text "# Heading\n- item\n```\ncode\n```"
+                       :time (list :start 1700000000000 :end 1700000001000))))
+      (opencode-chat--render-text-part part 'assistant)
+      ;; Every line-anchored construct is reachable with a plain `^'.
+      (dolist (re '("^# Heading$" "^- item$" "^```$" "^code$"))
+        (goto-char (point-min))
+        (should (re-search-forward re nil t)))
+      ;; The gutter is still rendered --- it just lives in the display layer.
+      (goto-char (point-min))
+      (should (search-forward "Heading" nil t))
+      (let ((lp (get-text-property (match-beginning 0) 'line-prefix)))
+        (should (string= (substring-no-properties lp) "\u258E "))))))
+
 ;;; --- Delta helper (insert-streaming-delta) ---
 
 (ert-deftest opencode-chat-insert-delta-single-line ()
-  "Single-line delta inserts with space prefix and correct faces."
+  "Single-line delta inserts at column 0 with correct faces."
   (opencode-test-with-temp-buffer "*test-delta-single*"
     (opencode-chat-mode)
     (let ((inhibit-read-only t))
       (opencode-chat--insert-streaming-delta "Hello" "text"))
-    ;; Buffer should be " Hello" (space prefix + text)
-    (should (string= (buffer-string) " Hello"))
+    ;; Buffer text starts at column 0; the gutter is in the line-prefix
+    (should (string= (buffer-string) "Hello"))
     ;; Face should be assistant-body (block face is on line-prefix now)
     (should (eq 'opencode-assistant-body (get-text-property 1 'face)))
     ;; line-prefix should carry the block face stripe
     (let ((lp (get-text-property 1 'line-prefix)))
       (should lp)
-      (should (string= (substring-no-properties lp) "▎"))
+      (should (string= (substring-no-properties lp) "▎ "))
       (should (eq 'opencode-assistant-block (get-text-property 0 'face lp))))
     ;; read-only property should be set
     (should (eq t (get-text-property 1 'read-only)))))
 
 (ert-deftest opencode-chat-insert-delta-multiline ()
-  "Multi-line delta prefixes each line with space."
+  "Multi-line delta starts every line at column 0."
   (opencode-test-with-temp-buffer "*test-delta-multi*"
     (opencode-chat-mode)
     (let ((inhibit-read-only t))
       (opencode-chat--insert-streaming-delta "Hello\nWorld" "text"))
-    ;; Buffer should be " Hello\n World"
-    (should (string= (buffer-string) " Hello\n World"))
+    ;; Buffer should be "Hello\nWorld"
+    (should (string= (buffer-string) "Hello\nWorld"))
     ;; Both lines should have assistant-body face and line-prefix stripe
     (should (eq 'opencode-assistant-body (get-text-property 1 'face)))
-    (should (eq 'opencode-assistant-body (get-text-property 8 'face)))
+    (should (eq 'opencode-assistant-body (get-text-property 7 'face)))
     (let ((lp1 (get-text-property 1 'line-prefix))
-          (lp2 (get-text-property 8 'line-prefix)))
+          (lp2 (get-text-property 7 'line-prefix)))
       (should lp1)
       (should lp2)
       (should (eq 'opencode-assistant-block (get-text-property 0 'face lp1)))
       (should (eq 'opencode-assistant-block (get-text-property 0 'face lp2))))))
 
 (ert-deftest opencode-chat-insert-delta-midline ()
-  "Delta at non-bolp does not add space prefix."
+  "Delta at non-bolp continues the current line."
   (opencode-test-with-temp-buffer "*test-delta-midline*"
     (opencode-chat-mode)
     (let ((inhibit-read-only t))
-      ;; First delta at bolp adds " " prefix
       (opencode-chat--insert-streaming-delta "Start" "text")
-      ;; Point is after "Start", NOT at bolp; second delta has no prefix
+      ;; Point is after "Start", NOT at bolp
       (opencode-chat--insert-streaming-delta " more" "text"))
-    (should (string= (buffer-string) " Start more"))))
+    (should (string= (buffer-string) "Start more"))))
 
 (ert-deftest opencode-chat-insert-delta-reasoning-face ()
   "Reasoning delta uses opencode-reasoning face, not assistant-body."
@@ -3119,8 +3141,8 @@ Both use a propertized stripe char with `opencode-assistant-block' face."
                         :time (list :start 1700000000000 :end 1700000001000))))
         (opencode-chat--render-text-part part 'assistant)
         (let ((lp (get-text-property 1 'line-prefix)))
-          ;; Stripe char
-          (should (string= (substring-no-properties lp) "\u258E"))
+          ;; Stripe char plus the one-column prose gutter
+          (should (string= (substring-no-properties lp) "\u258E "))
           ;; Face on stripe
           (should (eq 'opencode-assistant-block (get-text-property 0 'face lp))))))
     ;; Streaming path
@@ -3129,13 +3151,13 @@ Both use a propertized stripe char with `opencode-assistant-block' face."
       (let ((inhibit-read-only t))
         (opencode-chat--insert-streaming-delta text "text")
         (let ((lp (get-text-property 1 'line-prefix)))
-          ;; Same stripe char
-          (should (string= (substring-no-properties lp) "\u258E"))
+          ;; Same stripe char and gutter
+          (should (string= (substring-no-properties lp) "\u258E "))
           ;; Same face
           (should (eq 'opencode-assistant-block (get-text-property 0 'face lp))))))))
 
 (ert-deftest opencode-chat-streaming-vs-render-multiline-prefix ()
-  "Each line in multi-line text gets the space prefix and line-prefix stripe.
+  "Each line in multi-line text gets the prose line-prefix stripe.
 Compares both paths for a 3-line text block to verify prefix consistency."
   (let ((text "AAA\nBBB\nCCC")
         render-lines stream-lines)
@@ -3347,16 +3369,14 @@ Both paths call the same render function."
 
 (ert-deftest opencode-chat-streaming-delta-newline-handling ()
   "Streaming delta with trailing newline correctly starts a new line.
-When a delta ends with \\n, the next delta should start at bolp and get the space prefix."
+When a delta ends with \\n, the next delta should start on a line of its own."
   (opencode-test-with-temp-buffer "*test-cmp-newline-handling*"
     (opencode-chat-mode)
     (let ((inhibit-read-only t))
       ;; Delta with trailing newline
       (opencode-chat--insert-streaming-delta "First line\n" "text")
-      ;; Next delta should be at bolp and get space prefix
       (opencode-chat--insert-streaming-delta "Second line" "text")
-      ;; Should produce " First line\n Second line"
-      (should (string= (buffer-string) " First line\n Second line")))))
+      (should (string= (buffer-string) "First line\nSecond line")))))
 
 (ert-deftest opencode-chat-streaming-empty-delta-no-crash ()
   "Empty string delta does not crash or corrupt buffer state."
