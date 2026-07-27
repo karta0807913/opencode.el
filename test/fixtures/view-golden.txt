@@ -27,7 +27,7 @@ L007 PRE[▎ ] WRAP[] TXT[Heading two]
 L008 PRE[▎ ] WRAP[] TXT[Plain prose with bold, italic and inline code.]
       FACES Plain prose with =opencode-assistant-body bold=(opencode-md-bold opencode-assistant-body) , =opencode-assistant-body italic=(opencode-md-italic opencode-assistant-body)  and =opencode-assistant-body inline code=(opencode-md-inline-code opencode-assistant-body) .=opencode-assistant-body
 L009 PRE[▎ ] WRAP[] TXT[Nested bold italic and a link.]
-      FACES Nested =opencode-assistant-body bold italic=(opencode-md-bold-italic opencode-assistant-body)  and a =opencode-assistant-body link=(markdown-link-face opencode-assistant-body) .=opencode-assistant-body
+      FACES Nested =opencode-assistant-body bold italic=(opencode-md-bold-italic opencode-assistant-body)  and a =opencode-assistant-body link=(opencode-md-link opencode-assistant-body) .=opencode-assistant-body
 L010 PRE[▎ ] WRAP[] TXT[1. ordered item]
       FACES 1.=(opencode-md-list-marker opencode-assistant-body)  ordered item=opencode-assistant-body
 L011 PRE[▎ ] WRAP[] TXT[2. second ordered]

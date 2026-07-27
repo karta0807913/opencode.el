@@ -86,13 +86,20 @@ which a region is handled differently.")
     (markdown-header-rule-face  . opencode-md-hr)
     (markdown-hr-face           . opencode-md-hr)
     (markdown-list-face         . opencode-md-list-marker)
-    (markdown-blockquote-face   . opencode-md-blockquote))
+    (markdown-blockquote-face   . opencode-md-blockquote)
+    (markdown-link-face         . opencode-md-link)
+    (markdown-missing-link-face . opencode-md-link)
+    (markdown-url-face          . opencode-md-url)
+    (markdown-table-face        . opencode-md-table))
   "Map `markdown-mode' faces onto this package's own.
 Keeping the `opencode-md-*' faces means themes and user customisation
 that already target them keep working, and the visible result of the
-switch is limited to what `markdown-mode' parses differently.  Faces
-with no local equivalent --- links, URLs, tables, and the `font-lock-*'
-faces from natively highlighted code --- are passed through unchanged.")
+switch is limited to what `markdown-mode' parses differently.  The
+`opencode-md-*' faces themselves inherit from `markdown-mode''s, so a
+theme still reaches them; see the commentary in `opencode-faces'.  Only
+the `font-lock-*' faces produced inside natively highlighted code blocks
+are passed through unchanged, since those belong to the code's own major
+mode rather than to markdown.")
 
 (defun opencode-markdown--map-face (face)
   "Translate FACE, a face symbol or list, through `opencode-markdown--face-map'."

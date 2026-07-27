@@ -12,6 +12,16 @@
 
 ;;; Code:
 
+;; The `opencode-md-*' faces below inherit from `markdown-mode''s.  That is
+;; what lets an installed theme reach them: themes ship styling for
+;; `markdown-*' and know nothing about this package, so faces defined
+;; independently -- as these were, with hardcoded hex colours -- ignore the
+;; user's theme entirely.  Inheriting keeps theme integration while still
+;; adding the structure markdown-mode deliberately leaves out: header
+;; scaling, `:extend' on code blocks so their background fills the line, and
+;; a strike-through rule.
+(require 'markdown-mode)
+
 (defgroup opencode-faces nil
   "Faces for opencode.el."
   :group 'opencode
@@ -441,41 +451,33 @@ On GUI frames, uses dotted underline (Emacs 30)."
   :group 'opencode-faces)
 
 (defface opencode-md-inline-code
-  '((((class color) (background dark))
-     :background "#374151" :foreground "#f9a8d4" :inherit fixed-pitch)
-    (((class color) (background light))
-     :background "#f3f4f6" :foreground "#be185d" :inherit fixed-pitch)
-    (t :inherit fixed-pitch))
+  '((t :inherit markdown-inline-code-face))
   "Face for inline code markdown (`code`).
 Uses monospace font with subtle background highlight."
   :group 'opencode-faces)
 
 (defface opencode-md-header-1
-  '((t :height 1.3 :weight bold :inherit font-lock-keyword-face))
+  '((t :height 1.3 :inherit markdown-header-face-1))
   "Face for level 1 markdown headers (# Header)."
   :group 'opencode-faces)
 
 (defface opencode-md-header-2
-  '((t :height 1.2 :weight bold :inherit font-lock-keyword-face))
+  '((t :height 1.2 :inherit markdown-header-face-2))
   "Face for level 2 markdown headers (## Header)."
   :group 'opencode-faces)
 
 (defface opencode-md-header-3
-  '((t :height 1.1 :weight bold :inherit font-lock-keyword-face))
+  '((t :height 1.1 :inherit markdown-header-face-3))
   "Face for level 3 markdown headers (### Header)."
   :group 'opencode-faces)
 
 (defface opencode-md-header-4
-  '((t :weight bold :inherit font-lock-keyword-face))
+  '((t :inherit markdown-header-face-4))
   "Face for level 4 markdown headers (#### Header)."
   :group 'opencode-faces)
 
 (defface opencode-md-code-block
-  '((((class color) (background dark))
-     :background "#1e293b" :extend t)
-    (((class color) (background light))
-     :background "#f1f5f9" :extend t)
-    (t :inherit default :extend t))
+  '((t :inherit markdown-code-face :extend t))
   "Face for code block background region (```...```).
 Provides subtle background highlight for code blocks."
   :group 'opencode-faces)
@@ -487,24 +489,39 @@ Dimmed foreground to de-emphasize the marker line."
   :group 'opencode-faces)
 
 (defface opencode-md-blockquote
-  '((t :inherit font-lock-comment-face :slant italic))
+  '((t :inherit markdown-blockquote-face :slant italic))
   "Face for blockquote markdown text (> quote).
 Slightly dimmed and italicized."
   :group 'opencode-faces)
 
 (defface opencode-md-list-marker
-  '((t :inherit font-lock-keyword-face))
+  '((t :inherit markdown-list-face))
   "Face for list markers (- and * in markdown lists)."
   :group 'opencode-faces)
 
 (defface opencode-md-hr
-  '((t :strike-through t :inherit font-lock-comment-face))
+  '((t :strike-through t :inherit markdown-hr-face))
   "Face for horizontal rules (--- or ***).
 Uses strike-through to indicate a dividing line."
   :group 'opencode-faces)
 
+(defface opencode-md-link
+  '((t :inherit markdown-link-face))
+  "Face for markdown link text."
+  :group 'opencode-faces)
+
+(defface opencode-md-url
+  '((t :inherit markdown-url-face))
+  "Face for markdown URLs and link destinations."
+  :group 'opencode-faces)
+
+(defface opencode-md-table
+  '((t :inherit markdown-table-face))
+  "Face for markdown tables."
+  :group 'opencode-faces)
+
 (defface opencode-md-marker
-  '((t :inherit font-lock-comment-face))
+  '((t :inherit markdown-markup-face))
   "Face for hidden markdown markers (*, `, #, etc.).
 Dimmed foreground; visible when user toggles invisibility."
   :group 'opencode-faces)
