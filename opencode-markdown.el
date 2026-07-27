@@ -167,7 +167,49 @@ the appearance it has today."
                           hidden)
                     props))
             (setq pos next)))))
-    (nreverse props)))
+    (opencode-markdown--fix-bold-italic text (nreverse props))))
+
+(defconst opencode-markdown--bold-italic-re
+  "\\(\\*\\*\\*\\)\\([^*\n]+\\)\\(\\*\\*\\*\\)"
+  "Regexp matching a ***bold italic*** span.")
+
+(defun opencode-markdown--fix-bold-italic (text props)
+  "Correct PROPS for ***bold italic*** spans in TEXT.
+
+Workaround for markdown-mode 2.8-alpha, which mis-parses this construct:
+given `***word***' it hides the opening `**', applies bold to `*word'
+with the asterisk inside the emphasis, and leaves the closing `*'
+unstyled outside the span --- so the user sees stray asterisks.  Verified
+against a full `markdown-mode' buffer with its own font-lock, so it is
+upstream behaviour rather than an artefact of fontifying in a temp
+buffer.
+
+`***bold italic***' is common in model output, which is why this is
+corrected here instead of accepted.  Entries overlapping a matched span
+are dropped and replaced with the correct marker/content split.  Remove
+this once upstream parses the construct correctly."
+  (let ((ranges nil)
+        (fixes nil)
+        (pos 0))
+    (while (string-match opencode-markdown--bold-italic-re text pos)
+      (let ((beg (match-beginning 0))
+            (end (match-end 0))
+            (cbeg (match-beginning 2))
+            (cend (match-end 2)))
+        (push (cons beg end) ranges)
+        (push (list beg cbeg 'opencode-md-marker t) fixes)
+        (push (list cbeg cend 'opencode-md-bold-italic nil) fixes)
+        (push (list cend end 'opencode-md-marker t) fixes)
+        (setq pos end)))
+    (if (null ranges)
+        props
+      (append
+       (seq-remove (lambda (entry)
+                     (let ((b (nth 0 entry)) (e (nth 1 entry)))
+                       (seq-some (lambda (r) (and (< b (cdr r)) (> e (car r))))
+                                 ranges)))
+                   props)
+       (nreverse fixes)))))
 
 (defun opencode-markdown--apply-props (start props)
   "Apply PROPS, offsets relative to START, to the current buffer."

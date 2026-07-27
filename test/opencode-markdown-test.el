@@ -65,14 +65,9 @@ Without this, italic emphasis renders as plain text — users lose visual distin
   "Verify ***text*** gets `opencode-md-bold-italic' face applied.
 Without this, combined bold-italic renders as plain text — users lose visual distinction.
 
-KNOWN FAILURE against markdown-mode 2.8-alpha, which mis-parses this
-construct: it hides the opening `**\', bolds `*text\' including the
-stray asterisk, and leaves the trailing `*\' unstyled outside the span.
-The parse is wrong independently of `markdown-hide-markup\'.  Left
-failing on purpose --- `***bold italic***\' is common in model output,
-so this is the one construct the switch to markdown-mode regresses, and
-it should be visible rather than deleted."
-  :expected-result :failed
+markdown-mode 2.8-alpha mis-parses this construct, leaving stray
+asterisks on screen; `opencode-markdown--fix-bold-italic' corrects it.
+This test is what pins that workaround."
   (with-temp-buffer
     (insert "Hello ***world*** there")
     (opencode-markdown-fontify-region (point-min) (point-max))
@@ -381,6 +376,42 @@ non-idempotent pass would compound :height on headers."
       (should (if (listp face)
                   (= 1 (seq-count (lambda (f) (eq f 'opencode-md-header-1)) face))
                 (eq face 'opencode-md-header-1))))))
+
+(ert-deftest opencode-markdown-jit-chunking-matches-single-pass ()
+  "Verify chunked fontification produces the same faces as one whole-span pass.
+`jit-lock' splits a span at `jit-lock-chunk-size' boundaries that have
+nothing to do with markdown structure, and re-splits it on every scroll,
+so a full re-render does not heal a bad split.  What makes this safe is
+that the worker rounds every chunk outward to whole lines, so
+consecutive chunks overlap by up to a line and multi-line constructs are
+always seen whole by some chunk.  That is the invariant, and it is worth
+asserting because it is a property of the widening, not of markdown-mode."
+  (let* ((text (concat "See [the docs][ref] for details.\n"
+                      "Section title\n=============\nbody after\n"
+                      "```elisp\n(defun foo () 1)\n```\n"
+                      (mapconcat (lambda (i) (format "filler line %d" i))
+                                 (number-sequence 1 120) "\n")
+                      "\n[ref]: http://example.com\n"))
+        (faces-of
+         (lambda (chunk)
+           (with-temp-buffer
+             (insert text)
+             (opencode-markdown-mark-region (point-min) (point-max))
+             (if (null chunk)
+                 (opencode-markdown-jit-fontify (point-min) (point-max))
+               (let ((pos (point-min)))
+                 (while (< pos (point-max))
+                   (let ((e (min (point-max) (+ pos chunk))))
+                     (opencode-markdown-jit-fontify pos e)
+                     (setq pos e)))))
+             (let (out (pos (point-min)))
+               (while (< pos (point-max))
+                 (push (get-text-property pos 'face) out)
+                 (setq pos (1+ pos)))
+               (nreverse out))))))
+    (let ((whole (funcall faces-of nil)))
+      (dolist (chunk '(97 250 500 1500))
+        (should (equal whole (funcall faces-of chunk)))))))
 
 (provide 'opencode-markdown-test)
 ;;; opencode-markdown-test.el ends here
