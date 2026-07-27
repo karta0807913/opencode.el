@@ -748,10 +748,16 @@ PRE is the plist returned by `--save-render-state'."
            saved-offset (opencode-chat--input-start))
       (let* ((content-start (opencode-chat--input-content-start))
              (content-end (opencode-chat--input-content-end))
+             ;; `content-end' is the first read-only position after the user's
+             ;; text, so the valid offsets are 0..LENGTH inclusive --- LENGTH
+             ;; being the cursor sitting after the last character, which is
+             ;; where someone typing actually is.  Clamping to LENGTH-1 put the
+             ;; cursor one character back every time a refresh landed
+             ;; mid-typing, so the next keystroke went inside the word.
              (target (when content-start
                        (+ content-start
                           (min saved-offset
-                               (max 0 (1- (- content-end content-start))))))))
+                               (max 0 (- content-end content-start)))))))
         (if target (goto-char target) (opencode-chat--goto-latest))))
      (in-input-p (opencode-chat--goto-latest))
      (saved-msg-pos

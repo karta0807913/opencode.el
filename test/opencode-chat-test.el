@@ -1508,6 +1508,71 @@ class of bug the README self-reports."
             (should (string-match-p "MUCH LONGER REPLACEMENT" (buffer-string)))
             (should-not (string-match-p "SHORT" (buffer-string)))))))))
 
+(ert-deftest opencode-chat-refresh-while-typing-keeps-point ()
+  "Verify a refresh landing mid-typing does not move point in the input area.
+When the model stops streaming, a structural refresh redraws the buffer
+and restores the cursor from a saved offset.  If the user is typing at
+that moment, the cursor must land back exactly where it was — a silent
+one-character drift means the next keystroke lands inside the word they
+were writing."
+  (opencode-test-with-temp-buffer "*test-chat-typing-point*"
+    (opencode-chat-mode)
+    (let ((inhibit-read-only t))
+      (opencode-chat--render-input-area)
+      (goto-char (opencode-chat--input-content-start))
+      (insert "hello")
+      ;; Cursor at the very end of what the user typed — the normal case.
+      (goto-char (opencode-chat--input-content-end))
+      (let ((before (point))
+            (pre (opencode-chat--save-render-state)))
+        (opencode-chat--restore-cursor pre)
+        (should (= before (point)))))))
+
+(ert-deftest opencode-chat-full-rerender-while-typing-preserves-text-and-point ()
+  "Verify a full re-render mid-typing keeps the input text and the cursor.
+This is the path taken when the model stops streaming: the transcript is
+erased and redrawn, and the input area — which lives in the same buffer —
+has to be reconstructed around whatever the user was in the middle of
+writing."
+  (opencode-test-with-temp-buffer "*test-chat-rerender-typing*"
+    (opencode-chat-mode)
+    (let ((inhibit-read-only t))
+      (opencode-chat--render-input-area)
+      (goto-char (opencode-chat--input-content-start))
+      (insert "half written")
+      ;; Point is where it lands after typing: right after the last character,
+      ;; not past the region's trailing newline.
+      (let ((offset (- (point) (opencode-chat--input-content-start))))
+        (opencode-chat--render-messages
+         (vector (list :id "msg_rr" :role "assistant"
+                       :info (list :role "assistant" :id "msg_rr"
+                                   :time (list :created 1700000000000))
+                       :parts (vector (list :id "p_rr" :type "text"
+                                            :text "model finished")))))
+        ;; The user's unsent text survived the redraw...
+        (should (string= "half written" (opencode-chat--input-text)))
+        ;; ...and the cursor is still where they left it.
+        (should (opencode-chat--in-input-area-p))
+        (should (= offset (- (point) (opencode-chat--input-content-start))))))))
+
+(ert-deftest opencode-chat-refresh-with-empty-input-stays-in-input ()
+  "Verify a refresh with the cursor in an empty input area leaves it there.
+The restore path guarded the input branch on the saved text being
+non-empty, so focusing the input without typing — or clearing it — sent
+the cursor into the transcript when the model finished."
+  (opencode-test-with-temp-buffer "*test-chat-empty-input-point*"
+    (opencode-chat-mode)
+    (let ((inhibit-read-only t))
+      ;; A rendered message above, so `--goto-latest' has somewhere to go.
+      (opencode-chat--render-assistant-message
+       (list :role "assistant" :id "msg_e" :time (list :created 1700000000000))
+       (vector (list :id "p_e" :type "text" :text "an earlier reply")))
+      (opencode-chat--render-input-area)
+      (goto-char (opencode-chat--input-content-start))
+      (let ((pre (opencode-chat--save-render-state)))
+        (opencode-chat--restore-cursor pre)
+        (should (opencode-chat--in-input-area-p))))))
+
 ;;; --- Delta helper (insert-streaming-delta) ---
 
 (ert-deftest opencode-chat-insert-delta-single-line ()
