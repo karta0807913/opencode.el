@@ -145,71 +145,7 @@ yet confirmed by a `message.updated' SSE event, or nil.")
 
 ;;; --- Accessors (struct is the sole source of truth) ---
 
-(defun opencode-chat--session-id (&optional state)
-  "Return the session ID for this chat buffer.
-STATE defaults to the current buffer's state."
-  (when-let* ((s (or state opencode-chat--state)))
-    (opencode-chat-state-session-id s)))
-
-(defun opencode-chat--session (&optional state)
-  "Return the cached session plist for this chat buffer.
-STATE defaults to the current buffer's state."
-  (when-let* ((s (or state opencode-chat--state)))
-    (opencode-chat-state-session s)))
-
-(defun opencode-chat--backend (&optional state)
-  "Return the backend name for this chat buffer.
-STATE defaults to the current buffer's state."
-  (or (when-let* ((s (or state opencode-chat--state)))
-        (opencode-chat-state-backend s))
-      'opencode))
-
-(defun opencode-chat--busy (&optional state)
-  "Return non-nil when waiting for a response.
-STATE defaults to the current buffer's state."
-  (when-let* ((s (or state opencode-chat--state)))
-    (opencode-chat-state-busy s)))
-
-(defun opencode-chat--queued (&optional state)
-  "Return non-nil when a message is queued (sent, awaiting assistant).
-STATE defaults to the current buffer's state."
-  (when-let* ((s (or state opencode-chat--state)))
-    (opencode-chat-state-queued s)))
-
 ;;; --- Setters ---
-
-(defun opencode-chat--set-session-id (id)
-  "Set the session ID to ID."
-  (opencode-chat--state-ensure)
-  (setf (opencode-chat-state-session-id opencode-chat--state) id))
-
-(defun opencode-chat--set-session (session)
-  "Set the session plist to SESSION.
-If SESSION has a `:parentID' we proactively populate the global
-child→parent cache so popup dispatch can route events to the root
-buffer without needing an HTTP round-trip.  This is cheap insurance:
-every set-session call either re-asserts a known link or records a
-new one as soon as the buffer learns about it."
-  (opencode-chat--state-ensure)
-  (setf (opencode-chat-state-session opencode-chat--state) session)
-  (when-let* ((sid (and session (plist-get session :id)))
-              (parent-id (plist-get session :parentID)))
-    (opencode-domain-child-parent-put sid parent-id)))
-
-(defun opencode-chat--set-backend (backend)
-  "Set the backend name to BACKEND."
-  (opencode-chat--state-ensure)
-  (setf (opencode-chat-state-backend opencode-chat--state) backend))
-
-(defun opencode-chat--set-busy (busy)
-  "Set the busy flag to BUSY."
-  (opencode-chat--state-ensure)
-  (setf (opencode-chat-state-busy opencode-chat--state) busy))
-
-(defun opencode-chat--set-queued (queued)
-  "Set the queued flag to QUEUED."
-  (opencode-chat--state-ensure)
-  (setf (opencode-chat-state-queued opencode-chat--state) queued))
 
 (defun opencode-chat--pending-msg-ids (&optional state)
   "Return the list of pending (unacknowledged) message IDs.
@@ -247,46 +183,6 @@ Returns non-nil if the set is now empty."
 ;; calls `--state-ensure' first.  Reads stay on the existing
 ;; `--effective-*' accessors and the cl-defstruct auto-getters.
 
-(defun opencode-chat--set-agent (value)
-  "Set the `agent' slot to VALUE."
-  (opencode-chat--state-ensure)
-  (setf (opencode-chat-state-agent opencode-chat--state) value))
-
-(defun opencode-chat--set-agent-color (value)
-  "Set the `agent-color' slot to VALUE."
-  (opencode-chat--state-ensure)
-  (setf (opencode-chat-state-agent-color opencode-chat--state) value))
-
-(defun opencode-chat--set-model-id (value)
-  "Set the `model-id' slot to VALUE."
-  (opencode-chat--state-ensure)
-  (setf (opencode-chat-state-model-id opencode-chat--state) value))
-
-(defun opencode-chat--set-provider-id (value)
-  "Set the `provider-id' slot to VALUE."
-  (opencode-chat--state-ensure)
-  (setf (opencode-chat-state-provider-id opencode-chat--state) value))
-
-(defun opencode-chat--set-variant (value)
-  "Set the `variant' slot to VALUE."
-  (opencode-chat--state-ensure)
-  (setf (opencode-chat-state-variant opencode-chat--state) value))
-
-(defun opencode-chat--set-context-limit (value)
-  "Set the `context-limit' slot to VALUE."
-  (opencode-chat--state-ensure)
-  (setf (opencode-chat-state-context-limit opencode-chat--state) value))
-
-(defun opencode-chat--set-tokens (value)
-  "Set the `tokens' slot to VALUE."
-  (opencode-chat--state-ensure)
-  (setf (opencode-chat-state-tokens opencode-chat--state) value))
-
-(defun opencode-chat--set-update-available (value)
-  "Set the `update-available' slot to VALUE."
-  (opencode-chat--state-ensure)
-  (setf (opencode-chat-state-update-available opencode-chat--state) value))
-
 ;;; --- Initialization ---
 
 (defun opencode-chat--state-init (&optional messages)
@@ -315,8 +211,9 @@ their slots alone — this is an in-place update."
 
 (defun opencode-chat--state-ensure ()
   "Ensure `opencode-chat--state' is non-nil, creating if needed.
-Also lazily initialises the three hash-table slots (`store',
-`diff-cache', `diff-shown') so accessor callers never see nil."
+The hash-table slots allocate themselves on first read --- see the
+`:lazy' key of `opencode-chat-state--define-slot' --- so they are no
+longer initialised here."
   (unless opencode-chat--state
     (opencode-chat--state-init))
   ;; Writing through an accessor while the wrong buffer is current used to
@@ -326,15 +223,7 @@ Also lazily initialises the three hash-table slots (`store',
                  (eq (current-buffer)
                      (opencode-chat-state-buffer opencode-chat--state)))
              t "chat state written from a buffer it does not describe")
-  (unless (opencode-chat-state-store opencode-chat--state)
-    (setf (opencode-chat-state-store opencode-chat--state)
-          (make-hash-table :test 'equal)))
-  (unless (opencode-chat-state-diff-cache opencode-chat--state)
-    (setf (opencode-chat-state-diff-cache opencode-chat--state)
-          (make-hash-table :test 'equal)))
-  (unless (opencode-chat-state-diff-shown opencode-chat--state)
-    (setf (opencode-chat-state-diff-shown opencode-chat--state)
-          (make-hash-table :test 'equal)))
+
   ;; Invariant: every setter and accessor calls this, so post-condition
   ;; must be: state exists.  If this ever fires we have a setf that
   ;; nil'd the struct mid-operation.
@@ -392,39 +281,94 @@ Reads directly from state (resolved during `opencode-chat--state-init')."
 ;; two storage locations co-exist.  When every call site has migrated
 ;; and the `defvar-local' is deleted, the struct becomes sole truth.
 
-(defmacro opencode-chat-state--define-slot (slot)
+(defmacro opencode-chat-state--define-slot (slot &rest keys)
   "Define reader + writer functions for SLOT of `opencode-chat-state'.
-Reader is `opencode-chat--SLOT': returns nil when no state exists yet
-so callers that probe (e.g. \"was there a previous render?\") see the
-same value they used to see from a nil-initialised `defvar-local'.
-Writer is `opencode-chat--set-SLOT': calls `--state-ensure' first so
-writes always have somewhere to land.
+Reader is `opencode-chat--SLOT', writer is `opencode-chat--set-SLOT'.
 
 Both take an optional STATE.  Without it they read and write the
 current buffer's state, which is the historical behaviour and carries an
 invisible precondition: the right buffer must be current.  With it, the
-state is addressed directly and the precondition disappears."
+state is addressed directly and the precondition disappears.
+
+KEYS may contain:
+
+  :doc NOUN     describe the slot as NOUN in the generated docstrings,
+                instead of naming the slot.
+  :default FORM value the reader returns when the slot is nil.
+  :lazy FORM    allocate FORM into the slot on first read.  For the
+                hash-table slots, which callers expect to exist.
+  :after FORM   run FORM after a write, with VALUE bound.  For the one
+                slot whose setter has a real side effect rather than
+                boilerplate, so it does not have to be the exception
+                that gets missed next time this macro changes.
+
+Every accessor comes from here.  Nine used to be written out by hand in
+the same shapes, which meant a change to this macro silently missed
+them --- including `--session-id', the one nearly every module calls."
   (let* ((getter (intern (format "opencode-chat--%s" slot)))
          (setter (intern (format "opencode-chat--set-%s" slot)))
-         (struct-accessor (intern (format "opencode-chat-state-%s" slot))))
+         (struct-accessor (intern (format "opencode-chat-state-%s" slot)))
+         (noun (or (plist-get keys :doc) (format "`%s' slot" slot)))
+         (default (plist-get keys :default))
+         (lazy (plist-get keys :lazy))
+         (after (plist-get keys :after))
+         (read-body
+          (cond
+           (lazy `(let ((s (or state
+                               (progn (opencode-chat--state-ensure)
+                                      opencode-chat--state))))
+                    (or (,struct-accessor s)
+                        (setf (,struct-accessor s) ,lazy))))
+           (default `(or (when-let* ((s (or state opencode-chat--state)))
+                           (,struct-accessor s))
+                         ,default))
+           (t `(when-let* ((s (or state opencode-chat--state)))
+                 (,struct-accessor s))))))
     `(progn
        (defun ,getter (&optional state)
-         ,(format "Return the %s slot.
-STATE defaults to the current buffer's state.  Returns nil when there
-is no state yet." slot)
-         (when-let* ((s (or state opencode-chat--state)))
-           (,struct-accessor s)))
+         ,(format "Return the %s.
+STATE defaults to the current buffer's state." noun)
+         ,read-body)
        (defun ,setter (value &optional state)
-         ,(format "Set the %s slot to VALUE.
+         ,(format "Set the %s to VALUE.
 STATE defaults to the current buffer's state, which is created if
 absent.  Passing it explicitly lets a caller holding a chat state
-operate on it without first making its buffer current." slot)
+operate on it without first making its buffer current." noun)
          (let ((s (or state
                       (progn (opencode-chat--state-ensure)
                              opencode-chat--state))))
-           (setf (,struct-accessor s) value))))))
+           (setf (,struct-accessor s) value)
+           ,@(when after (list after))
+           value)))))
 
 ;; --- Migrated from chat.el (6 slots) ---
+(opencode-chat-state--define-slot session-id :doc "session ID for this chat")
+(opencode-chat-state--define-slot session :doc "cached session plist for this chat"
+  ;; Proactively record the child->parent link so popup dispatch can route
+  ;; events to the root buffer without an HTTP round-trip.  Every write
+  ;; either re-asserts a known link or records a new one as soon as the
+  ;; buffer learns about it.
+  :after (when-let* ((sid (and value (plist-get value :id)))
+                     (parent-id (plist-get value :parentID)))
+           (opencode-domain-child-parent-put sid parent-id)))
+(opencode-chat-state--define-slot backend :doc "backend name for this chat"
+                                  :default 'opencode)
+(opencode-chat-state--define-slot busy :doc "busy flag, non-nil while awaiting a response")
+(opencode-chat-state--define-slot queued :doc "queued flag, non-nil once a message awaits an assistant")
+(opencode-chat-state--define-slot store :doc "message store hash table"
+                                  :lazy (make-hash-table :test 'equal))
+(opencode-chat-state--define-slot diff-cache :doc "diff cache hash table"
+                                  :lazy (make-hash-table :test 'equal))
+(opencode-chat-state--define-slot diff-shown :doc "shown-diffs hash table"
+                                  :lazy (make-hash-table :test 'equal))
+(opencode-chat-state--define-slot agent)
+(opencode-chat-state--define-slot agent-color)
+(opencode-chat-state--define-slot model-id)
+(opencode-chat-state--define-slot provider-id)
+(opencode-chat-state--define-slot variant)
+(opencode-chat-state--define-slot context-limit)
+(opencode-chat-state--define-slot tokens)
+(opencode-chat-state--define-slot update-available)
 (opencode-chat-state--define-slot refresh-timer)
 (opencode-chat-state--define-slot refresh-state)
 (opencode-chat-state--define-slot streaming-assistant-info)
@@ -438,45 +382,6 @@ operate on it without first making its buffer current." slot)
 ;; call `--state-ensure' (which auto-allocates the tables on demand) so
 ;; callers never see nil — matches the pre-migration invariant where
 ;; the defvar-local defaulted to a fresh hash.
-(defun opencode-chat--store (&optional state)
-  "Return the `store' hash table, auto-allocating it on first access.
-STATE defaults to the current buffer's state."
-  (if state
-      (opencode-chat-state-store state)
-    (opencode-chat--state-ensure)
-    (opencode-chat-state-store opencode-chat--state)))
-
-(defun opencode-chat--set-store (value)
-  "Set the `store' slot of `opencode-chat--state' to VALUE."
-  (opencode-chat--state-ensure)
-  (setf (opencode-chat-state-store opencode-chat--state) value))
-
-(defun opencode-chat--diff-cache (&optional state)
-  "Return the `diff-cache' hash table, auto-allocating it on first access.
-STATE defaults to the current buffer's state."
-  (if state
-      (opencode-chat-state-diff-cache state)
-    (opencode-chat--state-ensure)
-    (opencode-chat-state-diff-cache opencode-chat--state)))
-
-(defun opencode-chat--set-diff-cache (value)
-  "Set the `diff-cache' slot of `opencode-chat--state' to VALUE."
-  (opencode-chat--state-ensure)
-  (setf (opencode-chat-state-diff-cache opencode-chat--state) value))
-
-(defun opencode-chat--diff-shown (&optional state)
-  "Return the `diff-shown' hash table, auto-allocating it on first access.
-STATE defaults to the current buffer's state."
-  (if state
-      (opencode-chat-state-diff-shown state)
-    (opencode-chat--state-ensure)
-    (opencode-chat-state-diff-shown opencode-chat--state)))
-
-(defun opencode-chat--set-diff-shown (value)
-  "Set the `diff-shown' slot of `opencode-chat--state' to VALUE."
-  (opencode-chat--state-ensure)
-  (setf (opencode-chat-state-diff-shown opencode-chat--state) value))
-
 (opencode-chat-state--define-slot current-message-id)
 (opencode-chat-state--define-slot streaming-part-id)
 (opencode-chat-state--define-slot streaming-msg-id)
