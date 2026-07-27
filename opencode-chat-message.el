@@ -257,6 +257,48 @@ Uses `opencode--format-duration-from-timestamps' from opencode-util."
          (completed (and time-data (plist-get time-data :completed))))
     (opencode--format-duration-from-timestamps created completed)))
 
+(defmacro opencode-chat--in-transcript (&rest body)
+  "Run BODY as a mutation of the rendered transcript.
+
+Binds the two things every mutation site needs and several were setting
+by hand: `inhibit-read-only', because the transcript carries a
+`read-only' text property, and `buffer-undo-list' to t, because redraws
+are not user edits and must not consume the undo history of the input
+area, which shares this buffer.  Point is restored.
+
+Mutating the transcript from anywhere else is a bug: the input area,
+prompt and footer live in the same buffer below `messages-end', so an
+unguarded `delete-region' can eat what the user is typing."
+  (declare (indent 0) (debug t))
+  `(let ((inhibit-read-only t)
+         (buffer-undo-list t))
+     (save-excursion ,@body)))
+
+(defun opencode-chat--delete-section (ov)
+  "Delete the text spanned by section overlay OV, and OV itself.
+
+Asserts the section stops short of the input area.  The check is cheap
+and the failure it catches is not: the input area shares this buffer, so
+an overlay that has drifted into it would take the user's unsent text
+with it.
+
+The boundary is `input-start', not `messages-end'.  Status badges --- the
+queued and retry indicators --- are deliberately inserted at
+`messages-end' with insertion type nil, so they sit just past it and are
+legitimately outside the transcript proper.  Covered by
+`opencode-chat-delete-section-leaves-input-alone'."
+  (when (overlay-buffer ov)
+    (let* ((start (overlay-start ov))
+           (end (overlay-end ov))
+           (limit (opencode-chat--input-start))
+           (limit-pos (and (markerp limit) (marker-position limit))))
+      (cl-assert (or (null limit-pos) (null end) (<= end limit-pos)) t
+                 "section overlay extends into the input area")
+      (opencode-chat--in-transcript
+        (when (and start end (> end start))
+          (delete-region start end))
+        (delete-overlay ov)))))
+
 (defun opencode-chat--emit (text face &optional prefix)
   "Insert TEXT into the transcript faced with FACE.  Return (START . END).
 PREFIX, when given, becomes the `line-prefix' over the inserted region.

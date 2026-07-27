@@ -1450,6 +1450,37 @@ nothing but the server's messages."
     (should-not (opencode-chat--streaming-msg-id))
     (should-not (opencode-chat--streaming-part-id))))
 
+(ert-deftest opencode-chat-delete-section-leaves-input-alone ()
+  "Verify deleting a section cannot reach into the input area.
+The transcript and the input area share one buffer, so an unguarded
+`delete-region' over a drifted overlay would eat the user's unsent text.
+`opencode-chat--delete-section' asserts against `input-start' rather
+than silently deleting."
+  (opencode-test-with-temp-buffer "*test-chat-del-section*"
+    (opencode-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "transcript text\n")
+      (opencode-chat--set-input-start (copy-marker (point) nil))
+      (insert "user is typing here")
+      ;; An overlay that has drifted past input-start must not be deleted.
+      (let ((bad (make-overlay (point-min) (point-max))))
+        (should-error (opencode-chat--delete-section bad)))
+      (should (string-match-p "user is typing here" (buffer-string))))))
+
+(ert-deftest opencode-chat-delete-section-removes-text-and-overlay ()
+  "Verify a section wholly above the input area is deleted with its overlay."
+  (opencode-test-with-temp-buffer "*test-chat-del-section-ok*"
+    (opencode-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "keep ")
+      (let ((start (point)))
+        (insert "DELETEME")
+        (let ((ov (make-overlay start (point))))
+          (opencode-chat--set-input-start (copy-marker (point-max) nil))
+          (opencode-chat--delete-section ov)
+          (should-not (string-match-p "DELETEME" (buffer-string)))
+          (should-not (overlay-buffer ov)))))))
+
 ;;; --- Delta helper (insert-streaming-delta) ---
 
 (ert-deftest opencode-chat-insert-delta-single-line ()

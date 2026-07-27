@@ -458,12 +458,8 @@ removal.  Idempotent."
 (defun opencode-chat--hide-queued-indicator ()
   "Remove the QUEUED badge if currently shown."
   (when-let* ((ov (opencode-chat--queued-overlay)))
-    (let ((inhibit-read-only t)
-          (buffer-undo-list t))
-      (when (and (overlay-start ov) (overlay-end ov))
-        (delete-region (overlay-start ov) (overlay-end ov)))
-      (delete-overlay ov)
-      (opencode-chat--set-queued-overlay nil))))
+    (opencode-chat--delete-section ov)
+    (opencode-chat--set-queued-overlay nil)))
 
 (defun opencode-chat--clear-queued-state ()
   "Clear all queued state: flag, pending IDs, and overlay."
@@ -502,12 +498,8 @@ Each call replaces the previous retry badge."
 (defun opencode-chat--hide-retry-indicator ()
   "Remove the retry error badge if currently shown."
   (when-let* ((ov (opencode-chat--retry-overlay)))
-    (let ((inhibit-read-only t)
-          (buffer-undo-list t))
-      (when (and (overlay-start ov) (overlay-end ov))
-        (delete-region (overlay-start ov) (overlay-end ov)))
-      (delete-overlay ov)
-      (opencode-chat--set-retry-overlay nil))))
+    (opencode-chat--delete-section ov)
+    (opencode-chat--set-retry-overlay nil)))
 
 (defun opencode-chat--on-message-sent (info)
   "Handle optimistic busy/queued state after a message is sent.
