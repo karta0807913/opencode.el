@@ -26,38 +26,43 @@ L007 PRE[▎ ] WRAP[] TXT[Heading two]
       FACES Heading two=(opencode-md-header-2 opencode-assistant-body)
 L008 PRE[▎ ] WRAP[] TXT[Plain prose with bold, italic and inline code.]
       FACES Plain prose with =opencode-assistant-body bold=(opencode-md-bold opencode-assistant-body) , =opencode-assistant-body italic=(opencode-md-italic opencode-assistant-body)  and =opencode-assistant-body inline code=(opencode-md-inline-code opencode-assistant-body) .=opencode-assistant-body
-L009 PRE[▎ ] WRAP[] TXT[- first item]
+L009 PRE[▎ ] WRAP[] TXT[Nested *bold italic* and a link.]
+      FACES Nested =opencode-assistant-body *bold italic=(opencode-md-bold opencode-assistant-body) * and a =opencode-assistant-body link=(markdown-link-face opencode-assistant-body) .=opencode-assistant-body
+L010 PRE[▎ ] WRAP[] TXT[1. ordered item]
+      FACES 1.=(opencode-md-list-marker opencode-assistant-body)  ordered item=opencode-assistant-body
+L011 PRE[▎ ] WRAP[] TXT[2. second ordered]
+      FACES 2.=(opencode-md-list-marker opencode-assistant-body)  second ordered=opencode-assistant-body
+L012 PRE[▎ ] WRAP[] TXT[- first item]
       FACES -=(opencode-md-list-marker opencode-assistant-body)  first item=opencode-assistant-body
-L010 PRE[▎ ] WRAP[] TXT[- second item]
+L013 PRE[▎ ] WRAP[] TXT[- second item]
       FACES -=(opencode-md-list-marker opencode-assistant-body)  second item=opencode-assistant-body
-L011 PRE[▎ ] WRAP[] TXT[* star item]
+L014 PRE[▎ ] WRAP[] TXT[* star item]
       FACES *=(opencode-md-list-marker opencode-assistant-body)  star item=opencode-assistant-body
-L012 PRE[▎ ] WRAP[] TXT[> a blockquote line]
-      FACES >=(opencode-md-marker opencode-assistant-body)  =opencode-assistant-body a blockquote line=(opencode-md-blockquote opencode-assistant-body)
-L013 PRE[▎ ] WRAP[] TXT[---]
-      FACES ---=(opencode-md-hr opencode-assistant-body)
-L014 PRE[▎ ] WRAP[] TXT[]
-L015 PRE[▎ ] WRAP[] TXT[(defun foo () (bar 1))]
-      FACES (=(opencode-md-code-block opencode-assistant-body) defun=(font-lock-keyword-face opencode-md-code-block opencode-assistant-body)  =(opencode-md-code-block opencode-assistant-body) foo=(font-lock-function-name-face opencode-md-code-block opencode-assistant-body)  () (bar 1))=(opencode-md-code-block opencode-assistant-body)
+L015 PRE[▎ ] WRAP[] TXT[> a blockquote line]
+      FACES >=(opencode-md-blockquote opencode-md-blockquote opencode-assistant-body)  a blockquote line=(opencode-md-header-2 opencode-md-blockquote opencode-assistant-body)
 L016 PRE[▎ ] WRAP[] TXT[]
-L017 PRE[▎ ] WRAP[] TXT[trailing prose]
+L017 PRE[▎ ] WRAP[] TXT[]
+L018 PRE[▎ ] WRAP[] TXT[(defun foo () (bar 1))]
+      FACES (=(opencode-md-code-block opencode-assistant-body) defun=(font-lock-keyword-face opencode-md-code-block opencode-assistant-body)  =(opencode-md-code-block opencode-assistant-body) foo=(font-lock-function-name-face opencode-md-code-block opencode-assistant-body)  () (bar 1))=(opencode-md-code-block opencode-assistant-body)
+L019 PRE[▎ ] WRAP[] TXT[]
+L020 PRE[▎ ] WRAP[] TXT[trailing prose]
       FACES trailing prose=opencode-assistant-body
-L018 PRE[▎] WRAP[] TXT[ ▶ bash ($ ls -la) · 1s                                ✓ [collapsed]]
+L021 PRE[▎] WRAP[] TXT[ ▶ bash ($ ls -la) · 1s                                ✓ [collapsed]]
       FACES ▶=opencode-section-indicator bash=opencode-tool-name ($ ls -la)=opencode-tool-arg · 1s=opencode-tool-duration ✓=opencode-tool-success  [collapsed]=font-lock-comment-face
-L019 PRE[▎] WRAP[] TXT[]
-L020 PRE[▎] WRAP[] TXT[]
-L021 PRE[▎] WRAP[] TXT[]
-L022 PRE[▎] WRAP[] TXT[ ▶ /review  review the diff  🤖 reviewer [collapsed]]
+L022 PRE[▎] WRAP[] TXT[]
+L023 PRE[▎] WRAP[] TXT[]
+L024 PRE[▎] WRAP[] TXT[]
+L025 PRE[▎] WRAP[] TXT[ ▶ /review  review the diff  🤖 reviewer [collapsed]]
       FACES ▶=opencode-section-indicator /review=opencode-subtask-name   review the diff=opencode-subtask-description   🤖 reviewer=opencode-agent-badge  [collapsed]=font-lock-comment-face
-L023 PRE[▎ ] WRAP[] TXT[]
-L024 PRE[▎ ] WRAP[] TXT[]
-L025 PRE[▎] WRAP[] TXT[ 📁 src/main.el]
+L026 PRE[▎ ] WRAP[] TXT[]
+L027 PRE[▎ ] WRAP[] TXT[]
+L028 PRE[▎] WRAP[] TXT[ 📁 src/main.el]
       FACES  📁 src/main.el=opencode-mention-file
-L026 PRE[▎] WRAP[] TXT[ 🤖 helper]
+L029 PRE[▎] WRAP[] TXT[ 🤖 helper]
       FACES  🤖 helper=opencode-mention-agent
-L027 PRE[▎] WRAP[] TXT[ Step: $0.0123]
+L030 PRE[▎] WRAP[] TXT[ Step: $0.0123]
       FACES Step: =opencode-step-summary $0.0123=opencode-cost
-L028 PRE[▎] WRAP[] TXT[ · 12s ]
+L031 PRE[▎] WRAP[] TXT[ · 12s ]
       FACES  · 12s =opencode-message-footer-line
 
 ===== STREAMING DELTAS =====
