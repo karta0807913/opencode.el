@@ -45,6 +45,15 @@ Set to nil to disable the limit."
   :type '(choice integer (const nil))
   :group 'opencode)
 
+(defcustom opencode-markdown-substitute-glyphs nil
+  "When non-nil, keep `markdown-mode''s glyph substitutions.
+`markdown-mode' draws a list bullet as ● and a blockquote marker as ▌ by
+replacing the character with a `display' property.  This is off by
+default so the transcript renders the literal markers it always has;
+enable it to get markdown-mode's own appearance."
+  :type 'boolean
+  :group 'opencode)
+
 (defvar opencode-markdown-fontify-max-size 32768
   "Obsolete.  Region size that used to trigger deferred fontification.
 `jit-lock' now decides what to fontify and when, so there is no size at
@@ -171,7 +180,13 @@ the appearance it has today."
             (when (or face hidden)
               (push (list (1- pos) (1- next)
                           (and face (opencode-markdown--map-face face))
-                          hidden)
+                          hidden
+                          ;; A non-empty display string is a glyph
+                          ;; substitution; empty means "hide", handled above.
+                          (and opencode-markdown-substitute-glyphs
+                               (stringp display)
+                               (not (string-empty-p display))
+                               display))
                     props))
             (setq pos next)))))
     (opencode-markdown--fix-bold-italic text (nreverse props))))
@@ -204,9 +219,9 @@ this once upstream parses the construct correctly."
             (cbeg (match-beginning 2))
             (cend (match-end 2)))
         (push (cons beg end) ranges)
-        (push (list beg cbeg 'opencode-md-marker t) fixes)
-        (push (list cbeg cend 'opencode-md-bold-italic nil) fixes)
-        (push (list cend end 'opencode-md-marker t) fixes)
+        (push (list beg cbeg 'opencode-md-marker t nil) fixes)
+        (push (list cbeg cend 'opencode-md-bold-italic nil nil) fixes)
+        (push (list cend end 'opencode-md-marker t nil) fixes)
         (setq pos end)))
     (if (null ranges)
         props
@@ -220,7 +235,7 @@ this once upstream parses the construct correctly."
 
 (defun opencode-markdown--apply-props (start props)
   "Apply PROPS, offsets relative to START, to the current buffer."
-  (pcase-dolist (`(,beg ,end ,face ,hidden) props)
+  (pcase-dolist (`(,beg ,end ,face ,hidden ,glyph) props)
     (let ((b (+ start beg))
           (e (+ start end)))
       ;; Apply each face separately, innermost last: passing the list to
@@ -229,7 +244,9 @@ this once upstream parses the construct correctly."
       (dolist (f (reverse (ensure-list face)))
         (when f (add-face-text-property b e f)))
       (when hidden
-        (put-text-property b e 'invisible 'opencode-md)))))
+        (put-text-property b e 'invisible 'opencode-md))
+      (when glyph
+        (put-text-property b e 'display glyph)))))
 
 (defconst opencode-markdown--base-faces
   '(opencode-assistant-body opencode-user-body opencode-reasoning default)
@@ -275,7 +292,12 @@ compound its :height on every pass."
         (let ((next (or (next-single-property-change pos 'invisible nil end) end)))
           (when (eq (get-text-property pos 'invisible) 'opencode-md)
             (remove-text-properties pos next '(invisible nil)))
-          (setq pos next))))))
+          (setq pos next))))
+    ;; Glyph substitutions are ours too; leaving them behind would strand a
+    ;; ● in the buffer after `opencode-markdown-substitute-glyphs' is turned
+    ;; off, since nothing else would ever clear it.
+    (when opencode-markdown-substitute-glyphs
+      (remove-text-properties start end '(display nil)))))
 
 ;;; --- Internal: jit-lock integration ---
 

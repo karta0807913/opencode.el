@@ -413,5 +413,34 @@ asserting because it is a property of the widening, not of markdown-mode."
       (dolist (chunk '(97 250 500 1500))
         (should (equal whole (funcall faces-of chunk)))))))
 
+(ert-deftest opencode-markdown-glyph-substitution-off-by-default ()
+  "Verify list markers keep their literal character by default.
+`markdown-mode' replaces a list bullet with ● via a `display' property;
+the transcript renders the marker it always has unless asked otherwise."
+  (with-temp-buffer
+    (opencode-markdown-test--jit-buffer "- item text")
+    (opencode-markdown-jit-fontify (point-min) (point-max))
+    (goto-char (point-min))
+    (should-not (get-text-property (point) 'display))))
+
+(ert-deftest opencode-markdown-glyph-substitution-opt-in ()
+  "Verify `opencode-markdown-substitute-glyphs' restores markdown-mode's glyphs."
+  (let ((opencode-markdown-substitute-glyphs t))
+    (with-temp-buffer
+      (opencode-markdown-test--jit-buffer "- item text")
+      (opencode-markdown-jit-fontify (point-min) (point-max))
+      (goto-char (point-min))
+      (should (equal "●" (get-text-property (point) 'display))))))
+
+(ert-deftest opencode-markdown-table-fontified ()
+  "Verify markdown tables are recognised and faced.
+The hand-rolled matchers this replaced had no table support at all."
+  (with-temp-buffer
+    (opencode-markdown-test--jit-buffer
+     "| Feature | Status |\n|---------|--------|\n| tables  | yes    |\n")
+    (opencode-markdown-jit-fontify (point-min) (point-max))
+    (should (opencode-markdown-test--has-face-p "Feature" 'opencode-md-table))
+    (should (opencode-markdown-test--has-face-p "tables" 'opencode-md-table))))
+
 (provide 'opencode-markdown-test)
 ;;; opencode-markdown-test.el ends here
