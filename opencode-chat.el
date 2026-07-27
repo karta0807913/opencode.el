@@ -1534,6 +1534,18 @@ as a prompt)."
 
 ;;; --- Buffer lookup ---
 
+(defun opencode-chat-state-for-session (session-id &optional backend)
+  "Return the `opencode-chat-state' for SESSION-ID, or nil.
+When BACKEND is non-nil, only match a chat using that backend.
+
+The object-level counterpart of `opencode-chat--find-buffer'.  Callers
+that look up a chat in order to act on it should take the state and use
+`opencode-chat--with-chat', rather than taking a buffer and arranging
+`with-current-buffer' themselves --- that pattern is what left the buffer
+and its state tracked separately."
+  (when-let* ((buf (opencode-chat--find-buffer session-id backend)))
+    (buffer-local-value 'opencode-chat--state buf)))
+
 (defun opencode-chat--find-buffer (session-id &optional backend)
   "Find the chat buffer for SESSION-ID, or nil.
 When BACKEND is non-nil, only return a buffer using that backend.

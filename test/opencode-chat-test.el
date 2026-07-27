@@ -1636,6 +1636,33 @@ state records its own buffer so the mistake is loud."
         (setq opencode-chat--state foreign)
         (should-error (opencode-chat--set-session-id "ses_wrong"))))))
 
+(ert-deftest opencode-chat-state-for-session-round-trips ()
+  "Verify a chat can be looked up as an object and acted on through it.
+`--with-chat' plus the state-taking accessors let a caller operate on a
+chat without arranging its buffer, which is what kept buffer and state
+tracked in two places."
+  (opencode-test-with-temp-buffer "*test-chat-state-lookup*"
+    (opencode-chat-mode)
+    (opencode-chat--set-session-id "ses_lookup")
+    (let ((state (opencode-chat-state-for-session "ses_lookup"))
+          (chat (current-buffer)))
+      (should state)
+      (should (eq (opencode-chat-state-buffer state) chat))
+      ;; Read and act through the object from an unrelated buffer.
+      (with-temp-buffer
+        (should (string= "ses_lookup" (opencode-chat--session-id state)))
+        (should (eq chat (opencode-chat--with-chat state (current-buffer))))))))
+
+(ert-deftest opencode-chat-with-chat-rejects-dead-buffer ()
+  "Verify `--with-chat' refuses a state whose buffer is gone.
+Silently doing nothing would let a stale state look like a working one."
+  (let (state)
+    (opencode-test-with-temp-buffer "*test-chat-dead*"
+      (opencode-chat-mode)
+      (opencode-chat--set-session-id "ses_dead")
+      (setq state opencode-chat--state))
+    (should-error (opencode-chat--with-chat state (point)))))
+
 ;;; --- Delta helper (insert-streaming-delta) ---
 
 (ert-deftest opencode-chat-insert-delta-single-line ()

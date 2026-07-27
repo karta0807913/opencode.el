@@ -145,31 +145,36 @@ yet confirmed by a `message.updated' SSE event, or nil.")
 
 ;;; --- Accessors (struct is the sole source of truth) ---
 
-(defun opencode-chat--session-id ()
-  "Return the session ID for this chat buffer."
-  (and opencode-chat--state
-       (opencode-chat-state-session-id opencode-chat--state)))
+(defun opencode-chat--session-id (&optional state)
+  "Return the session ID for this chat buffer.
+STATE defaults to the current buffer's state."
+  (when-let* ((s (or state opencode-chat--state)))
+    (opencode-chat-state-session-id s)))
 
-(defun opencode-chat--session ()
-  "Return the cached session plist for this chat buffer."
-  (and opencode-chat--state
-       (opencode-chat-state-session opencode-chat--state)))
+(defun opencode-chat--session (&optional state)
+  "Return the cached session plist for this chat buffer.
+STATE defaults to the current buffer's state."
+  (when-let* ((s (or state opencode-chat--state)))
+    (opencode-chat-state-session s)))
 
-(defun opencode-chat--backend ()
-  "Return the backend name for this chat buffer."
-  (or (and opencode-chat--state
-           (opencode-chat-state-backend opencode-chat--state))
+(defun opencode-chat--backend (&optional state)
+  "Return the backend name for this chat buffer.
+STATE defaults to the current buffer's state."
+  (or (when-let* ((s (or state opencode-chat--state)))
+        (opencode-chat-state-backend s))
       'opencode))
 
-(defun opencode-chat--busy ()
-  "Return non-nil when waiting for a response."
-  (and opencode-chat--state
-       (opencode-chat-state-busy opencode-chat--state)))
+(defun opencode-chat--busy (&optional state)
+  "Return non-nil when waiting for a response.
+STATE defaults to the current buffer's state."
+  (when-let* ((s (or state opencode-chat--state)))
+    (opencode-chat-state-busy s)))
 
-(defun opencode-chat--queued ()
-  "Return non-nil when a message is queued (sent, awaiting assistant)."
-  (and opencode-chat--state
-       (opencode-chat-state-queued opencode-chat--state)))
+(defun opencode-chat--queued (&optional state)
+  "Return non-nil when a message is queued (sent, awaiting assistant).
+STATE defaults to the current buffer's state."
+  (when-let* ((s (or state opencode-chat--state)))
+    (opencode-chat-state-queued s)))
 
 ;;; --- Setters ---
 
@@ -206,10 +211,11 @@ new one as soon as the buffer learns about it."
   (opencode-chat--state-ensure)
   (setf (opencode-chat-state-queued opencode-chat--state) queued))
 
-(defun opencode-chat--pending-msg-ids ()
-  "Return the list of pending (unacknowledged) message IDs."
-  (and opencode-chat--state
-       (opencode-chat-state-pending-msg-ids opencode-chat--state)))
+(defun opencode-chat--pending-msg-ids (&optional state)
+  "Return the list of pending (unacknowledged) message IDs.
+STATE defaults to the current buffer's state."
+  (when-let* ((s (or state opencode-chat--state)))
+    (opencode-chat-state-pending-msg-ids s)))
 
 (defun opencode-chat--add-pending-msg-id (id)
   "Add ID to the pending message IDs set."
@@ -432,30 +438,39 @@ operate on it without first making its buffer current." slot)
 ;; call `--state-ensure' (which auto-allocates the tables on demand) so
 ;; callers never see nil — matches the pre-migration invariant where
 ;; the defvar-local defaulted to a fresh hash.
-(defun opencode-chat--store ()
-  "Return the `store' hash table, auto-allocating it on first access."
-  (opencode-chat--state-ensure)
-  (opencode-chat-state-store opencode-chat--state))
+(defun opencode-chat--store (&optional state)
+  "Return the `store' hash table, auto-allocating it on first access.
+STATE defaults to the current buffer's state."
+  (if state
+      (opencode-chat-state-store state)
+    (opencode-chat--state-ensure)
+    (opencode-chat-state-store opencode-chat--state)))
 
 (defun opencode-chat--set-store (value)
   "Set the `store' slot of `opencode-chat--state' to VALUE."
   (opencode-chat--state-ensure)
   (setf (opencode-chat-state-store opencode-chat--state) value))
 
-(defun opencode-chat--diff-cache ()
-  "Return the `diff-cache' hash table, auto-allocating it on first access."
-  (opencode-chat--state-ensure)
-  (opencode-chat-state-diff-cache opencode-chat--state))
+(defun opencode-chat--diff-cache (&optional state)
+  "Return the `diff-cache' hash table, auto-allocating it on first access.
+STATE defaults to the current buffer's state."
+  (if state
+      (opencode-chat-state-diff-cache state)
+    (opencode-chat--state-ensure)
+    (opencode-chat-state-diff-cache opencode-chat--state)))
 
 (defun opencode-chat--set-diff-cache (value)
   "Set the `diff-cache' slot of `opencode-chat--state' to VALUE."
   (opencode-chat--state-ensure)
   (setf (opencode-chat-state-diff-cache opencode-chat--state) value))
 
-(defun opencode-chat--diff-shown ()
-  "Return the `diff-shown' hash table, auto-allocating it on first access."
-  (opencode-chat--state-ensure)
-  (opencode-chat-state-diff-shown opencode-chat--state))
+(defun opencode-chat--diff-shown (&optional state)
+  "Return the `diff-shown' hash table, auto-allocating it on first access.
+STATE defaults to the current buffer's state."
+  (if state
+      (opencode-chat-state-diff-shown state)
+    (opencode-chat--state-ensure)
+    (opencode-chat-state-diff-shown opencode-chat--state)))
 
 (defun opencode-chat--set-diff-shown (value)
   "Set the `diff-shown' slot of `opencode-chat--state' to VALUE."
