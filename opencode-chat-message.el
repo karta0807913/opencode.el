@@ -257,6 +257,35 @@ Uses `opencode--format-duration-from-timestamps' from opencode-util."
          (completed (and time-data (plist-get time-data :completed))))
     (opencode--format-duration-from-timestamps created completed)))
 
+(defmacro opencode-chat--maybe-in-chat (state &rest body)
+  "Run BODY in STATE's buffer when STATE is non-nil, otherwise here.
+Lets a primitive take an optional state without every caller that
+already arranged the buffer paying for a redundant switch."
+  (declare (indent 1) (debug t))
+  (let ((s (make-symbol "state")))
+    `(let ((,s ,state))
+       (if ,s
+           (opencode-chat--with-chat ,s ,@body)
+         (progn ,@body)))))
+
+(defmacro opencode-chat--with-chat (state &rest body)
+  "Run BODY in the buffer STATE describes, with STATE as its chat state.
+Signals if STATE has no live buffer.
+
+This is the entry point for code that holds a chat state and wants to
+act on it.  Every accessor and section primitive below assumes the right
+buffer is current; without this, each caller arranged that itself with
+`with-current-buffer' and a buffer it had looked up separately, which is
+how buffer and state came to be tracked in two places."
+  (declare (indent 1) (debug t))
+  (let ((s (make-symbol "state"))
+        (buf (make-symbol "buffer")))
+    `(let* ((,s ,state)
+            (,buf (and ,s (opencode-chat-state-buffer ,s))))
+       (unless (buffer-live-p ,buf)
+         (error "Chat state has no live buffer"))
+       (with-current-buffer ,buf ,@body))))
+
 (defmacro opencode-chat--in-transcript (&rest body)
   "Run BODY as a mutation of the rendered transcript.
 
@@ -274,20 +303,23 @@ unguarded `delete-region' can eat what the user is typing."
          (buffer-undo-list t))
      (save-excursion ,@body)))
 
-(defun opencode-chat--insert-section (pos render)
+(defun opencode-chat--insert-section (pos render &optional state)
   "Draw a new section at POS by calling RENDER.  Return the position past it.
+STATE, when given, names the chat to draw into; it defaults to the
+current buffer's.
 
 Starts the section on a line of its own.  A section beginning mid-line
 would glue onto whatever preceded it, and its first line would render
 without the gutter its `line-prefix' assumes."
-  (opencode-chat--in-transcript
-    (goto-char pos)
-    (unless (bolp) (insert "\n"))
-    (let ((start (point)))
-      (funcall render)
-      (when (> (point) start)
-        (opencode-chat--apply-message-props start (point)))
-      (point))))
+  (opencode-chat--maybe-in-chat state
+    (opencode-chat--in-transcript
+      (goto-char pos)
+      (unless (bolp) (insert "\n"))
+      (let ((start (point)))
+        (funcall render)
+        (when (> (point) start)
+          (opencode-chat--apply-message-props start (point)))
+        (point)))))
 
 (defun opencode-chat--render-part-by-type (part part-type msg-id)
   "Draw PART of PART-TYPE belonging to MSG-ID at point."
@@ -311,8 +343,10 @@ knowable once the drawing is done."
                 (pinfo (gethash part-id parts)))
       (plist-put pinfo :overlay new-ov))))
 
-(defun opencode-chat--replace-section (ov render)
+(defun opencode-chat--replace-section (ov render &optional state)
   "Redraw the section spanned by overlay OV by calling RENDER.
+STATE, when given, names the chat to act on; it defaults to the current
+buffer's.
 RENDER takes no arguments and draws the replacement with point at the
 section start.  Returns the position just past the new text.
 
@@ -324,7 +358,8 @@ Bounds are read from OV at call time rather than captured beforehand:
 callers may delete other overlays first, and any deletion earlier in the
 buffer shifts plain integer positions while the overlay tracks.  Asserts
 the section stops short of the input area, as `--delete-section' does."
-  (let* ((start (overlay-start ov))
+  (opencode-chat--maybe-in-chat state
+   (let* ((start (overlay-start ov))
          (end (overlay-end ov))
          (limit (opencode-chat--input-start))
          (limit-pos (and (markerp limit) (marker-position limit)))
@@ -345,10 +380,12 @@ the section stops short of the input area, as `--delete-section' does."
       (dolist (o siblings)
         (when (overlay-buffer o)
           (move-overlay o (point) (overlay-end o))))
-      (point))))
+      (point)))))
 
-(defun opencode-chat--delete-section (ov)
+(defun opencode-chat--delete-section (ov &optional state)
   "Delete the text spanned by section overlay OV, and OV itself.
+STATE, when given, names the chat to act on; it defaults to the current
+buffer's.
 
 Asserts the section stops short of the input area.  The check is cheap
 and the failure it catches is not: the input area shares this buffer, so
@@ -360,7 +397,8 @@ queued and retry indicators --- are deliberately inserted at
 `messages-end' with insertion type nil, so they sit just past it and are
 legitimately outside the transcript proper.  Covered by
 `opencode-chat-delete-section-leaves-input-alone'."
-  (when (overlay-buffer ov)
+  (opencode-chat--maybe-in-chat state
+   (when (overlay-buffer ov)
     (let* ((start (overlay-start ov))
            (end (overlay-end ov))
            (limit (opencode-chat--input-start))
@@ -370,11 +408,13 @@ legitimately outside the transcript proper.  Covered by
       (opencode-chat--in-transcript
         (when (and start end (> end start))
           (delete-region start end))
-        (delete-overlay ov)))))
+        (delete-overlay ov))))))
 
-(defun opencode-chat--emit (text face &optional prefix)
+(defun opencode-chat--emit (text face &optional prefix state)
   "Insert TEXT into the transcript faced with FACE.  Return (START . END).
 PREFIX, when given, becomes the `line-prefix' over the inserted region.
+STATE, when given, names the chat to insert into; it defaults to the
+current buffer's.
 
 The single write path for transcript content.  Every caller used to
 decide independently how to propertize, whether to add a `line-prefix',
@@ -388,11 +428,12 @@ composes faces on top of whatever the renderer set and has to strip them
 again to stay idempotent; without a recorded base it could only tell the
 two apart by keeping a hand-maintained list of the renderer's face
 names.  Recording it makes that mechanical."
-  (let ((start (point)))
-    (insert (propertize text 'face face 'opencode-base-face face))
-    (when prefix
-      (put-text-property start (point) 'line-prefix prefix))
-    (cons start (point))))
+  (opencode-chat--maybe-in-chat state
+    (let ((start (point)))
+      (insert (propertize text 'face face 'opencode-base-face face))
+      (when prefix
+        (put-text-property start (point) 'line-prefix prefix))
+      (cons start (point)))))
 
 (defun opencode-chat--apply-message-props (start end &optional extra-props)
   "Apply standard message properties from START to END.

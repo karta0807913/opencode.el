@@ -392,19 +392,31 @@ Reader is `opencode-chat--SLOT': returns nil when no state exists yet
 so callers that probe (e.g. \"was there a previous render?\") see the
 same value they used to see from a nil-initialised `defvar-local'.
 Writer is `opencode-chat--set-SLOT': calls `--state-ensure' first so
-writes always have somewhere to land."
+writes always have somewhere to land.
+
+Both take an optional STATE.  Without it they read and write the
+current buffer's state, which is the historical behaviour and carries an
+invisible precondition: the right buffer must be current.  With it, the
+state is addressed directly and the precondition disappears."
   (let* ((getter (intern (format "opencode-chat--%s" slot)))
          (setter (intern (format "opencode-chat--set-%s" slot)))
          (struct-accessor (intern (format "opencode-chat-state-%s" slot))))
     `(progn
-       (defun ,getter ()
-         ,(format "Return the %s slot of `opencode-chat--state', or nil." slot)
-         (and opencode-chat--state
-              (,struct-accessor opencode-chat--state)))
-       (defun ,setter (value)
-         ,(format "Set the %s slot of `opencode-chat--state' to VALUE." slot)
-         (opencode-chat--state-ensure)
-         (setf (,struct-accessor opencode-chat--state) value)))))
+       (defun ,getter (&optional state)
+         ,(format "Return the %s slot.
+STATE defaults to the current buffer's state.  Returns nil when there
+is no state yet." slot)
+         (when-let* ((s (or state opencode-chat--state)))
+           (,struct-accessor s)))
+       (defun ,setter (value &optional state)
+         ,(format "Set the %s slot to VALUE.
+STATE defaults to the current buffer's state, which is created if
+absent.  Passing it explicitly lets a caller holding a chat state
+operate on it without first making its buffer current." slot)
+         (let ((s (or state
+                      (progn (opencode-chat--state-ensure)
+                             opencode-chat--state))))
+           (setf (,struct-accessor s) value))))))
 
 ;; --- Migrated from chat.el (6 slots) ---
 (opencode-chat-state--define-slot refresh-timer)
