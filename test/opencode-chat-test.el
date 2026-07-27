@@ -1619,6 +1619,23 @@ have taken the user's unsent text with it."
         (should-error (opencode-chat-message-delete "msg_guard"))
         (should (string-match-p "user is typing" (buffer-string)))))))
 
+(ert-deftest opencode-chat-state-rejects-write-from-foreign-buffer ()
+  "Verify chat state refuses a write from a buffer it does not describe.
+Accessors are zero-argument and read the state of whatever buffer is
+current, so a write with the wrong buffer current used to land silently
+in that buffer — or lazily create a second state object for it.  The
+state records its own buffer so the mistake is loud."
+  (opencode-test-with-temp-buffer "*test-chat-state-owner*"
+    (opencode-chat-mode)
+    (opencode-chat--set-session-id "ses_owner")
+    (should (eq (current-buffer)
+                (opencode-chat-state-buffer opencode-chat--state)))
+    (let ((foreign opencode-chat--state))
+      (with-temp-buffer
+        ;; Same state object, different buffer: this is the mistake.
+        (setq opencode-chat--state foreign)
+        (should-error (opencode-chat--set-session-id "ses_wrong"))))))
+
 ;;; --- Delta helper (insert-streaming-delta) ---
 
 (ert-deftest opencode-chat-insert-delta-single-line ()

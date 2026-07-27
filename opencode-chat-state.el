@@ -32,6 +32,14 @@ struct migration — all per-buffer rendering / refresh / input
 state that used to live in scattered `defvar-local's.
 
 Slots are grouped by the module that originally owned them."
+  ;; --- Ownership ---
+  (buffer nil
+   :documentation "The chat buffer this state describes.
+Set once at `opencode-chat--state-init'.  The state is buffer-local, so
+this is redundant as storage and load-bearing as a check: every accessor
+reads the state of whatever buffer happens to be current, an invisible
+precondition that ten modules depend on.  Recording the buffer lets
+`--state-ensure' verify it instead of trusting it.")
   ;; --- Session identity + agent/model overrides ---
   (session-id nil
    :documentation "Session ID string for this chat buffer.")
@@ -285,7 +293,8 @@ applies the result via the setter API.  The 23 slots migrated in Step
 5 (store, input-start, refresh-state, etc.) are preserved by leaving
 their slots alone — this is an in-place update."
   (unless opencode-chat--state
-    (setq opencode-chat--state (opencode-chat-state-create)))
+    (setq opencode-chat--state (opencode-chat-state-create
+                                :buffer (current-buffer))))
   (let* ((existing-agent (opencode-chat-state-agent opencode-chat--state))
          (existing-model-id (opencode-chat-state-model-id opencode-chat--state))
          (existing-provider-id (opencode-chat-state-provider-id opencode-chat--state))
@@ -304,6 +313,13 @@ Also lazily initialises the three hash-table slots (`store',
 `diff-cache', `diff-shown') so accessor callers never see nil."
   (unless opencode-chat--state
     (opencode-chat--state-init))
+  ;; Writing through an accessor while the wrong buffer is current used to
+  ;; land silently in that buffer's state --- or lazily create one for it.
+  ;; The state knows which buffer it describes, so say so.
+  (cl-assert (or (null (opencode-chat-state-buffer opencode-chat--state))
+                 (eq (current-buffer)
+                     (opencode-chat-state-buffer opencode-chat--state)))
+             t "chat state written from a buffer it does not describe")
   (unless (opencode-chat-state-store opencode-chat--state)
     (setf (opencode-chat-state-store opencode-chat--state)
           (make-hash-table :test 'equal)))
