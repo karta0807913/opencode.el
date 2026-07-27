@@ -719,6 +719,9 @@ Nils the input-start marker BEFORE rendering messages: after
 `after-change-functions' hook would otherwise force the whole new
 message area into the input keymap, clobbering edit-tool file-path
 and message-map bindings."
+  ;; Drop deferred fontification before the erase: its markers would otherwise
+  ;; collapse to point-min and the flush would run against the redrawn buffer.
+  (opencode-markdown-cancel-deferred)
   (erase-buffer)
   (opencode-chat-message-clear-all)
   (when (opencode-chat--input-start)

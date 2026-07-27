@@ -290,5 +290,96 @@ Without this, star-style lists render differently than dash-style — inconsiste
                   (memq 'opencode-md-list-marker face)
                 (eq face 'opencode-md-list-marker))))))
 
+;;; --- E. Deferred fontification of oversized regions ---
+
+(defun opencode-markdown-test--idle-timers ()
+  "Return a snapshot of `timer-idle-list' for `opencode-markdown-test--drive'."
+  (copy-sequence timer-idle-list))
+
+(defun opencode-markdown-test--drive (before)
+  "Run every idle timer registered since the BEFORE snapshot.
+Invokes each timer's own callback rather than sleeping, so the test is
+deterministic in batch mode where idle timers never fire on their own.
+Deliberately reaches through `timer-idle-list' instead of this module's
+internals, so the assertions below describe observable behaviour and
+hold against any scheduling implementation."
+  (let ((pending (seq-difference timer-idle-list before)))
+    (should pending)
+    (dolist (timer pending)
+      (cancel-timer timer)
+      (apply (timer--function timer) (timer--args timer)))))
+
+(defun opencode-markdown-test--insert-oversized ()
+  "Insert filler exceeding `opencode-markdown-fontify-max-size', then a needle.
+Returns nothing; the buffer ends with \" text **needle** tail\" so the
+needle sits at the very end of the oversized region."
+  (insert " ")
+  (insert (make-string (+ opencode-markdown-fontify-max-size 1000) ?x))
+  (insert " text **needle** tail"))
+
+(ert-deftest opencode-markdown-deferred-tracks-insertions ()
+  "Verify deferred fontification follows text inserted before its region.
+Oversized regions are fontified from an idle timer.  When the positions
+were captured as integers, any streaming insert landing above the region
+shifted the real text out from under them and the timer fontified the
+wrong span — the tail of the message silently lost its faces."
+  (with-temp-buffer
+    (let ((before (opencode-markdown-test--idle-timers)))
+      (opencode-markdown-test--insert-oversized)
+      (opencode-markdown-fontify-region (point-min) (point-max))
+      ;; Nothing is fontified yet — the region was deferred, not rendered.
+      (should (opencode-markdown-test--no-face-p "needle" 'opencode-md-bold))
+      ;; Simulate a streaming append higher up in the transcript.
+      (save-excursion
+        (goto-char (point-min))
+        (insert (make-string 500 ?y)))
+      (opencode-markdown-test--drive before)
+      (should (opencode-markdown-test--has-face-p "needle" 'opencode-md-bold)))))
+
+(ert-deftest opencode-markdown-deferred-coalesces-timers ()
+  "Verify repeated oversized requests share one idle timer and one region.
+Each request used to schedule an independent timer, so a streaming
+response queued one redundant full-region fontification pass per delta."
+  (with-temp-buffer
+    (let ((before (opencode-markdown-test--idle-timers)))
+      (opencode-markdown-test--insert-oversized)
+      (dotimes (_ 5)
+        (opencode-markdown-fontify-region (point-min) (point-max)))
+      ;; Five requests, one timer, one region.
+      (should (= 1 (length (seq-difference timer-idle-list before))))
+      (should (= 1 (length opencode-markdown--deferred-regions)))
+      (opencode-markdown-test--drive before)
+      (should (opencode-markdown-test--has-face-p "needle" 'opencode-md-bold)))))
+
+(ert-deftest opencode-markdown-deferred-releases-markers ()
+  "Verify the deferred queue frees its markers after flushing.
+This module releases markers explicitly; leaking them would leave the
+buffer paying insertion-time marker adjustment costs forever."
+  (with-temp-buffer
+    (let ((before (opencode-markdown-test--idle-timers)))
+      (opencode-markdown-test--insert-oversized)
+      (opencode-markdown-fontify-region (point-min) (point-max))
+      (let ((region (car opencode-markdown--deferred-regions)))
+        (should (markerp (car region)))
+        (opencode-markdown-test--drive before)
+        (should (null opencode-markdown--deferred-regions))
+        (should (null opencode-markdown--deferred-timer))
+        (should (null (marker-position (car region))))
+        (should (null (marker-position (cdr region))))))))
+
+(ert-deftest opencode-markdown-cancel-deferred-drops-pending ()
+  "Verify `opencode-markdown-cancel-deferred' clears the queue and its timer.
+Callers about to erase the buffer use this so a pending region is not
+fontified against contents it never described."
+  (with-temp-buffer
+    (opencode-markdown-test--insert-oversized)
+    (opencode-markdown-fontify-region (point-min) (point-max))
+    (let ((region (car opencode-markdown--deferred-regions)))
+      (opencode-markdown-cancel-deferred)
+      (should (null opencode-markdown--deferred-timer))
+      (should (null opencode-markdown--deferred-regions))
+      (should (null (marker-position (car region))))
+      (should (opencode-markdown-test--no-face-p "needle" 'opencode-md-bold)))))
+
 (provide 'opencode-markdown-test)
 ;;; opencode-markdown-test.el ends here
