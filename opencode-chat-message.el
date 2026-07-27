@@ -199,12 +199,19 @@ Falls back to buffer scan and caches the result."
                   (throw 'found ov)))
               (opencode-chat--store))
      nil)
-   ;; Fallback: buffer scan
+   ;; Fallback: buffer scan.  Reaching here means the store and the buffer
+   ;; disagree --- the section exists on screen but the store does not know
+   ;; its overlay.  The scan repairs that silently, which is why the desync
+   ;; has never been diagnosed; log it so the underlying cause is visible.
    (let ((found nil))
      (dolist (ov (overlays-in (point-min) (point-max)))
        (let ((sec (overlay-get ov 'opencode-section)))
          (when (and sec (equal (plist-get sec :id) id))
            (setq found ov))))
+     (when found
+       (opencode--debug
+        "opencode-chat: store/buffer desync --- overlay for %s found only by buffer scan"
+        id))
      ;; Cache result in store
      (when found
        (let ((entry (opencode-chat--store-get id)))

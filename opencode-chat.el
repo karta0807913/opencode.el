@@ -1334,6 +1334,32 @@ Use only for initial load or testing; prefer `opencode-chat--refresh'."
                                     :session (opencode-chat--session))))
       (error (message "Refresh failed: %s" (error-message-string err))))))
 
+;;; --- Recovery ---
+
+(defun opencode-chat-hard-reset ()
+  "Discard all cached render state and redraw the transcript from the server.
+
+The escape hatch for a chat buffer whose store and the buffer itself have
+diverged.  An ordinary refresh reuses the store, so a section whose
+overlay the store has lost -- or has recorded at the wrong place -- stays
+wrong across refreshes; this drops the store and the streaming state
+first, so the redraw starts from nothing but the server's messages.
+
+Reaching for this should be rare.  `opencode-chat--store-find-overlay'
+logs when it repairs a desync by scanning the buffer, and that log is the
+thing worth reporting: this command hides the symptom, it does not fix
+the cause."
+  (interactive)
+  (unless (derived-mode-p 'opencode-chat-mode)
+    (user-error "Not in an OpenCode chat buffer"))
+  (unless (opencode-chat--session-id)
+    (user-error "No session attached to this buffer"))
+  (let ((inhibit-read-only t))
+    (opencode-chat--clear-streaming-state)
+    (opencode-chat--store-clear)
+    (opencode-chat--refresh-sync))
+  (message "opencode: chat redrawn from server"))
+
 ;;; --- Open chat buffer ---
 
 (declare-function opencode-window-child-frame "opencode-window" (buffer &optional placement))

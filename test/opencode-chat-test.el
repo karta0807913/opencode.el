@@ -1421,6 +1421,35 @@ start of a line, and neither could markdown's own regexes."
       (let ((lp (get-text-property (match-beginning 0) 'line-prefix)))
         (should (string= (substring-no-properties lp) "\u258E "))))))
 
+(ert-deftest opencode-chat-hard-reset-requires-chat-buffer ()
+  "Verify `opencode-chat-hard-reset' refuses to run outside a chat buffer.
+It clears the store and streaming state, which would strand markers if
+run against an unrelated buffer."
+  (with-temp-buffer
+    (should-error (opencode-chat-hard-reset) :type 'user-error)))
+
+(ert-deftest opencode-chat-hard-reset-drops-store-and-streaming-state ()
+  "Verify `opencode-chat-hard-reset' clears cached render state before redrawing.
+An ordinary refresh reuses the store, so a section whose overlay the
+store has lost stays wrong across refreshes; the reset must start from
+nothing but the server's messages."
+  (opencode-test-with-temp-buffer "*test-chat-hard-reset*"
+    (opencode-chat-mode)
+    (opencode-chat--set-session-id "ses_reset")
+    (puthash "msg_r"
+             (list :msg (list :id "msg_r" :role "assistant")
+                   :parts (make-hash-table :test 'equal))
+             (opencode-chat--store))
+    (opencode-chat--set-streaming-msg-id "msg_r")
+    (opencode-chat--set-streaming-part-id "p_r")
+    (should (> (hash-table-count (opencode-chat--store)) 0))
+    ;; The server call fails in the test environment; the state teardown that
+    ;; precedes it is what this covers.
+    (ignore-errors (opencode-chat-hard-reset))
+    (should (= 0 (hash-table-count (opencode-chat--store))))
+    (should-not (opencode-chat--streaming-msg-id))
+    (should-not (opencode-chat--streaming-part-id))))
+
 ;;; --- Delta helper (insert-streaming-delta) ---
 
 (ert-deftest opencode-chat-insert-delta-single-line ()

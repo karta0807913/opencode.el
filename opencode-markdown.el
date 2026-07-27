@@ -31,8 +31,9 @@
   :group 'opencode)
 
 (defcustom opencode-markdown-max-fontified-code-blocks 20
-  "Maximum number of code blocks to syntax-highlight per region.
-Blocks beyond this limit get background face only, no syntax highlighting."
+  "Maximum number of code blocks to syntax-highlight per fontified span.
+Spans with more blocks than this get the code-block face only, no
+per-language syntax highlighting."
   :type 'integer
   :group 'opencode)
 
@@ -100,6 +101,34 @@ faces from natively highlighted code --- are passed through unchanged.")
    ((listp face) (mapcar #'opencode-markdown--map-face face))
    (t face)))
 
+(defconst opencode-markdown--fence-re "^```\\w*$"
+  "Regexp matching an opening or closing fenced code block line.")
+
+(defun opencode-markdown--worth-highlighting-p ()
+  "Return non-nil if the current buffer's code blocks are worth highlighting.
+Applies `opencode-markdown-max-fontified-code-blocks' and
+`opencode-markdown-max-code-block-lines' to the temp buffer holding the
+span about to be fontified."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((blocks 0)
+          (longest 0)
+          (open nil)
+          (ok t))
+      (while (re-search-forward opencode-markdown--fence-re nil t)
+        (if open
+            (progn
+              (setq blocks (1+ blocks))
+              (setq longest (max longest (count-lines open (point))))
+              (setq open nil))
+          (setq open (point))))
+      (when (> blocks opencode-markdown-max-fontified-code-blocks)
+        (setq ok nil))
+      (when (and opencode-markdown-max-code-block-lines
+                 (> longest opencode-markdown-max-code-block-lines))
+        (setq ok nil))
+      ok)))
+
 (defun opencode-markdown--collect-props (text)
   "Fontify TEXT with `markdown-mode' and return the properties to copy.
 Each element is (BEG END FACE HIDDEN), with offsets zero-based relative
@@ -117,7 +146,13 @@ the appearance it has today."
       (insert text)
       (delay-mode-hooks (markdown-mode))
       (setq-local markdown-hide-markup t)
-      (setq-local markdown-fontify-code-blocks-natively t)
+      ;; Native code-block highlighting runs each block's own major mode over
+      ;; the block, which is by far the most expensive thing here.  The two
+      ;; limits below are the same guards the previous hand-rolled code
+      ;; applied; without them a single huge fence would be highlighted in
+      ;; full on the redisplay that first scrolls it into view.
+      (setq-local markdown-fontify-code-blocks-natively
+                  (opencode-markdown--worth-highlighting-p))
       (font-lock-ensure)
       (let ((pos (point-min)))
         (while (< pos (point-max))
@@ -207,9 +242,6 @@ compound its :height on every pass."
 ;; buffer before the timer fires, redundant passes queued once per delta, and
 ;; fontifying transcript that the user cannot see.  Nothing crosses a timer
 ;; here, so none of them can recur.
-
-(defconst opencode-markdown--fence-re "^```\\w*$"
-  "Regexp matching an opening or closing fenced code block line.")
 
 (defun opencode-markdown-mark-region (start end)
   "Mark START..END as markdown for `jit-lock' to fontify later.
