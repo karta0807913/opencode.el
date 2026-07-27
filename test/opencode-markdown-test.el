@@ -479,5 +479,27 @@ glyph option, so it is cached."
       (opencode-markdown--collect-props text))
     (should (= 2 (hash-table-count opencode-markdown--props-cache)))))
 
+(ert-deftest opencode-markdown-hides-reference-definitions ()
+  "Verify link reference definitions are hidden from the transcript.
+`[ref]: http://example.com' is markup that exists so `[text][ref]' can
+resolve.  markdown-mode leaves it visible because an editor should show
+it, but a transcript reader never asked for it, and a model using
+reference-style links emits one such line per link."
+  (with-temp-buffer
+    (opencode-markdown-test--jit-buffer
+     "See [the docs][ref] for details.\n\n[ref]: http://example.com\n")
+    (opencode-markdown-jit-fontify (point-min) (point-max))
+    ;; The link itself still renders.
+    (should (opencode-markdown-test--has-face-p "the docs" 'opencode-md-link))
+    ;; The definition line is hidden in full, newline included.
+    (goto-char (point-min))
+    (should (search-forward "[ref]: http://example.com" nil t))
+    (let ((pos (match-beginning 0))
+          (end (match-end 0)))
+      (while (< pos end)
+        (should (eq (get-text-property pos 'invisible) 'opencode-md))
+        (setq pos (1+ pos)))
+      (should (eq (get-text-property end 'invisible) 'opencode-md)))))
+
 (provide 'opencode-markdown-test)
 ;;; opencode-markdown-test.el ends here

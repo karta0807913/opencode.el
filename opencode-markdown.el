@@ -216,7 +216,9 @@ the appearance it has today."
                                display))
                     props))
             (setq pos next)))))
-    (opencode-markdown--fix-bold-italic text (nreverse props))))
+    (opencode-markdown--hide-reference-definitions
+     text
+     (opencode-markdown--fix-bold-italic text (nreverse props)))))
 
 (defconst opencode-markdown--bold-italic-re
   "\\(\\*\\*\\*\\)\\([^*\n]+\\)\\(\\*\\*\\*\\)"
@@ -259,6 +261,27 @@ this once upstream parses the construct correctly."
                                  ranges)))
                    props)
        (nreverse fixes)))))
+
+(defun opencode-markdown--hide-reference-definitions (text props)
+  "Add PROPS entries hiding link reference definitions in TEXT.
+
+A reference definition --- `[ref]: http://example.com' on its own line ---
+is markup, not content: it exists so `[text][ref]' elsewhere can resolve.
+`markdown-mode' leaves it visible because in a markdown *editor* you are
+meant to see and edit it, but in a transcript it is noise the model never
+meant the reader to see, and any model using reference-style links emits
+one line of it per link.
+
+The whole line is hidden, including its newline, so no blank line is left
+behind."
+  (let ((extra nil)
+        (pos 0))
+    (while (string-match markdown-regex-reference-definition text pos)
+      (let ((beg (match-beginning 0))
+            (end (min (length text) (1+ (match-end 0)))))
+        (push (list beg end 'opencode-md-marker t nil) extra)
+        (setq pos (max end (1+ beg)))))
+    (append props (nreverse extra))))
 
 (defun opencode-markdown--apply-props (start props)
   "Apply PROPS, offsets relative to START, to the current buffer."
