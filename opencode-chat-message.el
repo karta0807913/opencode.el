@@ -1064,17 +1064,10 @@ Returns:
    ((and part-id
          (not (opencode-chat--store-part-marker msg-id part-id)))
     (when-let* ((pos (opencode-chat--message-insert-pos msg-id)))
-      (let* ((inhibit-read-only t)
-             (buffer-undo-list t)
-             (role (or (opencode-chat--msg-role msg-id) 'assistant)))
-        (save-excursion
-          (goto-char pos)
-          (unless (bolp)
-            (insert "\n")
-            (setq pos (point)))
-          (opencode-chat--render-part part role)
-          (when (> (point) pos)
-            (opencode-chat--apply-message-props pos (point)))))
+      (let ((role (or (opencode-chat--msg-role msg-id) 'assistant)))
+        (opencode-chat--insert-section
+         pos
+         (lambda () (opencode-chat--render-part part role))))
       :rendered))
 
    ;; Finalized part — no-op
@@ -1111,15 +1104,13 @@ Returns:
     ;; buffer the marker's old home had become.
     (cl-assert (eq (marker-buffer end-marker) (current-buffer)) t
                "messages-end marker must belong to the current buffer")
+    ;; Insertion type nil while drawing so the marker stays at the old end
+    ;; rather than being dragged along, then moved explicitly to the new one.
     (set-marker-insertion-type end-marker nil)
-    (save-excursion
-      (goto-char end-marker)
-      (let ((start (point))
-            (inhibit-read-only t)
-            (buffer-undo-list t))
-        (opencode-chat--render-message msg)
-        (opencode-chat--apply-message-props start (point))
-        (set-marker end-marker (point))))
+    (set-marker end-marker
+                (opencode-chat--insert-section
+                 end-marker
+                 (lambda () (opencode-chat--render-message msg))))
     (set-marker-insertion-type end-marker t)
     t))
 
