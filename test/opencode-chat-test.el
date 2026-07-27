@@ -1573,6 +1573,33 @@ the cursor into the transcript when the model finished."
         (opencode-chat--restore-cursor pre)
         (should (opencode-chat--in-input-area-p))))))
 
+(ert-deftest opencode-chat-rerender-does-not-touch-input-area ()
+  "Verify a transcript redraw leaves the input area's text untouched.
+Not merely restored afterwards — never destroyed.  The redraw narrows to
+the transcript, so the user's unsent text is outside the replaced region
+and no save/restore step is involved in it surviving."
+  (opencode-test-with-temp-buffer "*test-chat-narrow-input*"
+    (opencode-chat-mode)
+    (let ((inhibit-read-only t))
+      (opencode-chat--render-input-area)
+      (goto-char (opencode-chat--input-content-start))
+      (insert "unsent draft")
+      (should (opencode-chat--transcript-preservable-p))
+      ;; Mark the input text so we can tell survival from reconstruction:
+      ;; a rebuild would re-insert plain text without this property.
+      (put-text-property (opencode-chat--input-content-start)
+                         (point) 'opencode-test-witness t)
+      (opencode-chat--render-messages
+       (vector (list :id "msg_n" :role "assistant"
+                     :info (list :role "assistant" :id "msg_n"
+                                 :time (list :created 1700000000000))
+                     :parts (vector (list :id "p_n" :type "text"
+                                          :text "redrawn transcript")))))
+      (should (string= "unsent draft" (opencode-chat--input-text)))
+      (should (get-text-property (opencode-chat--input-content-start)
+                                 'opencode-test-witness))
+      (should (string-match-p "redrawn transcript" (buffer-string))))))
+
 ;;; --- Delta helper (insert-streaming-delta) ---
 
 (ert-deftest opencode-chat-insert-delta-single-line ()

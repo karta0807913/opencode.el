@@ -708,6 +708,23 @@ Keys: :saved-input :had-input-area :in-input-p :saved-input-offset
           :saved-popup-perm opencode-permission--current
           :saved-popup-ques opencode-question--current)))
 
+(defun opencode-chat--transcript-preservable-p ()
+  "Return non-nil if the transcript can be redrawn without rebuilding the buffer.
+True once the input area exists, which is what `messages-end' marks the
+start of."
+  (when-let* ((end (opencode-chat-message-messages-end)))
+    (and (marker-position end) (opencode-chat--input-start) t)))
+
+(defun opencode-chat--clear-transcript ()
+  "Delete the transcript, leaving the input area below it untouched.
+Must be called inside a narrowing to the transcript.
+
+Uses `delete-region' rather than `erase-buffer' deliberately:
+`erase-buffer' widens first, so under a narrowing it deletes the whole
+buffer anyway and takes the input area with it.  Verified, not assumed."
+  (delete-region (point-min) (point-max))
+  (opencode-chat-message-clear-all))
+
 (defun opencode-chat--clear-for-rerender ()
   "Wipe buffer and reset state that must not carry across a rerender.
 Nils the input-start marker BEFORE rendering messages: after
@@ -824,29 +841,69 @@ active inline popup across re-renders — see the `--save-render-state'
 / `--restore-*' helper family for the details."
   (let ((inhibit-read-only t)
         (inhibit-redisplay t)
-        (buffer-undo-list t)
-        (pre (opencode-chat--save-render-state)))
+        (buffer-undo-list t))
+    (if (opencode-chat--transcript-preservable-p)
+        (opencode-chat--rerender-transcript messages)
+      (opencode-chat--rebuild-buffer messages))
+    (opencode-chat--input-history-seed)))
+
+(defun opencode-chat--rerender-transcript (messages)
+  "Redraw MESSAGES in place, leaving the input area alone.
+
+The transcript and the input area share one buffer, so redrawing used to
+mean erasing both and rebuilding the input area around whatever the user
+had typed --- saving their text and cursor offset first, then putting
+both back.  Narrowing to the transcript removes that entirely: the input
+area is not inside the region being replaced, so their text is never
+destroyed and a refresh landing mid-keystroke cannot move the cursor.
+
+Cursor handling outside the input area is still needed, because the
+transcript itself is still replaced.  A cursor reading a message must be
+restored by message id and offset, and one parked in the read-only footer
+is moved somewhere it can type --- neither is compensation for damage to
+the input area, so neither goes away."
+  (let ((pre (opencode-chat--save-render-state)))
+    (save-excursion
+      (save-restriction
+        (narrow-to-region (point-min) (opencode-chat-message-messages-end))
+        (opencode-chat--clear-transcript)
+        (opencode-chat-message-render-all messages)
+        (when (> (point) (point-min))
+          (opencode-chat--apply-message-props (point-min) (point)))
+      ;; `--clear-transcript' nils `messages-end'; the cold path recreates it
+      ;; while drawing the input area, which this path does not touch.  Inside
+      ;; the narrowing `point-max' is the transcript/input boundary, which is
+      ;; exactly where the marker belongs.
+        (opencode-chat-message-init-messages-end (point-max))
+        (set-marker-insertion-type (opencode-chat-message-messages-end) t)))
+    ;; A cursor in the input area was never inside the replaced region, so
+    ;; `save-excursion' already put it back exactly.  Anywhere else, the text
+    ;; it pointed at is gone and has to be found again.
+    (unless (plist-get pre :in-input-p)
+      (opencode-chat--restore-cursor pre)
+      (opencode-chat--restore-window-position pre))))
+
+(defun opencode-chat--rebuild-buffer (messages)
+  "Build the whole buffer for MESSAGES, input area included.
+The cold path, taken when there is no input area to preserve --- a first
+render or a session switch.  This is the only path that still has to save
+and restore state around the redraw."
+  (let ((pre (opencode-chat--save-render-state)))
     (opencode-chat--clear-for-rerender)
-    ;; Messages
     (opencode-chat-message-render-all messages)
-    ;; Make the message area read-only with navigation keymap.
     (when (> (point) (point-min))
       (opencode-chat--apply-message-props (point-min) (point)))
-    ;; Input area (editable) — same for all sessions
     (opencode-chat--render-input-area)
-    ;; Child sessions: append sub-agent indicator below the input area
     (when (opencode-chat--child-session-p)
       (opencode-chat--render-child-indicator))
     ;; Now switch messages-end to insert-after semantics
     (set-marker-insertion-type (opencode-chat-message-messages-end) t)
-    ;; Restore user input
     (when-let* ((saved-input (plist-get pre :saved-input))
                 ((not (string-empty-p saved-input))))
       (opencode-chat--replace-input saved-input))
     (opencode-chat--restore-cursor pre)
     (opencode-chat--restore-window-position pre)
-    (opencode-chat--restore-popup-or-drain pre)
-    (opencode-chat--input-history-seed)))
+    (opencode-chat--restore-popup-or-drain pre)))
 
 ;;; --- Input area ---
 
