@@ -1019,7 +1019,7 @@ Returns:
    ((not (or (null part-type)
              (string= part-type "text")
              (string= part-type "reasoning")))
-    (let ((buffer-undo-list t))
+    (opencode-chat--in-transcript
       (opencode-chat--update-part-inline part))
     :upserted)
 
@@ -1227,8 +1227,7 @@ on first delta for a part.
 Returns t on success, nil if no marker found for PART-ID."
   (let ((marker (opencode-chat--store-part-marker msg-id part-id)))
     (when (and marker (marker-position marker))
-      (let ((inhibit-read-only t)
-            (buffer-undo-list t))
+      (opencode-chat--in-transcript
         ;; Switch marker to insertion type t so it advances as deltas
         ;; are inserted.  Starts as nil (set in `render-part') to
         ;; prevent tool parts inserted at the same position from
