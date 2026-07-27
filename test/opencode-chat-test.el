@@ -1481,6 +1481,33 @@ than silently deleting."
           (should-not (string-match-p "DELETEME" (buffer-string)))
           (should-not (overlay-buffer ov)))))))
 
+(ert-deftest opencode-chat-replace-section-keeps-sibling-abutting ()
+  "Verify a section starting where the replaced one ended stays abutting.
+A tool section that grows or shrinks when it finishes must not strand
+the section after it or overlap into it — that is the marker-collision
+class of bug the README self-reports."
+  (opencode-test-with-temp-buffer "*test-chat-replace-sec*"
+    (opencode-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "head\n")
+      (let* ((start (point)))
+        (insert "SHORT\n")
+        (let* ((ov (make-overlay start (point)))
+               (sib-start (point)))
+          (overlay-put ov 'opencode-section (list :id "s1"))
+          (insert "SIBLING\n")
+          (let ((sib (make-overlay sib-start (point))))
+            (overlay-put sib 'opencode-section (list :id "s2"))
+            (opencode-chat--set-input-start (copy-marker (point-max) nil))
+            (opencode-chat--replace-section
+             ov (lambda () (insert "MUCH LONGER REPLACEMENT\n")))
+            ;; The sibling still covers exactly its own text.
+            (should (string= "SIBLING\n"
+                             (buffer-substring-no-properties
+                              (overlay-start sib) (overlay-end sib))))
+            (should (string-match-p "MUCH LONGER REPLACEMENT" (buffer-string)))
+            (should-not (string-match-p "SHORT" (buffer-string)))))))))
+
 ;;; --- Delta helper (insert-streaming-delta) ---
 
 (ert-deftest opencode-chat-insert-delta-single-line ()

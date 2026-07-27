@@ -274,6 +274,42 @@ unguarded `delete-region' can eat what the user is typing."
          (buffer-undo-list t))
      (save-excursion ,@body)))
 
+(defun opencode-chat--replace-section (ov render)
+  "Redraw the section spanned by overlay OV by calling RENDER.
+RENDER takes no arguments and draws the replacement with point at the
+section start.  Returns the position just past the new text.
+
+Sections that begin exactly where OV ended are moved to abut the new
+text, so a replacement of a different length neither strands its
+neighbour nor overlaps it.
+
+Bounds are read from OV at call time rather than captured beforehand:
+callers may delete other overlays first, and any deletion earlier in the
+buffer shifts plain integer positions while the overlay tracks.  Asserts
+the section stops short of the input area, as `--delete-section' does."
+  (let* ((start (overlay-start ov))
+         (end (overlay-end ov))
+         (limit (opencode-chat--input-start))
+         (limit-pos (and (markerp limit) (marker-position limit)))
+         (siblings (cl-loop for o in (overlays-at end)
+                            when (and (overlay-get o 'opencode-section)
+                                      (not (eq o ov))
+                                      (= (overlay-start o) end))
+                            collect o)))
+    (cl-assert (or (null limit-pos) (null end) (<= end limit-pos)) t
+               "section overlay extends into the input area")
+    (delete-overlay ov)
+    (opencode-chat--in-transcript
+      (goto-char start)
+      (delete-region start end)
+      (funcall render)
+      (when (> (point) start)
+        (opencode-chat--apply-message-props start (point)))
+      (dolist (o siblings)
+        (when (overlay-buffer o)
+          (move-overlay o (point) (overlay-end o))))
+      (point))))
+
 (defun opencode-chat--delete-section (ov)
   "Delete the text spanned by section overlay OV, and OV itself.
 
@@ -849,54 +885,43 @@ Case 3: no insertion point — defer to schedule-refresh."
          (ov (opencode-chat--store-find-overlay part-id))
          (inhibit-read-only t))
     (cond
-     ;; Case 1: Existing overlay — delete region and re-render in-place
+     ;; Case 1: Existing overlay — redraw the section in place
      ((and ov (overlay-buffer ov))
-      (let ((start (overlay-start ov))
-            (end (overlay-end ov)))
-        (let ((siblings
-               (cl-loop for o in (overlays-at end)
-                        when (and (overlay-get o 'opencode-section)
-                                  (not (eq o ov))
-                                  (= (overlay-start o) end))
-                        collect o)))
-          ;; Delete ALL overlays with this part-id (not just the first)
-          (dolist (o (overlays-in (point-min) (point-max)))
-            (when-let* ((sec (overlay-get o 'opencode-section))
-                        ((equal (plist-get sec :id) part-id)))
-              (when (not (eq o ov))
-                (delete-region (overlay-start o) (overlay-end o))
-                (delete-overlay o))))
-          (delete-overlay ov)
-          ;; Clear cached overlay in store
-          (when msg-id
-            (when-let* ((entry (opencode-chat--store-get msg-id))
-                        (parts (plist-get entry :parts))
-                        (pinfo (gethash part-id parts)))
-              (plist-put pinfo :overlay nil)))
-          (save-excursion
-            (goto-char start)
-            (delete-region start end)
-            (pcase part-type
-              ("tool"        (opencode-chat--render-tool-part part))
-              ("step-start"  (opencode-chat--render-step-start part))
-              ("step-finish" (opencode-chat--render-step-finish part))
-              ("subtask"     (opencode-chat--render-subtask-part
-                              part (or (opencode-chat--msg-role msg-id) 'user))))
-            (when (> (point) start)
-              (opencode-chat--apply-message-props start (point)))
-            (dolist (o siblings)
-              (when (overlay-buffer o)
-                (move-overlay o (point) (overlay-end o))))
-            ;; Re-cache new overlay and marker
-            (when msg-id
-              (opencode-chat--store-set-part
-               msg-id part-id part-type (copy-marker (point) t))
-              ;; Cache the newly created overlay
-              (when-let* ((new-ov (opencode-chat--store-find-overlay part-id))
-                          (entry (opencode-chat--store-get msg-id))
-                          (parts (plist-get entry :parts))
-                          (pinfo (gethash part-id parts)))
-                (plist-put pinfo :overlay new-ov)))))))
+      ;; Duplicate overlays for this part id are dropped first, before the
+      ;; section bounds are read: `--replace-section' takes them from the
+      ;; overlay, so deleting text earlier in the buffer cannot shift them.
+      (dolist (o (overlays-in (point-min) (point-max)))
+        (when-let* ((sec (overlay-get o 'opencode-section))
+                    ((equal (plist-get sec :id) part-id)))
+          (unless (eq o ov)
+            (opencode-chat--delete-section o))))
+      ;; Drop the cached overlay before it is deleted, so a lookup racing
+      ;; the redraw cannot hand out a dead one.
+      (when msg-id
+        (when-let* ((entry (opencode-chat--store-get msg-id))
+                    (parts (plist-get entry :parts))
+                    (pinfo (gethash part-id parts)))
+          (plist-put pinfo :overlay nil)))
+      (let ((new-end
+             (opencode-chat--replace-section
+              ov
+              (lambda ()
+                (pcase part-type
+                  ("tool"        (opencode-chat--render-tool-part part))
+                  ("step-start"  (opencode-chat--render-step-start part))
+                  ("step-finish" (opencode-chat--render-step-finish part))
+                  ("subtask"     (opencode-chat--render-subtask-part
+                                  part (or (opencode-chat--msg-role msg-id)
+                                           'user))))))))
+        ;; Re-cache new overlay and marker
+        (when msg-id
+          (opencode-chat--store-set-part
+           msg-id part-id part-type (copy-marker new-end t))
+          (when-let* ((new-ov (opencode-chat--store-find-overlay part-id))
+                      (entry (opencode-chat--store-get msg-id))
+                      (parts (plist-get entry :parts))
+                      (pinfo (gethash part-id parts)))
+            (plist-put pinfo :overlay new-ov)))))
      ;; Case 2: No overlay — insert at message-end or messages-end
      ((let* ((pos (or (opencode-chat--message-insert-pos msg-id)
                       (when-let* ((end (opencode-chat--messages-end)))
