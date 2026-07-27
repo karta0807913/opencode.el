@@ -274,6 +274,43 @@ unguarded `delete-region' can eat what the user is typing."
          (buffer-undo-list t))
      (save-excursion ,@body)))
 
+(defun opencode-chat--insert-section (pos render)
+  "Draw a new section at POS by calling RENDER.  Return the position past it.
+
+Starts the section on a line of its own.  A section beginning mid-line
+would glue onto whatever preceded it, and its first line would render
+without the gutter its `line-prefix' assumes."
+  (opencode-chat--in-transcript
+    (goto-char pos)
+    (unless (bolp) (insert "\n"))
+    (let ((start (point)))
+      (funcall render)
+      (when (> (point) start)
+        (opencode-chat--apply-message-props start (point)))
+      (point))))
+
+(defun opencode-chat--render-part-by-type (part part-type msg-id)
+  "Draw PART of PART-TYPE belonging to MSG-ID at point."
+  (pcase part-type
+    ("tool"        (opencode-chat--render-tool-part part))
+    ("step-start"  (opencode-chat--render-step-start part))
+    ("step-finish" (opencode-chat--render-step-finish part))
+    ("subtask"     (opencode-chat--render-subtask-part
+                    part (or (opencode-chat--msg-role msg-id) 'user)))))
+
+(defun opencode-chat--recache-part (msg-id part-id part-type end)
+  "Record PART-ID's marker at END and its new overlay after a redraw.
+The overlay is looked up rather than passed in because the renderer
+creates it, and which overlay ends up covering the section is only
+knowable once the drawing is done."
+  (when msg-id
+    (opencode-chat--store-set-part msg-id part-id part-type (copy-marker end t))
+    (when-let* ((new-ov (opencode-chat--store-find-overlay part-id))
+                (entry (opencode-chat--store-get msg-id))
+                (parts (plist-get entry :parts))
+                (pinfo (gethash part-id parts)))
+      (plist-put pinfo :overlay new-ov))))
+
 (defun opencode-chat--replace-section (ov render)
   "Redraw the section spanned by overlay OV by calling RENDER.
 RENDER takes no arguments and draws the replacement with point at the
@@ -902,52 +939,21 @@ Case 3: no insertion point — defer to schedule-refresh."
                     (parts (plist-get entry :parts))
                     (pinfo (gethash part-id parts)))
           (plist-put pinfo :overlay nil)))
-      (let ((new-end
-             (opencode-chat--replace-section
-              ov
-              (lambda ()
-                (pcase part-type
-                  ("tool"        (opencode-chat--render-tool-part part))
-                  ("step-start"  (opencode-chat--render-step-start part))
-                  ("step-finish" (opencode-chat--render-step-finish part))
-                  ("subtask"     (opencode-chat--render-subtask-part
-                                  part (or (opencode-chat--msg-role msg-id)
-                                           'user))))))))
-        ;; Re-cache new overlay and marker
-        (when msg-id
-          (opencode-chat--store-set-part
-           msg-id part-id part-type (copy-marker new-end t))
-          (when-let* ((new-ov (opencode-chat--store-find-overlay part-id))
-                      (entry (opencode-chat--store-get msg-id))
-                      (parts (plist-get entry :parts))
-                      (pinfo (gethash part-id parts)))
-            (plist-put pinfo :overlay new-ov)))))
+      (opencode-chat--recache-part
+       msg-id part-id part-type
+       (opencode-chat--replace-section
+        ov
+        (lambda () (opencode-chat--render-part-by-type part part-type msg-id)))))
      ;; Case 2: No overlay — insert at message-end or messages-end
-     ((let* ((pos (or (opencode-chat--message-insert-pos msg-id)
-                      (when-let* ((end (opencode-chat--messages-end)))
-                        (marker-position end)))))
+     ((let ((pos (or (opencode-chat--message-insert-pos msg-id)
+                     (when-let* ((end (opencode-chat--messages-end)))
+                       (marker-position end)))))
         (when pos
-          (save-excursion
-            (goto-char pos)
-            (unless (bolp) (insert "\n"))
-            (let ((start (point)))
-              (pcase part-type
-                ("tool"        (opencode-chat--render-tool-part part))
-                ("step-start"  (opencode-chat--render-step-start part))
-                ("step-finish" (opencode-chat--render-step-finish part))
-                ("subtask"     (opencode-chat--render-subtask-part
-                                part (or (opencode-chat--msg-role msg-id) 'user))))
-              (when (> (point) start)
-                (opencode-chat--apply-message-props start (point)))
-              (when msg-id
-                (opencode-chat--store-set-part
-                 msg-id part-id part-type (copy-marker (point) t))
-                ;; Cache newly created overlay
-                (when-let* ((new-ov (opencode-chat--store-find-overlay part-id))
-                            (entry (opencode-chat--store-get msg-id))
-                            (parts (plist-get entry :parts))
-                            (pinfo (gethash part-id parts)))
-                  (plist-put pinfo :overlay new-ov)))))
+          (opencode-chat--recache-part
+           msg-id part-id part-type
+           (opencode-chat--insert-section
+            pos
+            (lambda () (opencode-chat--render-part-by-type part part-type msg-id))))
           t)))
      ;; Case 3: No insertion point — defer
      (t
