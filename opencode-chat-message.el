@@ -257,6 +257,28 @@ Uses `opencode--format-duration-from-timestamps' from opencode-util."
          (completed (and time-data (plist-get time-data :completed))))
     (opencode--format-duration-from-timestamps created completed)))
 
+(defun opencode-chat--emit (text face &optional prefix)
+  "Insert TEXT into the transcript faced with FACE.  Return (START . END).
+PREFIX, when given, becomes the `line-prefix' over the inserted region.
+
+The single write path for transcript content.  Every caller used to
+decide independently how to propertize, whether to add a `line-prefix',
+and whether the text needed a gutter -- which is why the one-column
+prose gutter ended up duplicated across three render sites and a
+`bolp' check in the streaming path, and had to be found by grep to
+change.
+
+FACE is also recorded in `opencode-base-face'.  Markdown fontification
+composes faces on top of whatever the renderer set and has to strip them
+again to stay idempotent; without a recorded base it could only tell the
+two apart by keeping a hand-maintained list of the renderer's face
+names.  Recording it makes that mechanical."
+  (let ((start (point)))
+    (insert (propertize text 'face face 'opencode-base-face face))
+    (when prefix
+      (put-text-property start (point) 'line-prefix prefix))
+    (cons start (point))))
+
 (defun opencode-chat--apply-message-props (start end &optional extra-props)
   "Apply standard message properties from START to END.
 Sets `read-only' to t and `keymap' to `opencode-chat-message-map',
@@ -500,13 +522,10 @@ on the last line is omitted so streaming deltas can append seamlessly."
                             (not (plist-get time-data :end)))))
     (unless (string-empty-p text)
       (let* ((stripe (opencode--prose-prefix block-face))
-             (part-start (point))
              ;; Normalise line endings exactly as before; the gutter that used
              ;; to be prepended per line now lives in the line-prefix.
-             (body (string-join (string-lines text) "\n")))
-        (insert (propertize body 'face body-face))
-        ;; Single property call for the entire block
-        (put-text-property part-start (point) 'line-prefix stripe)
+             (body (string-join (string-lines text) "\n"))
+             (part-start (car (opencode-chat--emit body body-face stripe))))
         ;; Trailing newline: omit only for unfinished (streaming) parts
         (unless unfinished-p
           (insert "\n"))
@@ -575,14 +594,13 @@ The body shows the full prompt text and is collapsed by default."
               (insert "\n"))
             ;; Body: full prompt text with markdown rendering
             (when (and prompt (stringp prompt) (not (string-empty-p prompt)))
-              (let ((body-start (point))
-                    (body (string-join (string-lines prompt) "\n")))
-                (insert (propertize body 'face 'default))
-                (insert "\n")
-                ;; Prompt text is prose; the header above it is chrome and
-                ;; keeps the bare stripe.
-                (put-text-property body-start (point) 'line-prefix
-                                   (opencode--prose-prefix block-face))
+              ;; Prompt text is prose; the header above it is chrome and
+              ;; keeps the bare stripe.
+              (let ((body-start
+                     (car (opencode-chat--emit
+                           (concat (string-join (string-lines prompt) "\n") "\n")
+                           'default
+                           (opencode--prose-prefix block-face)))))
                 (opencode-markdown-mark-region body-start (point)))))))
     ;; Collapse by default
     (when section-ov
@@ -748,24 +766,16 @@ Uses assistant block face for left border."
   "Insert streaming delta TEXT for FIELD type.
 Each line gets assistant-body (or reasoning) face, a prose line-prefix
 with opencode-assistant-block, read-only, and keymap.
-Uses `split-string' instead of `string-lines' to preserve trailing newlines
-in deltas (e.g. \"Hello\\n\" must insert the newline so the next delta
-starts on a line of its own)."
+TEXT is inserted verbatim so a trailing newline survives (e.g. a
+\"Hello\\n\" delta must keep the newline so the next delta starts on a
+line of its own)."
   (let* ((inhibit-read-only t)
          (body-face (if (string= field "reasoning")
                         'opencode-reasoning
                       'opencode-assistant-body))
          (stripe (opencode--prose-prefix 'opencode-assistant-block))
-         (lines (split-string text "\n"))
-         (num-lines (length lines))
          (region-start (point)))
-    (cl-loop for line in lines
-             for i from 0
-             do
-             (insert (propertize line 'face body-face))
-             ;; Insert newline between lines (not after the last one)
-             (when (< i (1- num-lines))
-               (insert "\n")))
+    (opencode-chat--emit text body-face)
     ;; Apply all shared properties once over the entire inserted region
     (opencode-chat--apply-message-props region-start (point)
                                         (list 'line-prefix stripe))

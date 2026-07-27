@@ -145,7 +145,34 @@ span about to be fontified."
         (setq ok nil))
       ok)))
 
+(defvar opencode-markdown--props-cache (make-hash-table :test 'equal)
+  "Cache of `opencode-markdown--compute-props' results, keyed by span text.
+
+A full re-render erases the transcript and re-marks every span, so
+`jit-lock' re-parses text that did not change --- the same characters
+producing the same answer at roughly 29ms per 1.4KB span, for every
+visible chunk, on every structural refresh.  The parse is a pure
+function of the span text and the glyph option, so it is cached.")
+
+(defconst opencode-markdown--props-cache-limit 256
+  "Entries kept in `opencode-markdown--props-cache' before it is cleared.
+A flat cap rather than an LRU: entries are cheap, the working set is
+whatever is on screen, and dropping everything occasionally costs one
+re-parse of the visible spans.")
+
 (defun opencode-markdown--collect-props (text)
+  "Return the properties to copy for TEXT, computing them only if unseen.
+See `opencode-markdown--compute-props' for what is computed."
+  (let ((key (cons opencode-markdown-substitute-glyphs text)))
+    (or (gethash key opencode-markdown--props-cache)
+        (progn
+          (when (> (hash-table-count opencode-markdown--props-cache)
+                   opencode-markdown--props-cache-limit)
+            (clrhash opencode-markdown--props-cache))
+          (puthash key (opencode-markdown--compute-props text)
+                   opencode-markdown--props-cache)))))
+
+(defun opencode-markdown--compute-props (text)
   "Fontify TEXT with `markdown-mode' and return the properties to copy.
 Each element is (BEG END FACE HIDDEN), with offsets zero-based relative
 to TEXT and HIDDEN non-nil when the span is markup to be hidden.
@@ -248,21 +275,20 @@ this once upstream parses the construct correctly."
       (when glyph
         (put-text-property b e 'display glyph)))))
 
-(defconst opencode-markdown--base-faces
-  '(opencode-assistant-body opencode-user-body opencode-reasoning default)
-  "Faces the renderer applies at insertion time, which fontification must keep.
-Everything else inside a marked span is owned by fontification and is
-removed before a re-fontify.  This is a keep-list rather than a
-remove-list because `markdown-mode' can emit faces this file never names
---- link, URL and table faces, plus whatever `font-lock-*' faces a code
-block's own major mode produces --- and all of them have to be cleared
-for a re-run to be idempotent.")
+;; What fontification must preserve is the face the renderer applied at
+;; insertion time.  That used to be recognised by name, from a list of known
+;; base faces kept in sync by hand -- adding a base face to the renderer and
+;; forgetting the list would have silently stripped it.  The renderer now
+;; records its own face in `opencode-base-face' (see `opencode-chat--emit'),
+;; so the distinction is mechanical: restore that, drop everything else.
 
 (defun opencode-markdown--strip-faces (start end)
   "Remove fontification faces from START..END for idempotent re-fontification.
-Preserves the base faces listed in `opencode-markdown--base-faces' that
-were set during insertion.  Also removes the `invisible' property with
-value `opencode-md'.
+Restores the face the renderer recorded in `opencode-base-face' at
+insertion time and drops everything else, so faces this file never names
+--- link, URL and table faces, and whatever `font-lock-*' faces a code
+block's own major mode produced --- all clear.  Also removes the
+`invisible' property with value `opencode-md'.
 
 `jit-lock' re-runs the worker over text it has already fontified, and
 `add-face-text-property' accumulates, so without this a header would
@@ -270,21 +296,18 @@ compound its :height on every pass."
   (let ((pos start))
     (while (< pos end)
       (let* ((face-val (get-text-property pos 'face))
-             (next (or (next-single-property-change pos 'face nil end) end)))
+             (base (get-text-property pos 'opencode-base-face))
+             (next (min (or (next-single-property-change pos 'face nil end) end)
+                        (or (next-single-property-change
+                             pos 'opencode-base-face nil end)
+                            end))))
         (when face-val
-          (let* ((face-list (if (listp face-val) face-val (list face-val)))
-                 (clean (seq-filter (lambda (f)
-                                      (memq f opencode-markdown--base-faces))
-                                    face-list)))
-            (cond
-             ((null clean)
-              (remove-text-properties pos next '(face nil)))
-             ((equal clean (ensure-list face-val))
-              nil)                      ; unchanged, skip
-             ((cdr clean)
-              (put-text-property pos next 'face clean))
-             (t
-              (put-text-property pos next 'face (car clean))))))
+          (cond
+           ((null base)
+            (remove-text-properties pos next '(face nil)))
+           ((equal base face-val) nil)  ; already just the base face
+           (t
+            (put-text-property pos next 'face base))))
         (setq pos next)))
     ;; Also strip markdown invisibility
     (let ((pos start))

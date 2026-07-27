@@ -169,12 +169,20 @@ Without this, raw ## prefixes clutter display — headers show ugly syntax marke
 ;;; --- C. Face Composition ---
 
 (ert-deftest opencode-markdown-face-composition ()
-  "Verify fontification composes with existing face via `add-face-text-property'.
-Without this, markdown faces override base faces — assistant body styling lost on formatted text."
+  "Verify fontification composes with the face the renderer recorded.
+Without this, markdown faces override base faces — assistant body styling lost on formatted text.
+
+The base face must be recorded in `opencode-base-face', which is what
+`opencode-chat--emit' does at insertion time.  Stripping keys off that
+property rather than off a list of known face names, so a face applied
+without recording it is treated as fontification's own and removed --- as
+`opencode-markdown-strip-drops-unrecorded-face' asserts."
   (with-temp-buffer
     (insert "Hello **world** there")
-    ;; Pre-apply a base face to the entire region
+    ;; Pre-apply a base face the way the renderer does.
     (add-face-text-property (point-min) (point-max) 'opencode-assistant-body)
+    (put-text-property (point-min) (point-max)
+                       'opencode-base-face 'opencode-assistant-body)
     (opencode-markdown-fontify-region (point-min) (point-max))
     ;; "world" should have BOTH faces
     (goto-char (point-min))
@@ -441,6 +449,35 @@ The hand-rolled matchers this replaced had no table support at all."
     (opencode-markdown-jit-fontify (point-min) (point-max))
     (should (opencode-markdown-test--has-face-p "Feature" 'opencode-md-table))
     (should (opencode-markdown-test--has-face-p "tables" 'opencode-md-table))))
+
+(ert-deftest opencode-markdown-strip-drops-unrecorded-face ()
+  "Verify a face applied without `opencode-base-face' is stripped.
+This is the contract that replaced a hand-maintained list of the
+renderer's face names: fontification keeps exactly what the renderer
+recorded and clears everything else, so markdown-mode faces this package
+never names still clear on a re-fontify."
+  (with-temp-buffer
+    (insert "Hello **world** there")
+    (add-face-text-property (point-min) (point-max) 'opencode-assistant-body)
+    (opencode-markdown-fontify-region (point-min) (point-max))
+    (goto-char (point-min))
+    (search-forward "there")
+    (should (opencode-markdown-test--no-face-p "there" 'opencode-assistant-body))))
+
+(ert-deftest opencode-markdown-props-cache-reuses-parse ()
+  "Verify an identical span is parsed once and served from cache.
+A structural re-render re-marks every span, so `jit-lock' re-parses text
+that did not change; the parse is a pure function of the span and the
+glyph option, so it is cached."
+  (clrhash opencode-markdown--props-cache)
+  (let ((text "Hello **world** there"))
+    (should (equal (opencode-markdown--collect-props text)
+                   (opencode-markdown--collect-props text)))
+    (should (= 1 (hash-table-count opencode-markdown--props-cache)))
+    ;; The glyph option changes the answer, so it is part of the key.
+    (let ((opencode-markdown-substitute-glyphs t))
+      (opencode-markdown--collect-props text))
+    (should (= 2 (hash-table-count opencode-markdown--props-cache)))))
 
 (provide 'opencode-markdown-test)
 ;;; opencode-markdown-test.el ends here
