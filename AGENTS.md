@@ -40,7 +40,7 @@ emacs -Q -batch -L . -L test -l test/test-helper.el \
   -eval '(ert-run-tests-batch-and-exit "opencode-chat-render")'
 ```
 
-**Verification rule**: `make compile` MUST produce zero warnings (ignore the pre-existing `opencode-pkg.el` no-lexical-binding warning). Run before any commit.
+**Verification rule**: `make compile` MUST produce zero warnings. Run before any commit.
 
 ## Architecture
 
