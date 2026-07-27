@@ -14,6 +14,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'seq)
 (require 'opencode-api)
 (require 'opencode-api-cache)
 
@@ -70,14 +71,53 @@ with `opencode-backend-register' before use."
 (defvar opencode-backend--registry (make-hash-table :test 'eq)
   "Registered backend objects keyed by backend name symbol.")
 
+(defconst opencode-backend-required-ops
+  '(list-sessions get-session-sync get-messages-sync send-prompt abort-session)
+  "Operations a backend must implement to be usable at all.
+
+Deliberately the floor for working with an *existing* session, not the
+full surface.  `create-session' is not on it because the `pi' backend
+does not implement it: making it required would stop that backend
+loading over one gap, when everything else about it works.  Starting a
+new session is exactly the kind of optional operation callers should
+probe for and hide when absent.
+
+Everything else is optional and should be probed with
+`opencode-backend-supports-p' rather than assumed.  Dispatch resolves a
+function slot at call time and errors when it is nil, so an unimplemented
+operation used to surface as a runtime error at the moment a user reached
+that feature -- with no way to ask beforehand whether it was there.  This
+list is the floor; the check runs at registration so a backend missing
+one fails loudly at load rather than mid-session.")
+
+(defun opencode-backend-supports-p (operation &optional backend)
+  "Return non-nil if BACKEND implements OPERATION.
+
+OPERATION is the bare name, e.g. `get-todos'.  Answers from the function
+slot itself, so it cannot disagree with what the backend actually does --
+unlike the `capabilities' list, which is declared separately and can
+drift from the implementation.  Callers offering an optional feature
+should probe this and hide the feature when it is absent, instead of
+calling and letting the error reach the user."
+  (when-let* ((b (opencode-backend--resolve backend))
+              (accessor (intern-soft
+                         (format "opencode-backend-%s-fn" operation))))
+    (and (fboundp accessor) (funcall accessor b) t)))
+
 (defun opencode-backend-register (backend)
   "Register BACKEND and return it.
-BACKEND must be an `opencode-backend' struct with a non-nil `name' slot."
+BACKEND must be an `opencode-backend' struct with a non-nil `name' slot
+and must implement every operation in `opencode-backend-required-ops'."
   (unless (opencode-backend-p backend)
     (error "Not an opencode-backend: %S" backend))
   (let ((name (opencode-backend-name backend)))
     (unless (symbolp name)
       (error "Backend name must be a symbol: %S" name))
+    (when-let* ((missing (seq-remove
+                          (lambda (op) (opencode-backend-supports-p op backend))
+                          opencode-backend-required-ops)))
+      (error "Backend %S is missing required operations: %s"
+             name (mapconcat #'symbol-name missing ", ")))
     (puthash name backend opencode-backend--registry)
     backend))
 
@@ -100,8 +140,10 @@ BACKEND must be an `opencode-backend' struct with a non-nil `name' slot."
    (t (error "Invalid backend: %S" backend))))
 
 (defun opencode-backend--missing (backend operation)
-  "Signal that BACKEND does not implement OPERATION."
-  (error "Backend %S does not implement %S"
+  "Signal that BACKEND does not implement OPERATION.
+Reaching here means a caller invoked an optional operation without
+probing `opencode-backend-supports-p' first."
+  (error "Backend %S does not implement %S (probe `opencode-backend-supports-p')"
          (and backend (opencode-backend-name backend)) operation))
 
 (defun opencode-backend--call (backend operation accessor &rest args)
