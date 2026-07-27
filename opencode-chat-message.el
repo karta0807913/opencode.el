@@ -985,13 +985,14 @@ If it exists, updates header/footer in-place."
 
 (defun opencode-chat-message-delete (msg-id)
   "Delete message MSG-ID from buffer and store.
-Frees all part markers, removes the overlay, deletes the buffer region."
+Frees all part markers, removes the overlay, deletes the buffer region.
+
+Goes through `opencode-chat--delete-section' rather than deleting the
+region directly, so the public delete gets the same guard as every other
+section removal: a message overlay that has drifted into the input area
+must not take the user's unsent text with it."
   (when-let* ((ov (opencode-chat--store-find-overlay msg-id)))
-    (let ((inhibit-read-only t)
-          (buffer-undo-list t))
-      (when (overlay-buffer ov)
-        (delete-region (overlay-start ov) (overlay-end ov))
-        (delete-overlay ov))))
+    (opencode-chat--delete-section ov))
   ;; Clean store entry (frees markers)
   (when-let* ((entry (opencode-chat--store-get msg-id)))
     (when-let* ((parts (plist-get entry :parts)))
@@ -1130,9 +1131,8 @@ For assistant messages with `:completed' time, also re-renders the
 footer line (token counts + duration)."
   (when-let* ((ov (opencode-chat--store-find-overlay msg-id))
               ((overlay-buffer ov)))
-    (let* ((inhibit-read-only t)
-           (buffer-undo-list t)
-           (role (plist-get info :role))
+    (opencode-chat--in-transcript
+     (let* ((role (plist-get info :role))
            (start (overlay-start ov))
            (end (overlay-end ov)))
       (when (and start end (< start end))
@@ -1214,7 +1214,7 @@ footer line (token counts + duration)."
                                       'face 'opencode-message-footer-line))
                   (insert "\n"))
                 (opencode-chat--apply-message-props footer-start (point))))))
-        t))))
+        t)))))
 
 
 

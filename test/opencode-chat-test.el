@@ -1600,6 +1600,25 @@ and no save/restore step is involved in it surviving."
                                  'opencode-test-witness))
       (should (string-match-p "redrawn transcript" (buffer-string))))))
 
+(ert-deftest opencode-chat-message-delete-inherits-input-guard ()
+  "Verify the public message delete goes through the section primitive.
+It used to delete the region directly, so it was the one removal path
+without the guard — a message overlay reaching into the input area would
+have taken the user's unsent text with it."
+  (opencode-test-with-temp-buffer "*test-chat-msg-del-guard*"
+    (opencode-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "transcript\n")
+      (opencode-chat--set-input-start (copy-marker (point) nil))
+      (insert "user is typing")
+      ;; A message overlay that wrongly spans into the input area.
+      (let ((ov (make-overlay (point-min) (point-max))))
+        (puthash "msg_guard" (list :overlay ov
+                                   :parts (make-hash-table :test 'equal))
+                 (opencode-chat--store))
+        (should-error (opencode-chat-message-delete "msg_guard"))
+        (should (string-match-p "user is typing" (buffer-string)))))))
+
 ;;; --- Delta helper (insert-streaming-delta) ---
 
 (ert-deftest opencode-chat-insert-delta-single-line ()
