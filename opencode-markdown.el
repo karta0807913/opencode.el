@@ -5,21 +5,22 @@
 
 ;;; Commentary:
 
-;; Markdown fontification engine for assistant text parts.
-;; Applies faces and hides markers for inline markdown elements
-;; and fenced code blocks with optional syntax highlighting.
-;; Called after text part rendering (not during streaming).
+;; Markdown fontification for assistant text parts.
 ;;
-;; Supported elements: bold, italic, bold-italic, inline code,
-;; headers (H1-H4), blockquotes, unordered lists, horizontal rules,
-;; fenced code blocks (```lang ... ```).
+;; Parsing is `markdown-mode''s; this file is the bridge.  It decides which
+;; spans of the chat buffer are markdown, drives them through `jit-lock', and
+;; translates `markdown-mode''s faces and markup-hiding onto this package's
+;; own faces and invisibility spec.
 ;;
-;; IMPORTANT: Each rendered line starts with " " (one space) because
-;; `opencode-chat--render-text-part' does (concat " " line).  All
-;; regexes account for this leading space.
+;; IMPORTANT: Rendered prose lines start at column 0.  The one-column
+;; gutter is a `line-prefix' display property applied by
+;; `opencode--prose-prefix', not a character in the buffer, so a span
+;; handed to `markdown-mode' is real markdown with no leading indent.
 
 ;;; Code:
 
+(require 'cl-lib)
+(require 'markdown-mode)
 (require 'opencode-faces)
 
 ;;; --- Customization ---
@@ -30,8 +31,9 @@
   :group 'opencode)
 
 (defcustom opencode-markdown-max-fontified-code-blocks 20
-  "Maximum number of code blocks to syntax-highlight per region.
-Blocks beyond this limit get background face only, no syntax highlighting."
+  "Maximum number of code blocks to syntax-highlight per fontified span.
+Spans with more blocks than this get the code-block face only, no
+per-language syntax highlighting."
   :type 'integer
   :group 'opencode)
 
@@ -43,347 +45,292 @@ Set to nil to disable the limit."
   :type '(choice integer (const nil))
   :group 'opencode)
 
-(defcustom opencode-markdown-fontify-max-size 32768
-  "Maximum region size (chars) for synchronous markdown fontification.
-Regions larger than this are deferred to an idle timer to avoid blocking.
-Set to nil to always fontify synchronously."
-  :type '(choice integer (const nil))
+(defcustom opencode-markdown-substitute-glyphs nil
+  "When non-nil, keep `markdown-mode''s glyph substitutions.
+`markdown-mode' draws a list bullet as ● and a blockquote marker as ▌ by
+replacing the character with a `display' property.  This is off by
+default so the transcript renders the literal markers it always has;
+enable it to get markdown-mode's own appearance."
+  :type 'boolean
   :group 'opencode)
 
-;;; --- Internal: Bold-Italic ---
+(defvar opencode-markdown-fontify-max-size 32768
+  "Obsolete.  Region size that used to trigger deferred fontification.
+`jit-lock' now decides what to fontify and when, so there is no size at
+which a region is handled differently.")
+(make-obsolete-variable 'opencode-markdown-fontify-max-size
+                        "fontification is driven by jit-lock." "0.2.0")
 
-(defun opencode-markdown--fontify-bold-italic (start end)
-  "Apply bold-italic face and hide markers in region START to END.
-Matches ***text*** patterns.  Must run before bold and italic."
+;;; --- Internal: markdown-mode bridge ---
+
+;; Parsing is delegated to `markdown-mode' rather than hand-rolled here.  The
+;; regexes this replaced were line-anchored and context-free, so they could not
+;; see setext headings, ordered lists, links, tables, reference definitions or
+;; escaped markers, and they mis-parsed emphasis inside words.  `markdown-mode'
+;; is already a declared dependency of this package.
+;;
+;; It cannot simply be turned on in the chat buffer: it is a major mode, and its
+;; keywords need its own syntax table, `syntax-propertize-function' and buffer
+;; locals, none of which can coexist with the chat buffer's read-only
+;; transcript, input area and keymaps.  So the span is fontified in a temp
+;; buffer and the resulting properties are copied back --- the same technique
+;; the old code already used for syntax-highlighting fenced code blocks, just
+;; applied to the whole span instead of only the code.
+
+(defconst opencode-markdown--face-map
+  '((markdown-header-face-1     . opencode-md-header-1)
+    (markdown-header-face-2     . opencode-md-header-2)
+    (markdown-header-face-3     . opencode-md-header-3)
+    (markdown-header-face-4     . opencode-md-header-4)
+    (markdown-header-face-5     . opencode-md-header-4)
+    (markdown-header-face-6     . opencode-md-header-4)
+    (markdown-bold-face         . opencode-md-bold)
+    (markdown-italic-face       . opencode-md-italic)
+    (markdown-inline-code-face  . opencode-md-inline-code)
+    (markdown-code-face         . opencode-md-code-block)
+    (markdown-pre-face          . opencode-md-code-block)
+    (markdown-language-keyword-face . opencode-md-code-block-header)
+    (markdown-markup-face       . opencode-md-marker)
+    (markdown-header-delimiter-face . opencode-md-marker)
+    (markdown-header-rule-face  . opencode-md-hr)
+    (markdown-hr-face           . opencode-md-hr)
+    (markdown-list-face         . opencode-md-list-marker)
+    (markdown-blockquote-face   . opencode-md-blockquote)
+    (markdown-link-face         . opencode-md-link)
+    (markdown-missing-link-face . opencode-md-link)
+    (markdown-url-face          . opencode-md-url)
+    (markdown-table-face        . opencode-md-table))
+  "Map `markdown-mode' faces onto this package's own.
+Keeping the `opencode-md-*' faces means themes and user customisation
+that already target them keep working, and the visible result of the
+switch is limited to what `markdown-mode' parses differently.  The
+`opencode-md-*' faces themselves inherit from `markdown-mode''s, so a
+theme still reaches them; see the commentary in `opencode-faces'.  Only
+the `font-lock-*' faces produced inside natively highlighted code blocks
+are passed through unchanged, since those belong to the code's own major
+mode rather than to markdown.")
+
+(defun opencode-markdown--map-face (face)
+  "Translate FACE, a face symbol or list, through `opencode-markdown--face-map'."
+  (cond
+   ((symbolp face) (or (cdr (assq face opencode-markdown--face-map)) face))
+   ((listp face) (mapcar #'opencode-markdown--map-face face))
+   (t face)))
+
+(defconst opencode-markdown--fence-re "^```\\w*$"
+  "Regexp matching an opening or closing fenced code block line.")
+
+(defun opencode-markdown--worth-highlighting-p ()
+  "Return non-nil if the current buffer's code blocks are worth highlighting.
+Applies `opencode-markdown-max-fontified-code-blocks' and
+`opencode-markdown-max-code-block-lines' to the temp buffer holding the
+span about to be fontified."
   (save-excursion
-    (goto-char start)
-    (while (re-search-forward "\\*\\*\\*\\([^*]+?\\)\\*\\*\\*" end t)
-      ;; Content face
-      (add-face-text-property (match-beginning 1) (match-end 1)
-                              'opencode-md-bold-italic )
-      ;; Opening *** markers
-      (add-face-text-property (match-beginning 0) (match-beginning 1)
-                              'opencode-md-marker )
-      (put-text-property (match-beginning 0) (match-beginning 1)
-                         'invisible 'opencode-md)
-      ;; Closing *** markers
-      (add-face-text-property (match-end 1) (match-end 0)
-                              'opencode-md-marker )
-      (put-text-property (match-end 1) (match-end 0)
-                         'invisible 'opencode-md))))
+    (goto-char (point-min))
+    (let ((blocks 0)
+          (longest 0)
+          (open nil)
+          (ok t))
+      (while (re-search-forward opencode-markdown--fence-re nil t)
+        (if open
+            (progn
+              (setq blocks (1+ blocks))
+              (setq longest (max longest (count-lines open (point))))
+              (setq open nil))
+          (setq open (point))))
+      (when (> blocks opencode-markdown-max-fontified-code-blocks)
+        (setq ok nil))
+      (when (and opencode-markdown-max-code-block-lines
+                 (> longest opencode-markdown-max-code-block-lines))
+        (setq ok nil))
+      ok)))
 
-;;; --- Internal: Bold ---
+(defvar opencode-markdown--props-cache (make-hash-table :test 'equal)
+  "Cache of `opencode-markdown--compute-props' results, keyed by span text.
 
-(defun opencode-markdown--fontify-bold (start end)
-  "Apply bold face and hide markers in region START to END.
-Matches **text** patterns.  Must run after bold-italic."
-  (save-excursion
-    (goto-char start)
-    (while (re-search-forward "\\*\\*\\([^*]+?\\)\\*\\*" end t)
-      ;; Skip if already processed (part of ***...*** that was made invisible)
-      (unless (eq (get-text-property (match-beginning 0) 'invisible) 'opencode-md)
-        ;; Content face
-        (add-face-text-property (match-beginning 1) (match-end 1)
-                                'opencode-md-bold )
-        ;; Opening ** markers
-        (add-face-text-property (match-beginning 0) (match-beginning 1)
-                                'opencode-md-marker )
-        (put-text-property (match-beginning 0) (match-beginning 1)
-                           'invisible 'opencode-md)
-        ;; Closing ** markers
-        (add-face-text-property (match-end 1) (match-end 0)
-                                'opencode-md-marker )
-        (put-text-property (match-end 1) (match-end 0)
-                           'invisible 'opencode-md)))))
+A full re-render erases the transcript and re-marks every span, so
+`jit-lock' re-parses text that did not change --- the same characters
+producing the same answer at roughly 29ms per 1.4KB span, for every
+visible chunk, on every structural refresh.  The parse is a pure
+function of the span text and the glyph option, so it is cached.")
 
-;;; --- Internal: Italic ---
+(defconst opencode-markdown--props-cache-limit 256
+  "Entries kept in `opencode-markdown--props-cache' before it is cleared.
+A flat cap rather than an LRU: entries are cheap, the working set is
+whatever is on screen, and dropping everything occasionally costs one
+re-parse of the visible spans.")
 
-(defun opencode-markdown--fontify-italic (start end)
-  "Apply italic face and hide markers in region START to END.
-Matches *text* patterns (single star, not adjacent to another star).
-Must run after bold-italic and bold to avoid conflicts."
-  (save-excursion
-    (goto-char start)
-    (while (re-search-forward "\\(?:^\\|[^*\\\\]\\)\\(\\*\\)\\([^*\n]+?\\)\\(\\*\\)\\(?:[^*]\\|$\\)" end t)
-      ;; Skip if the opening * is already invisible (part of ** or ***)
-      (unless (eq (get-text-property (match-beginning 1) 'invisible) 'opencode-md)
-        ;; Content face
-        (add-face-text-property (match-beginning 2) (match-end 2)
-                                'opencode-md-italic )
-        ;; Opening * marker
-        (add-face-text-property (match-beginning 1) (match-end 1)
-                                'opencode-md-marker )
-        (put-text-property (match-beginning 1) (match-end 1)
-                           'invisible 'opencode-md)
-        ;; Closing * marker
-        (add-face-text-property (match-beginning 3) (match-end 3)
-                                'opencode-md-marker )
-        (put-text-property (match-beginning 3) (match-end 3)
-                           'invisible 'opencode-md)))))
+(defun opencode-markdown--collect-props (text)
+  "Return the properties to copy for TEXT, computing them only if unseen.
+See `opencode-markdown--compute-props' for what is computed."
+  (let ((key (cons opencode-markdown-substitute-glyphs text)))
+    (or (gethash key opencode-markdown--props-cache)
+        (progn
+          (when (> (hash-table-count opencode-markdown--props-cache)
+                   opencode-markdown--props-cache-limit)
+            (clrhash opencode-markdown--props-cache))
+          (puthash key (opencode-markdown--compute-props text)
+                   opencode-markdown--props-cache)))))
 
-;;; --- Internal: Inline Code ---
+(defun opencode-markdown--compute-props (text)
+  "Fontify TEXT with `markdown-mode' and return the properties to copy.
+Each element is (BEG END FACE HIDDEN), with offsets zero-based relative
+to TEXT and HIDDEN non-nil when the span is markup to be hidden.
 
-(defun opencode-markdown--fontify-inline-code (start end)
-  "Apply inline code face and hide backtick markers in region START to END.
-Matches `code` patterns."
-  (save-excursion
-    (goto-char start)
-    (while (re-search-forward "\\(`\\)\\([^`\n]+?\\)\\(`\\)" end t)
-      ;; Content face
-      (add-face-text-property (match-beginning 2) (match-end 2)
-                              'opencode-md-inline-code )
-      ;; Opening backtick
-      (add-face-text-property (match-beginning 1) (match-end 1)
-                              'opencode-md-marker )
-      (put-text-property (match-beginning 1) (match-end 1)
-                         'invisible 'opencode-md)
-      ;; Closing backtick
-      (add-face-text-property (match-beginning 3) (match-end 3)
-                              'opencode-md-marker )
-      (put-text-property (match-beginning 3) (match-end 3)
-                         'invisible 'opencode-md))))
+`markdown-mode' hides markup two different ways --- an `invisible'
+property on most markers, and a `display' of the empty string on header
+delimiters --- and substitutes glyphs for others, rendering a list
+bullet as ● and a blockquote marker as ▌.  Both hiding mechanisms are
+normalised onto this package's single `opencode-md' invisibility spec;
+the glyph substitutions are deliberately dropped so the transcript keeps
+the appearance it has today."
+  (let ((props nil))
+    (with-temp-buffer
+      (insert text)
+      (delay-mode-hooks (markdown-mode))
+      (setq-local markdown-hide-markup t)
+      ;; Native code-block highlighting runs each block's own major mode over
+      ;; the block, which is by far the most expensive thing here.  The two
+      ;; limits below are the same guards the previous hand-rolled code
+      ;; applied; without them a single huge fence would be highlighted in
+      ;; full on the redisplay that first scrolls it into view.
+      (setq-local markdown-fontify-code-blocks-natively
+                  (opencode-markdown--worth-highlighting-p))
+      (font-lock-ensure)
+      (let ((pos (point-min)))
+        (while (< pos (point-max))
+          (let* ((next (or (next-property-change pos) (point-max)))
+                 (face (get-text-property pos 'face))
+                 (display (get-text-property pos 'display))
+                 (hidden (or (eq (get-text-property pos 'invisible) 'markdown-markup)
+                             (equal display ""))))
+            (when (or face hidden)
+              (push (list (1- pos) (1- next)
+                          (and face (opencode-markdown--map-face face))
+                          hidden
+                          ;; A non-empty display string is a glyph
+                          ;; substitution; empty means "hide", handled above.
+                          (and opencode-markdown-substitute-glyphs
+                               (stringp display)
+                               (not (string-empty-p display))
+                               display))
+                    props))
+            (setq pos next)))))
+    (opencode-markdown--hide-reference-definitions
+     text
+     (opencode-markdown--fix-bold-italic text (nreverse props)))))
 
-;;; --- Internal: Headers ---
+(defconst opencode-markdown--bold-italic-re
+  "\\(\\*\\*\\*\\)\\([^*\n]+\\)\\(\\*\\*\\*\\)"
+  "Regexp matching a ***bold italic*** span.")
 
-(defun opencode-markdown--fontify-headers (start end)
-  "Apply header faces and hide markers in region START to END.
-Matches # through #### headers.  Note: each line has a leading
-space from the renderer, so `# Title' appears as ` # Title'."
-  (save-excursion
-    (goto-char start)
-    (while (re-search-forward "^ \\(#\\{1,4\\}\\) +\\(.+\\)$" end t)
-      (let* ((hashes (match-string 1))
-             (level (length hashes))
-             (face (pcase level
-                     (1 'opencode-md-header-1)
-                     (2 'opencode-md-header-2)
-                     (3 'opencode-md-header-3)
-                     (_ 'opencode-md-header-4))))
-        ;; Apply header face to the text content
-        (add-face-text-property (match-beginning 2) (match-end 2)
-                                face )
-        ;; Hide the "# " marker (hashes + space after them)
-        (add-face-text-property (match-beginning 1)
-                                (match-beginning 2)
-                                'opencode-md-marker )
-        (put-text-property (match-beginning 1)
-                           (match-beginning 2)
-                           'invisible 'opencode-md)))))
+(defun opencode-markdown--fix-bold-italic (text props)
+  "Correct PROPS for ***bold italic*** spans in TEXT.
 
-;;; --- Internal: Blockquotes ---
+Workaround for markdown-mode 2.8-alpha, which mis-parses this construct:
+given `***word***' it hides the opening `**', applies bold to `*word'
+with the asterisk inside the emphasis, and leaves the closing `*'
+unstyled outside the span --- so the user sees stray asterisks.  Verified
+against a full `markdown-mode' buffer with its own font-lock, so it is
+upstream behaviour rather than an artefact of fontifying in a temp
+buffer.
 
-(defun opencode-markdown--fontify-blockquotes (start end)
-  "Apply blockquote face in region START to END.
-Matches `> text' patterns (with leading space from renderer)."
-  (save-excursion
-    (goto-char start)
-    (while (re-search-forward "^ \\(>\\) +\\(.+\\)$" end t)
-      ;; Apply blockquote face to the text content
-      (add-face-text-property (match-beginning 2) (match-end 2)
-                              'opencode-md-blockquote )
-      ;; Style the > marker
-      (add-face-text-property (match-beginning 1) (match-end 1)
-                              'opencode-md-marker ))))
-
-;;; --- Internal: Unordered Lists ---
-
-(defun opencode-markdown--fontify-lists (start end)
-  "Apply list marker face in region START to END.
-Matches `- item' and `* item' patterns (with leading space)."
-  (save-excursion
-    (goto-char start)
-    (while (re-search-forward "^ \\([*-]\\) +" end t)
-      ;; Only apply face to the marker character, not the content
-      (add-face-text-property (match-beginning 1) (match-end 1)
-                              'opencode-md-list-marker ))))
-
-;;; --- Internal: Horizontal Rules ---
-
-(defun opencode-markdown--fontify-hr (start end)
-  "Apply horizontal rule face in region START to END.
-Matches `---', `***', `___' patterns (with leading space)."
-  (save-excursion
-    (goto-char start)
-    (while (re-search-forward "^ \\([-*_]\\{3,\\}\\) *$" end t)
-      (add-face-text-property (match-beginning 1) (match-end 1)
-                              'opencode-md-hr ))))
-
-;;; --- Internal: Code Block Helpers ---
-(defconst opencode-markdown--lang-aliases
-  '(("elisp"      . "emacs-lisp")
-    ("emacs"       . "emacs-lisp")
-    ("lisp"        . "emacs-lisp")
-    ("bash"        . "sh")
-    ("shell"       . "sh")
-    ("zsh"         . "sh")
-    ("cpp"         . "c++")
-    ("js"          . "js")
-    ("javascript"  . "js")
-    ("ts"          . "typescript")
-    ("yml"         . "yaml")
-    ("golang"      . "go")
-    ("rs"          . "rust")
-    ("dockerfile"  . "dockerfile")
-    ("el"          . "emacs-lisp"))
-  "Alist mapping markdown language identifiers to Emacs mode stems.
-Each entry is (ALIAS . MODE-STEM) where MODE-STEM is tried as
-MODE-STEM-mode and MODE-STEM-ts-mode.")
-(defun opencode-markdown--lang-mode (lang)
-  "Return major mode function for LANG, or nil if not available.
-Consults `opencode-markdown--lang-aliases' to resolve common
-markdown language identifiers (elisp, bash, js, etc.) to their
-corresponding Emacs major mode."
-  (let* ((canonical (or (cdr (assoc (downcase lang)
-                                    opencode-markdown--lang-aliases))
-                        lang))
-         (mode-name (intern (concat canonical "-mode")))
-         (ts-mode-name (intern (concat canonical "-ts-mode"))))
-    (cond
-     ((fboundp mode-name) mode-name)
-     ((fboundp ts-mode-name) ts-mode-name)
-     (t nil))))
-
-(defun opencode-markdown--syntax-highlight (code lang code-start)
-  "Syntax-highlight CODE for LANG, copy faces to CODE-START.
-Skips if CODE exceeds `opencode-markdown-max-code-block-lines'."
-  (let ((mode (opencode-markdown--lang-mode lang)))
-    (when (and mode
-              ;; Skip expensive font-lock for very large code blocks
-              (or (null opencode-markdown-max-code-block-lines)
-                  (<= (cl-count ?\n code) opencode-markdown-max-code-block-lines)))
-      (condition-case err
-          (let ((props nil))
-            (with-temp-buffer
-              (insert code)
-              (delay-mode-hooks (funcall mode))
-              (font-lock-ensure)
-              ;; Collect face properties
-              (goto-char (point-min))
-              (let ((pos (point-min)))
-                (while (< pos (point-max))
-                  (let ((face (get-text-property pos 'face))
-                        (next (or (next-single-property-change pos 'face)
-                                  (point-max))))
-                    (when face
-                      (push (list (+ code-start (1- pos))
-                                  (+ code-start (1- next))
-                                  face)
-                            props))
-                    (setq pos next)))))
-            ;; Apply collected faces -- PREPEND (not append) so syntax
-            ;; highlighting foreground takes priority over the base
-            ;; opencode-assistant-body face which inherits default foreground.
-            (dolist (prop props)
-              (add-face-text-property (nth 0 prop) (nth 1 prop)
-                                      (nth 2 prop))))
-        (error (opencode--debug "opencode-markdown: syntax highlighting error: %S" err))))))
-
-;;; --- Internal: Fenced Code Blocks ---
-
-(defun opencode-markdown--fontify-code-blocks (start end)
-  "Fontify fenced code blocks in region START to END.
-Returns list of (BLOCK-START . BLOCK-END) ranges for exclusion.
-Each line has a leading space from the renderer, so fences
-appear as ` ```lang' and ` ```'."
+`***bold italic***' is common in model output, which is why this is
+corrected here instead of accepted.  Entries overlapping a matched span
+are dropped and replaced with the correct marker/content split.  Remove
+this once upstream parses the construct correctly."
   (let ((ranges nil)
-        (count 0))
-    (save-excursion
-      (goto-char start)
-      (while (re-search-forward "^ ```\\(\\w*\\)$" end t)
-        (let ((fence-open-start (match-beginning 0))
-              (fence-open-end (1+ (match-end 0)))  ; include newline
-              (lang (match-string 1)))
-          ;; Find matching closing fence
-          (when (re-search-forward "^ ```$" end t)
-            (let* ((fence-close-start (match-beginning 0))
-                   (fence-close-end (min (1+ (match-end 0)) end))
-                   (code-start fence-open-end)
-                   (code-end fence-close-start))
-              ;; Record range for exclusion
-              (push (cons fence-open-start fence-close-end) ranges)
-              ;; Background face on entire block (including fences)
-              (add-face-text-property fence-open-start fence-close-end
-                                      'opencode-md-code-block )
-              ;; Fence line faces and invisibility
-              (add-face-text-property fence-open-start fence-open-end
-                                      'opencode-md-code-block-header )
-              (put-text-property fence-open-start fence-open-end
-                                 'invisible 'opencode-md)
-              (add-face-text-property fence-close-start fence-close-end
-                                      'opencode-md-code-block-header )
-              (put-text-property fence-close-start fence-close-end
-                                 'invisible 'opencode-md)
-              ;; Syntax highlighting if language present and under limit
-              (setq count (1+ count))
-              (when (and (length> lang 0)
-                         (<= count opencode-markdown-max-fontified-code-blocks)
-                         (< code-start code-end))
-                (opencode-markdown--syntax-highlight
-                 (buffer-substring-no-properties code-start code-end)
-                 lang code-start)))))))
-    (nreverse ranges)))
+        (fixes nil)
+        (pos 0))
+    (while (string-match opencode-markdown--bold-italic-re text pos)
+      (let ((beg (match-beginning 0))
+            (end (match-end 0))
+            (cbeg (match-beginning 2))
+            (cend (match-end 2)))
+        (push (cons beg end) ranges)
+        (push (list beg cbeg 'opencode-md-marker t nil) fixes)
+        (push (list cbeg cend 'opencode-md-bold-italic nil nil) fixes)
+        (push (list cend end 'opencode-md-marker t nil) fixes)
+        (setq pos end)))
+    (if (null ranges)
+        props
+      (append
+       (seq-remove (lambda (entry)
+                     (let ((b (nth 0 entry)) (e (nth 1 entry)))
+                       (seq-some (lambda (r) (and (< b (cdr r)) (> e (car r))))
+                                 ranges)))
+                   props)
+       (nreverse fixes)))))
 
-;;; --- Internal: Region Exclusion Helpers ---
+(defun opencode-markdown--hide-reference-definitions (text props)
+  "Add PROPS entries hiding link reference definitions in TEXT.
 
-(defun opencode-markdown--safe-regions (start end exclude-ranges)
-  "Return list of (START . END) regions in START..END not in EXCLUDE-RANGES.
-EXCLUDE-RANGES is a list of (BEG . FIN) cons cells to skip."
-  (let ((regions nil)
-        (pos start))
-    (dolist (range (sort (copy-sequence exclude-ranges)
-                         (lambda (a b) (< (car a) (car b)))))
-      (when (< pos (car range))
-        (push (cons pos (car range)) regions))
-      (setq pos (max pos (cdr range))))
-    (when (< pos end)
-      (push (cons pos end) regions))
-    (nreverse regions)))
+A reference definition --- `[ref]: http://example.com' on its own line ---
+is markup, not content: it exists so `[text][ref]' elsewhere can resolve.
+`markdown-mode' leaves it visible because in a markdown *editor* you are
+meant to see and edit it, but in a transcript it is noise the model never
+meant the reader to see, and any model using reference-style links emits
+one line of it per link.
 
-(defun opencode-markdown--fontify-inline (start end exclude-ranges)
-  "Run inline fontification on START to END, skipping EXCLUDE-RANGES.
-EXCLUDE-RANGES is a list of (BEG . FIN) cons cells for code blocks."
-  (let ((regions (opencode-markdown--safe-regions start end exclude-ranges)))
-    (dolist (region regions)
-      (let ((rstart (car region))
-            (rend (cdr region)))
-        (opencode-markdown--fontify-bold-italic rstart rend)
-        (opencode-markdown--fontify-bold rstart rend)
-        (opencode-markdown--fontify-italic rstart rend)
-        (opencode-markdown--fontify-inline-code rstart rend)
-        (opencode-markdown--fontify-headers rstart rend)
-        (opencode-markdown--fontify-blockquotes rstart rend)
-        (opencode-markdown--fontify-lists rstart rend)
-        (opencode-markdown--fontify-hr rstart rend)))))
+The whole line is hidden, including its newline, so no blank line is left
+behind."
+  (let ((extra nil)
+        (pos 0))
+    (while (string-match markdown-regex-reference-definition text pos)
+      (let ((beg (match-beginning 0))
+            (end (min (length text) (1+ (match-end 0)))))
+        (push (list beg end 'opencode-md-marker t nil) extra)
+        (setq pos (max end (1+ beg)))))
+    (append props (nreverse extra))))
 
-(defconst opencode-markdown--faces
-  '(opencode-md-bold opencode-md-italic opencode-md-bold-italic
-    opencode-md-inline-code opencode-md-header-1 opencode-md-header-2
-    opencode-md-header-3 opencode-md-header-4 opencode-md-blockquote
-    opencode-md-list-marker opencode-md-hr opencode-md-marker
-    opencode-md-code-block opencode-md-code-block-header)
-  "All faces applied by markdown fontification.")
+(defun opencode-markdown--apply-props (start props)
+  "Apply PROPS, offsets relative to START, to the current buffer."
+  (pcase-dolist (`(,beg ,end ,face ,hidden ,glyph) props)
+    (let ((b (+ start beg))
+          (e (+ start end)))
+      ;; Apply each face separately, innermost last: passing the list to
+      ;; `add-face-text-property' would nest it inside the base face rather
+      ;; than extending the flat list the rest of this package expects.
+      (dolist (f (reverse (ensure-list face)))
+        (when f (add-face-text-property b e f)))
+      (when hidden
+        (put-text-property b e 'invisible 'opencode-md))
+      (when glyph
+        (put-text-property b e 'display glyph)))))
+
+;; What fontification must preserve is the face the renderer applied at
+;; insertion time.  That used to be recognised by name, from a list of known
+;; base faces kept in sync by hand -- adding a base face to the renderer and
+;; forgetting the list would have silently stripped it.  The renderer now
+;; records its own face in `opencode-base-face' (see `opencode-chat--emit'),
+;; so the distinction is mechanical: restore that, drop everything else.
 
 (defun opencode-markdown--strip-faces (start end)
-  "Remove markdown faces from START..END for idempotent re-fontification.
-Preserves base faces (e.g. `opencode-assistant-body') set during insertion.
-Also removes `invisible' property with value `opencode-md'."
+  "Remove fontification faces from START..END for idempotent re-fontification.
+Restores the face the renderer recorded in `opencode-base-face' at
+insertion time and drops everything else, so faces this file never names
+--- link, URL and table faces, and whatever `font-lock-*' faces a code
+block's own major mode produced --- all clear.  Also removes the
+`invisible' property with value `opencode-md'.
+
+`jit-lock' re-runs the worker over text it has already fontified, and
+`add-face-text-property' accumulates, so without this a header would
+compound its :height on every pass."
   (let ((pos start))
     (while (< pos end)
       (let* ((face-val (get-text-property pos 'face))
-             (next (or (next-single-property-change pos 'face nil end) end)))
+             (base (get-text-property pos 'opencode-base-face))
+             (next (min (or (next-single-property-change pos 'face nil end) end)
+                        (or (next-single-property-change
+                             pos 'opencode-base-face nil end)
+                            end))))
         (when face-val
-          (let* ((face-list (if (listp face-val) (copy-sequence face-val) (list face-val)))
-                 (clean (seq-remove (lambda (f) (memq f opencode-markdown--faces))
-                                    face-list)))
-            (cond
-             ((null clean)
-              (remove-text-properties pos next '(face nil)))
-             ((equal clean (ensure-list face-val))
-              nil)  ; unchanged, skip
-             ((cdr clean)
-              (put-text-property pos next 'face clean))
-             (t
-              (put-text-property pos next 'face (car clean))))))
+          (cond
+           ((null base)
+            (remove-text-properties pos next '(face nil)))
+           ((equal base face-val) nil)  ; already just the base face
+           (t
+            (put-text-property pos next 'face base))))
         (setq pos next)))
     ;; Also strip markdown invisibility
     (let ((pos start))
@@ -391,49 +338,136 @@ Also removes `invisible' property with value `opencode-md'."
         (let ((next (or (next-single-property-change pos 'invisible nil end) end)))
           (when (eq (get-text-property pos 'invisible) 'opencode-md)
             (remove-text-properties pos next '(invisible nil)))
-          (setq pos next))))))
+          (setq pos next))))
+    ;; Glyph substitutions are ours too; leaving them behind would strand a
+    ;; ● in the buffer after `opencode-markdown-substitute-glyphs' is turned
+    ;; off, since nothing else would ever clear it.
+    (when opencode-markdown-substitute-glyphs
+      (remove-text-properties start end '(display nil)))))
+
+;;; --- Internal: jit-lock integration ---
+
+;; Markdown fontification is driven by `jit-lock', not by explicit calls from
+;; the renderer.  The renderer marks the spans it wants treated as markdown
+;; with the `opencode-markdown' text property; jit-lock then calls
+;; `opencode-markdown-jit-fontify' for whatever part of the buffer is about to
+;; be displayed, and re-calls it after a change invalidates a span.
+;;
+;; This replaces a hand-rolled idle timer that captured region bounds and
+;; fontified them ~0.2s later.  That design had to solve, badly, three problems
+;; jit-lock already solves: positions drifting while SSE deltas insert into the
+;; buffer before the timer fires, redundant passes queued once per delta, and
+;; fontifying transcript that the user cannot see.  Nothing crosses a timer
+;; here, so none of them can recur.
+
+(defun opencode-markdown-mark-region (start end)
+  "Mark START..END as markdown for `jit-lock' to fontify later.
+Called by the renderer in place of fontifying inline.  Marking is O(1)
+in the size of the span and defers all matching work to the point where
+the text is actually about to be displayed."
+  (put-text-property start end 'opencode-markdown t)
+  ;; A freshly marked span has never been through `jit-lock'; clearing
+  ;; `fontified' is what makes it ask us about this text on next redisplay.
+  (put-text-property start end 'fontified nil))
+
+(defun opencode-markdown--run-bounds (pos limit)
+  "Return (RUN-START . RUN-END) of the marked run covering POS, or nil.
+LIMIT bounds the forward search.  A run is a maximal span carrying a
+non-nil `opencode-markdown' property."
+  (when (get-text-property pos 'opencode-markdown)
+    (cons (or (previous-single-property-change (1+ pos) 'opencode-markdown)
+              (point-min))
+          (or (next-single-property-change pos 'opencode-markdown nil limit)
+              limit))))
+
+(defun opencode-markdown--widen-to-fences (run-start run-end start end)
+  "Widen START..END so no fenced code block is cut in half.
+Bounded by RUN-START..RUN-END.  Fences are the only construct here that
+spans lines, so everything else needs no more than whole-line bounds.
+Widening to the enclosing fence rather than to the whole run is what
+keeps a large message lazy: only the fences actually on screen are
+processed."
+  (save-excursion
+    (let ((beg (max run-start (progn (goto-char start) (pos-bol))))
+          (fin (min run-end (progn (goto-char end) (pos-bol 2))))
+          (open nil))
+      ;; Odd number of fences between the run start and BEG means BEG is
+      ;; inside a block; rewind to that block's opening fence.
+      (goto-char run-start)
+      (while (re-search-forward opencode-markdown--fence-re beg t)
+        (setq open (unless open (match-beginning 0))))
+      (when open (setq beg open))
+      ;; Likewise, a fence left open at FIN must be followed to its close.
+      (setq open nil)
+      (goto-char beg)
+      (while (re-search-forward opencode-markdown--fence-re fin t)
+        (setq open (unless open (match-beginning 0))))
+      (when open
+        (goto-char fin)
+        (setq fin (if (re-search-forward opencode-markdown--fence-re run-end t)
+                      (min run-end (1+ (match-end 0)))
+                    run-end)))
+      (cons beg fin))))
+
+(defun opencode-markdown-jit-fontify (start end)
+  "Fontify marked markdown spans overlapping START..END.
+The `jit-lock' worker installed by `opencode-markdown-setup'.  Spans the
+renderer never marked (tool output, headers, footers) are skipped, so
+markdown syntax appearing in them is left alone."
+  (when opencode-markdown-fontify-enabled
+    (let ((pos start)
+          (limit (point-max)))
+      (while (< pos end)
+        (if-let* ((run (opencode-markdown--run-bounds pos limit)))
+            (let ((bounds (opencode-markdown--widen-to-fences
+                           (car run) (cdr run) pos (min end (cdr run)))))
+              (opencode-markdown--fontify-region-impl (car bounds) (cdr bounds))
+              ;; Tell jit-lock about text we fontified beyond what it asked
+              ;; for, so widening does not cost a second pass over the same
+              ;; fence when the next chunk scrolls in.
+              (put-text-property (car bounds) (cdr bounds) 'fontified t)
+              (setq pos (max (cdr bounds) (1+ pos))))
+          (setq pos (or (next-single-property-change pos 'opencode-markdown nil end)
+                        end)))))))
+
+(defun opencode-markdown-setup ()
+  "Install markdown fontification in the current buffer via `jit-lock'."
+  (jit-lock-register #'opencode-markdown-jit-fontify))
 
 ;;; --- Public API ---
 
 (defun opencode-markdown-fontify-region (start end)
-  "Fontify markdown elements in region START to END.
+  "Fontify markdown elements in region START to END, synchronously.
 Idempotent: strips any previously-applied markdown faces before
 re-applying, so calling this multiple times on the same region
 does not cause face accumulation (e.g. compounding :height).
 Processes fenced code blocks first (with syntax highlighting),
 then inline markdown on non-code-block regions.
-For regions exceeding `opencode-markdown-fontify-max-size' characters,
-fontification is deferred to an idle timer to avoid blocking.
+
+In the chat buffer, fontification is driven by `jit-lock' via
+`opencode-markdown-mark-region' instead; this entry point remains for
+callers that need a region fontified right now regardless of what is
+on screen.
   code-blocks (first, returns exclusion ranges) ->
   bold-italic -> bold -> italic -> inline-code ->
   headers -> blockquotes -> lists -> horizontal rules."
   (when opencode-markdown-fontify-enabled
-    (if (and opencode-markdown-fontify-max-size
-             (> (- end start) opencode-markdown-fontify-max-size))
-        ;; Defer large regions to idle timer
-        (let ((buf (current-buffer))
-              (s start)
-              (e end))
-          (run-with-idle-timer
-           0.2 nil
-           (lambda ()
-             (when (buffer-live-p buf)
-               (with-current-buffer buf
-                 (opencode-markdown--fontify-region-impl s e))))))
-      (opencode-markdown--fontify-region-impl start end))))
+    (opencode-markdown--fontify-region-impl start end)))
 
 (defun opencode-markdown--fontify-region-impl (start end)
   "Internal: synchronously fontify markdown in region START to END."
   (condition-case err
-      (let ((inhibit-read-only t))
+      (let ((inhibit-read-only t)
+            (buffer-undo-list t))
         (save-excursion
           (save-match-data
-            ;; Strip existing markdown faces first (idempotency)
+            ;; Strip first: `jit-lock' re-runs over text it has already
+            ;; fontified, and `add-face-text-property' accumulates.
             (opencode-markdown--strip-faces start end)
-            ;; Code blocks first --- returns list of (start . end) ranges to exclude
-            (let ((code-ranges (opencode-markdown--fontify-code-blocks start end)))
-              ;; Inline fontification on non-code-block regions
-              (opencode-markdown--fontify-inline start end code-ranges)))))
+            (opencode-markdown--apply-props
+             start
+             (opencode-markdown--collect-props
+              (buffer-substring-no-properties start end))))))
     (error
      (message "opencode-markdown: fontification error: %S" err))))
 

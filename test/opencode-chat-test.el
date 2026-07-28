@@ -926,7 +926,7 @@ Line-prefix is applied by the message renderer to the entire body region."
       (when (search-forward "block text" nil t)
         (let ((lp (get-text-property (match-beginning 0) 'line-prefix)))
           (should lp)
-          (should (string= (substring-no-properties lp) "▎"))
+          (should (string= (substring-no-properties lp) "▎ "))
           ;; The line-prefix string should carry the block face
           (let ((lp-face (get-text-property 0 'face lp)))
             (should (eq lp-face 'opencode-user-block))))))))
@@ -944,7 +944,7 @@ Line-prefix is applied by the message renderer to the entire body region."
       (when (search-forward "assistant text" nil t)
         (let ((lp (get-text-property (match-beginning 0) 'line-prefix)))
           (should lp)
-          (should (string= (substring-no-properties lp) "▎"))
+          (should (string= (substring-no-properties lp) "▎ "))
           ;; The line-prefix string should carry the block face
           (let ((lp-face (get-text-property 0 'face lp)))
             (should (eq lp-face 'opencode-assistant-block))))))))
@@ -1398,54 +1398,318 @@ Without this, users could accidentally edit rendered tool output."
 
 ;;; --- Header line: align-to display property ---
 
+(ert-deftest opencode-chat-prose-starts-at-column-zero ()
+  "Verify rendered prose starts at column 0 with the gutter in `line-prefix'.
+The one-column gutter used to be a literal space inserted on every line,
+which broke every `^'-anchored search over message text: isearch, occur
+and `rgrep' could not match a markdown heading or list marker at the
+start of a line, and neither could markdown's own regexes."
+  (opencode-test-with-temp-buffer "*test-chat-col0*"
+    (opencode-chat-mode)
+    (let* ((inhibit-read-only t)
+           (part (list :id "p_col0" :type "text"
+                       :text "# Heading\n- item\n```\ncode\n```"
+                       :time (list :start 1700000000000 :end 1700000001000))))
+      (opencode-chat--render-text-part part 'assistant)
+      ;; Every line-anchored construct is reachable with a plain `^'.
+      (dolist (re '("^# Heading$" "^- item$" "^```$" "^code$"))
+        (goto-char (point-min))
+        (should (re-search-forward re nil t)))
+      ;; The gutter is still rendered --- it just lives in the display layer.
+      (goto-char (point-min))
+      (should (search-forward "Heading" nil t))
+      (let ((lp (get-text-property (match-beginning 0) 'line-prefix)))
+        (should (string= (substring-no-properties lp) "\u258E "))))))
+
+(ert-deftest opencode-chat-hard-reset-requires-chat-buffer ()
+  "Verify `opencode-chat-hard-reset' refuses to run outside a chat buffer.
+It clears the store and streaming state, which would strand markers if
+run against an unrelated buffer."
+  (with-temp-buffer
+    (should-error (opencode-chat-hard-reset) :type 'user-error)))
+
+(ert-deftest opencode-chat-hard-reset-drops-store-and-streaming-state ()
+  "Verify `opencode-chat-hard-reset' clears cached render state before redrawing.
+An ordinary refresh reuses the store, so a section whose overlay the
+store has lost stays wrong across refreshes; the reset must start from
+nothing but the server's messages."
+  (opencode-test-with-temp-buffer "*test-chat-hard-reset*"
+    (opencode-chat-mode)
+    (opencode-chat--set-session-id "ses_reset")
+    (puthash "msg_r"
+             (list :msg (list :id "msg_r" :role "assistant")
+                   :parts (make-hash-table :test 'equal))
+             (opencode-chat--store))
+    (opencode-chat--set-streaming-msg-id "msg_r")
+    (opencode-chat--set-streaming-part-id "p_r")
+    (should (> (hash-table-count (opencode-chat--store)) 0))
+    ;; The server call fails in the test environment; the state teardown that
+    ;; precedes it is what this covers.
+    (ignore-errors (opencode-chat-hard-reset))
+    (should (= 0 (hash-table-count (opencode-chat--store))))
+    (should-not (opencode-chat--streaming-msg-id))
+    (should-not (opencode-chat--streaming-part-id))))
+
+(ert-deftest opencode-chat-delete-section-leaves-input-alone ()
+  "Verify deleting a section cannot reach into the input area.
+The transcript and the input area share one buffer, so an unguarded
+`delete-region' over a drifted overlay would eat the user's unsent text.
+`opencode-chat--delete-section' asserts against `input-start' rather
+than silently deleting."
+  (opencode-test-with-temp-buffer "*test-chat-del-section*"
+    (opencode-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "transcript text\n")
+      (opencode-chat--set-input-start (copy-marker (point) nil))
+      (insert "user is typing here")
+      ;; An overlay that has drifted past input-start must not be deleted.
+      (let ((bad (make-overlay (point-min) (point-max))))
+        (should-error (opencode-chat--delete-section bad)))
+      (should (string-match-p "user is typing here" (buffer-string))))))
+
+(ert-deftest opencode-chat-delete-section-removes-text-and-overlay ()
+  "Verify a section wholly above the input area is deleted with its overlay."
+  (opencode-test-with-temp-buffer "*test-chat-del-section-ok*"
+    (opencode-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "keep ")
+      (let ((start (point)))
+        (insert "DELETEME")
+        (let ((ov (make-overlay start (point))))
+          (opencode-chat--set-input-start (copy-marker (point-max) nil))
+          (opencode-chat--delete-section ov)
+          (should-not (string-match-p "DELETEME" (buffer-string)))
+          (should-not (overlay-buffer ov)))))))
+
+(ert-deftest opencode-chat-replace-section-keeps-sibling-abutting ()
+  "Verify a section starting where the replaced one ended stays abutting.
+A tool section that grows or shrinks when it finishes must not strand
+the section after it or overlap into it — that is the marker-collision
+class of bug the README self-reports."
+  (opencode-test-with-temp-buffer "*test-chat-replace-sec*"
+    (opencode-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "head\n")
+      (let* ((start (point)))
+        (insert "SHORT\n")
+        (let* ((ov (make-overlay start (point)))
+               (sib-start (point)))
+          (overlay-put ov 'opencode-section (list :id "s1"))
+          (insert "SIBLING\n")
+          (let ((sib (make-overlay sib-start (point))))
+            (overlay-put sib 'opencode-section (list :id "s2"))
+            (opencode-chat--set-input-start (copy-marker (point-max) nil))
+            (opencode-chat--replace-section
+             ov (lambda () (insert "MUCH LONGER REPLACEMENT\n")))
+            ;; The sibling still covers exactly its own text.
+            (should (string= "SIBLING\n"
+                             (buffer-substring-no-properties
+                              (overlay-start sib) (overlay-end sib))))
+            (should (string-match-p "MUCH LONGER REPLACEMENT" (buffer-string)))
+            (should-not (string-match-p "SHORT" (buffer-string)))))))))
+
+(ert-deftest opencode-chat-refresh-while-typing-keeps-point ()
+  "Verify a refresh landing mid-typing does not move point in the input area.
+When the model stops streaming, a structural refresh redraws the buffer
+and restores the cursor from a saved offset.  If the user is typing at
+that moment, the cursor must land back exactly where it was — a silent
+one-character drift means the next keystroke lands inside the word they
+were writing."
+  (opencode-test-with-temp-buffer "*test-chat-typing-point*"
+    (opencode-chat-mode)
+    (let ((inhibit-read-only t))
+      (opencode-chat--render-input-area)
+      (goto-char (opencode-chat--input-content-start))
+      (insert "hello")
+      ;; Cursor at the very end of what the user typed — the normal case.
+      (goto-char (opencode-chat--input-content-end))
+      (let ((before (point))
+            (pre (opencode-chat--save-render-state)))
+        (opencode-chat--restore-cursor pre)
+        (should (= before (point)))))))
+
+(ert-deftest opencode-chat-full-rerender-while-typing-preserves-text-and-point ()
+  "Verify a full re-render mid-typing keeps the input text and the cursor.
+This is the path taken when the model stops streaming: the transcript is
+erased and redrawn, and the input area — which lives in the same buffer —
+has to be reconstructed around whatever the user was in the middle of
+writing."
+  (opencode-test-with-temp-buffer "*test-chat-rerender-typing*"
+    (opencode-chat-mode)
+    (let ((inhibit-read-only t))
+      (opencode-chat--render-input-area)
+      (goto-char (opencode-chat--input-content-start))
+      (insert "half written")
+      ;; Point is where it lands after typing: right after the last character,
+      ;; not past the region's trailing newline.
+      (let ((offset (- (point) (opencode-chat--input-content-start))))
+        (opencode-chat--render-messages
+         (vector (list :id "msg_rr" :role "assistant"
+                       :info (list :role "assistant" :id "msg_rr"
+                                   :time (list :created 1700000000000))
+                       :parts (vector (list :id "p_rr" :type "text"
+                                            :text "model finished")))))
+        ;; The user's unsent text survived the redraw...
+        (should (string= "half written" (opencode-chat--input-text)))
+        ;; ...and the cursor is still where they left it.
+        (should (opencode-chat--in-input-area-p))
+        (should (= offset (- (point) (opencode-chat--input-content-start))))))))
+
+(ert-deftest opencode-chat-refresh-with-empty-input-stays-in-input ()
+  "Verify a refresh with the cursor in an empty input area leaves it there.
+The restore path guarded the input branch on the saved text being
+non-empty, so focusing the input without typing — or clearing it — sent
+the cursor into the transcript when the model finished."
+  (opencode-test-with-temp-buffer "*test-chat-empty-input-point*"
+    (opencode-chat-mode)
+    (let ((inhibit-read-only t))
+      ;; A rendered message above, so `--goto-latest' has somewhere to go.
+      (opencode-chat--render-assistant-message
+       (list :role "assistant" :id "msg_e" :time (list :created 1700000000000))
+       (vector (list :id "p_e" :type "text" :text "an earlier reply")))
+      (opencode-chat--render-input-area)
+      (goto-char (opencode-chat--input-content-start))
+      (let ((pre (opencode-chat--save-render-state)))
+        (opencode-chat--restore-cursor pre)
+        (should (opencode-chat--in-input-area-p))))))
+
+(ert-deftest opencode-chat-rerender-does-not-touch-input-area ()
+  "Verify a transcript redraw leaves the input area's text untouched.
+Not merely restored afterwards — never destroyed.  The redraw narrows to
+the transcript, so the user's unsent text is outside the replaced region
+and no save/restore step is involved in it surviving."
+  (opencode-test-with-temp-buffer "*test-chat-narrow-input*"
+    (opencode-chat-mode)
+    (let ((inhibit-read-only t))
+      (opencode-chat--render-input-area)
+      (goto-char (opencode-chat--input-content-start))
+      (insert "unsent draft")
+      (should (opencode-chat--transcript-preservable-p))
+      ;; Mark the input text so we can tell survival from reconstruction:
+      ;; a rebuild would re-insert plain text without this property.
+      (put-text-property (opencode-chat--input-content-start)
+                         (point) 'opencode-test-witness t)
+      (opencode-chat--render-messages
+       (vector (list :id "msg_n" :role "assistant"
+                     :info (list :role "assistant" :id "msg_n"
+                                 :time (list :created 1700000000000))
+                     :parts (vector (list :id "p_n" :type "text"
+                                          :text "redrawn transcript")))))
+      (should (string= "unsent draft" (opencode-chat--input-text)))
+      (should (get-text-property (opencode-chat--input-content-start)
+                                 'opencode-test-witness))
+      (should (string-match-p "redrawn transcript" (buffer-string))))))
+
+(ert-deftest opencode-chat-message-delete-inherits-input-guard ()
+  "Verify the public message delete goes through the section primitive.
+It used to delete the region directly, so it was the one removal path
+without the guard — a message overlay reaching into the input area would
+have taken the user's unsent text with it."
+  (opencode-test-with-temp-buffer "*test-chat-msg-del-guard*"
+    (opencode-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "transcript\n")
+      (opencode-chat--set-input-start (copy-marker (point) nil))
+      (insert "user is typing")
+      ;; A message overlay that wrongly spans into the input area.
+      (let ((ov (make-overlay (point-min) (point-max))))
+        (puthash "msg_guard" (list :overlay ov
+                                   :parts (make-hash-table :test 'equal))
+                 (opencode-chat--store))
+        (should-error (opencode-chat-message-delete "msg_guard"))
+        (should (string-match-p "user is typing" (buffer-string)))))))
+
+(ert-deftest opencode-chat-state-rejects-write-from-foreign-buffer ()
+  "Verify chat state refuses a write from a buffer it does not describe.
+Accessors are zero-argument and read the state of whatever buffer is
+current, so a write with the wrong buffer current used to land silently
+in that buffer — or lazily create a second state object for it.  The
+state records its own buffer so the mistake is loud."
+  (opencode-test-with-temp-buffer "*test-chat-state-owner*"
+    (opencode-chat-mode)
+    (opencode-chat--set-session-id "ses_owner")
+    (should (eq (current-buffer)
+                (opencode-chat-state-buffer opencode-chat--state)))
+    (let ((foreign opencode-chat--state))
+      (with-temp-buffer
+        ;; Same state object, different buffer: this is the mistake.
+        (setq opencode-chat--state foreign)
+        (should-error (opencode-chat--set-session-id "ses_wrong"))))))
+
+(ert-deftest opencode-chat-state-for-session-round-trips ()
+  "Verify a chat can be looked up as an object and acted on through it.
+`--with-chat' plus the state-taking accessors let a caller operate on a
+chat without arranging its buffer, which is what kept buffer and state
+tracked in two places."
+  (opencode-test-with-temp-buffer "*test-chat-state-lookup*"
+    (opencode-chat-mode)
+    (opencode-chat--set-session-id "ses_lookup")
+    (let ((state (opencode-chat-state-for-session "ses_lookup"))
+          (chat (current-buffer)))
+      (should state)
+      (should (eq (opencode-chat-state-buffer state) chat))
+      ;; Read and act through the object from an unrelated buffer.
+      (with-temp-buffer
+        (should (string= "ses_lookup" (opencode-chat--session-id state)))
+        (should (eq chat (opencode-chat--with-chat state (current-buffer))))))))
+
+(ert-deftest opencode-chat-with-chat-rejects-dead-buffer ()
+  "Verify `--with-chat' refuses a state whose buffer is gone.
+Silently doing nothing would let a stale state look like a working one."
+  (let (state)
+    (opencode-test-with-temp-buffer "*test-chat-dead*"
+      (opencode-chat-mode)
+      (opencode-chat--set-session-id "ses_dead")
+      (setq state opencode-chat--state))
+    (should-error (opencode-chat--with-chat state (point)))))
+
 ;;; --- Delta helper (insert-streaming-delta) ---
 
 (ert-deftest opencode-chat-insert-delta-single-line ()
-  "Single-line delta inserts with space prefix and correct faces."
+  "Single-line delta inserts at column 0 with correct faces."
   (opencode-test-with-temp-buffer "*test-delta-single*"
     (opencode-chat-mode)
     (let ((inhibit-read-only t))
       (opencode-chat--insert-streaming-delta "Hello" "text"))
-    ;; Buffer should be " Hello" (space prefix + text)
-    (should (string= (buffer-string) " Hello"))
+    ;; Buffer text starts at column 0; the gutter is in the line-prefix
+    (should (string= (buffer-string) "Hello"))
     ;; Face should be assistant-body (block face is on line-prefix now)
     (should (eq 'opencode-assistant-body (get-text-property 1 'face)))
     ;; line-prefix should carry the block face stripe
     (let ((lp (get-text-property 1 'line-prefix)))
       (should lp)
-      (should (string= (substring-no-properties lp) "▎"))
+      (should (string= (substring-no-properties lp) "▎ "))
       (should (eq 'opencode-assistant-block (get-text-property 0 'face lp))))
     ;; read-only property should be set
     (should (eq t (get-text-property 1 'read-only)))))
 
 (ert-deftest opencode-chat-insert-delta-multiline ()
-  "Multi-line delta prefixes each line with space."
+  "Multi-line delta starts every line at column 0."
   (opencode-test-with-temp-buffer "*test-delta-multi*"
     (opencode-chat-mode)
     (let ((inhibit-read-only t))
       (opencode-chat--insert-streaming-delta "Hello\nWorld" "text"))
-    ;; Buffer should be " Hello\n World"
-    (should (string= (buffer-string) " Hello\n World"))
+    ;; Buffer should be "Hello\nWorld"
+    (should (string= (buffer-string) "Hello\nWorld"))
     ;; Both lines should have assistant-body face and line-prefix stripe
     (should (eq 'opencode-assistant-body (get-text-property 1 'face)))
-    (should (eq 'opencode-assistant-body (get-text-property 8 'face)))
+    (should (eq 'opencode-assistant-body (get-text-property 7 'face)))
     (let ((lp1 (get-text-property 1 'line-prefix))
-          (lp2 (get-text-property 8 'line-prefix)))
+          (lp2 (get-text-property 7 'line-prefix)))
       (should lp1)
       (should lp2)
       (should (eq 'opencode-assistant-block (get-text-property 0 'face lp1)))
       (should (eq 'opencode-assistant-block (get-text-property 0 'face lp2))))))
 
 (ert-deftest opencode-chat-insert-delta-midline ()
-  "Delta at non-bolp does not add space prefix."
+  "Delta at non-bolp continues the current line."
   (opencode-test-with-temp-buffer "*test-delta-midline*"
     (opencode-chat-mode)
     (let ((inhibit-read-only t))
-      ;; First delta at bolp adds " " prefix
       (opencode-chat--insert-streaming-delta "Start" "text")
-      ;; Point is after "Start", NOT at bolp; second delta has no prefix
+      ;; Point is after "Start", NOT at bolp
       (opencode-chat--insert-streaming-delta " more" "text"))
-    (should (string= (buffer-string) " Start more"))))
+    (should (string= (buffer-string) "Start more"))))
 
 (ert-deftest opencode-chat-insert-delta-reasoning-face ()
   "Reasoning delta uses opencode-reasoning face, not assistant-body."
@@ -3119,8 +3383,8 @@ Both use a propertized stripe char with `opencode-assistant-block' face."
                         :time (list :start 1700000000000 :end 1700000001000))))
         (opencode-chat--render-text-part part 'assistant)
         (let ((lp (get-text-property 1 'line-prefix)))
-          ;; Stripe char
-          (should (string= (substring-no-properties lp) "\u258E"))
+          ;; Stripe char plus the one-column prose gutter
+          (should (string= (substring-no-properties lp) "\u258E "))
           ;; Face on stripe
           (should (eq 'opencode-assistant-block (get-text-property 0 'face lp))))))
     ;; Streaming path
@@ -3129,13 +3393,13 @@ Both use a propertized stripe char with `opencode-assistant-block' face."
       (let ((inhibit-read-only t))
         (opencode-chat--insert-streaming-delta text "text")
         (let ((lp (get-text-property 1 'line-prefix)))
-          ;; Same stripe char
-          (should (string= (substring-no-properties lp) "\u258E"))
+          ;; Same stripe char and gutter
+          (should (string= (substring-no-properties lp) "\u258E "))
           ;; Same face
           (should (eq 'opencode-assistant-block (get-text-property 0 'face lp))))))))
 
 (ert-deftest opencode-chat-streaming-vs-render-multiline-prefix ()
-  "Each line in multi-line text gets the space prefix and line-prefix stripe.
+  "Each line in multi-line text gets the prose line-prefix stripe.
 Compares both paths for a 3-line text block to verify prefix consistency."
   (let ((text "AAA\nBBB\nCCC")
         render-lines stream-lines)
@@ -3347,16 +3611,14 @@ Both paths call the same render function."
 
 (ert-deftest opencode-chat-streaming-delta-newline-handling ()
   "Streaming delta with trailing newline correctly starts a new line.
-When a delta ends with \\n, the next delta should start at bolp and get the space prefix."
+When a delta ends with \\n, the next delta should start on a line of its own."
   (opencode-test-with-temp-buffer "*test-cmp-newline-handling*"
     (opencode-chat-mode)
     (let ((inhibit-read-only t))
       ;; Delta with trailing newline
       (opencode-chat--insert-streaming-delta "First line\n" "text")
-      ;; Next delta should be at bolp and get space prefix
       (opencode-chat--insert-streaming-delta "Second line" "text")
-      ;; Should produce " First line\n Second line"
-      (should (string= (buffer-string) " First line\n Second line")))))
+      (should (string= (buffer-string) "First line\nSecond line")))))
 
 (ert-deftest opencode-chat-streaming-empty-delta-no-crash ()
   "Empty string delta does not crash or corrupt buffer state."

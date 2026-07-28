@@ -4,6 +4,17 @@
 
 (require 'ert)
 (require 'opencode-backend)
+(require 'cl-lib)
+
+(defun opencode-backend-test--stub (&rest args)
+  "Return a backend built from ARGS that satisfies the registration contract.
+Tests here exercise registration and dispatch, not the operations
+themselves, so every required operation is stubbed with `ignore'."
+  (apply #'opencode-backend-create
+         (append args
+                 (mapcan (lambda (op)
+                           (list (intern (format ":%s-fn" op)) #'ignore))
+                         opencode-backend-required-ops))))
 
 (ert-deftest opencode-backend-register-and-get-current ()
   "Backend registration must be independent of concrete API modules so a
@@ -11,7 +22,7 @@ future backend can register itself without changing chat rendering code."
   (let ((opencode-backend--registry (make-hash-table :test 'eq))
         (opencode-backend-current 'fake))
     (opencode-backend-register
-     (opencode-backend-create :name 'fake :capabilities '(messages)))
+     (opencode-backend-test--stub :name 'fake :capabilities '(messages)))
     (should (opencode-backend-get))
     (should (opencode-backend-capable-p 'messages))))
 
@@ -65,7 +76,7 @@ wire formats and lets future backends adapt at one boundary."
   (let ((opencode-backend--registry (make-hash-table :test 'eq))
         (opencode-backend-current 'fake))
     (opencode-backend-register
-     (opencode-backend-create
+     (opencode-backend-test--stub
       :name 'fake
       :event-adapter (lambda (event)
                        (opencode-backend-event
@@ -105,6 +116,36 @@ error/details metadata; those map to generic backend parts."
     (should-not (plist-get tool-result :is-error))
     (should (equal (plist-get model :api) "anthropic-messages"))
     (should (= (plist-get model :context-window) 200000))))
+
+(ert-deftest opencode-backend-supports-p-answers-from-slots ()
+  "Verify support is derived from the function slot, not a declared list.
+The `capabilities' slot is declared separately from the implementation
+and can drift from it; `opencode-backend-supports-p' cannot."
+  (let ((b (opencode-backend-create
+            :name 'probe-test
+            :capabilities '(get-todos)   ; advertised but not implemented
+            :list-sessions-fn #'ignore)))
+    (should (opencode-backend-supports-p 'list-sessions b))
+    (should-not (opencode-backend-supports-p 'get-todos b))
+    (should-not (opencode-backend-supports-p 'no-such-operation b))))
+
+(ert-deftest opencode-backend-register-rejects-missing-required-ops ()
+  "Verify registration fails loudly when a required operation is absent.
+Dispatch resolves a slot at call time, so without this a backend missing
+a core operation registers fine and errors mid-session instead."
+  (should-error
+   (opencode-backend-register
+    (opencode-backend-create :name 'incomplete-test :list-sessions-fn #'ignore))))
+
+(ert-deftest opencode-backend-register-accepts-complete-backend ()
+  "Verify a backend implementing every required operation registers."
+  (let ((b (apply #'opencode-backend-create
+                  :name 'complete-test
+                  (mapcan (lambda (op)
+                            (list (intern (format ":%s-fn" op)) #'ignore))
+                          opencode-backend-required-ops))))
+    (should (opencode-backend-register b))
+    (remhash 'complete-test opencode-backend--registry)))
 
 (provide 'opencode-backend-test)
 ;;; opencode-backend-test.el ends here

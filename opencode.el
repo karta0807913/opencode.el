@@ -3,9 +3,9 @@
 ;; Copyright (C) 2025 opencode.el contributors
 ;; Author: opencode.el contributors
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "30.1") (markdown-mode "2.6"))
+;; Package-Requires: ((emacs "30.1") (markdown-mode "2.6") (treemacs "3.1"))
 ;; Keywords: tools, ai, coding
-;; URL: https://github.com/user/opencode.el
+;; URL: https://github.com/karta0807913/opencode.el
 ;; SPDX-License-Identifier: MIT
 
 ;;; Commentary:

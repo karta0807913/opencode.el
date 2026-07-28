@@ -53,11 +53,12 @@ Lower values make the UI more responsive but increase CPU usage."
   :type 'number
   :group 'opencode-chat)
 
-(defcustom opencode-chat-streaming-fontify-delay 0.4
-  "Debounce delay in seconds for markdown fontification during streaming.
-Fontification runs this many seconds after the last delta arrives."
-  :type 'number
-  :group 'opencode-chat)
+(defvar opencode-chat-streaming-fontify-delay 0.4
+  "Obsolete.  Debounce delay that used to gate fontification during streaming.
+`jit-lock' invalidates and refontifies a streamed span on its own, so
+there is no longer a debounce to tune.")
+(make-obsolete-variable 'opencode-chat-streaming-fontify-delay
+                        "fontification is driven by jit-lock." "0.2.0")
 
 (defcustom opencode-chat-message-limit 100
   "Maximum number of messages to fetch from the server.
@@ -370,6 +371,9 @@ Read-only protection is via text properties.
         buffer-read-only nil)  ; We use text-property 'read-only instead
   (add-to-invisibility-spec 'opencode-section)
   (add-to-invisibility-spec 'opencode-md)
+  ;; Markdown fontification runs from jit-lock over spans the renderer
+  ;; marked, so only transcript that is about to be displayed is matched.
+  (opencode-markdown-setup)
   ;; Register our CAPFs with negative depth so they run BEFORE any
   ;; other completion backends (e.g. dabbrev, cape, corfu) that might
   ;; intercept @-mention or /slash completions.
@@ -454,12 +458,8 @@ removal.  Idempotent."
 (defun opencode-chat--hide-queued-indicator ()
   "Remove the QUEUED badge if currently shown."
   (when-let* ((ov (opencode-chat--queued-overlay)))
-    (let ((inhibit-read-only t)
-          (buffer-undo-list t))
-      (when (and (overlay-start ov) (overlay-end ov))
-        (delete-region (overlay-start ov) (overlay-end ov)))
-      (delete-overlay ov)
-      (opencode-chat--set-queued-overlay nil))))
+    (opencode-chat--delete-section ov)
+    (opencode-chat--set-queued-overlay nil)))
 
 (defun opencode-chat--clear-queued-state ()
   "Clear all queued state: flag, pending IDs, and overlay."
@@ -498,12 +498,8 @@ Each call replaces the previous retry badge."
 (defun opencode-chat--hide-retry-indicator ()
   "Remove the retry error badge if currently shown."
   (when-let* ((ov (opencode-chat--retry-overlay)))
-    (let ((inhibit-read-only t)
-          (buffer-undo-list t))
-      (when (and (overlay-start ov) (overlay-end ov))
-        (delete-region (overlay-start ov) (overlay-end ov)))
-      (delete-overlay ov)
-      (opencode-chat--set-retry-overlay nil))))
+    (opencode-chat--delete-section ov)
+    (opencode-chat--set-retry-overlay nil)))
 
 (defun opencode-chat--on-message-sent (info)
   "Handle optimistic busy/queued state after a message is sent.
@@ -712,6 +708,23 @@ Keys: :saved-input :had-input-area :in-input-p :saved-input-offset
           :saved-popup-perm opencode-permission--current
           :saved-popup-ques opencode-question--current)))
 
+(defun opencode-chat--transcript-preservable-p ()
+  "Return non-nil if the transcript can be redrawn without rebuilding the buffer.
+True once the input area exists, which is what `messages-end' marks the
+start of."
+  (when-let* ((end (opencode-chat-message-messages-end)))
+    (and (marker-position end) (opencode-chat--input-start) t)))
+
+(defun opencode-chat--clear-transcript ()
+  "Delete the transcript, leaving the input area below it untouched.
+Must be called inside a narrowing to the transcript.
+
+Uses `delete-region' rather than `erase-buffer' deliberately:
+`erase-buffer' widens first, so under a narrowing it deletes the whole
+buffer anyway and takes the input area with it.  Verified, not assumed."
+  (delete-region (point-min) (point-max))
+  (opencode-chat-message-clear-all))
+
 (defun opencode-chat--clear-for-rerender ()
   "Wipe buffer and reset state that must not carry across a rerender.
 Nils the input-start marker BEFORE rendering messages: after
@@ -752,10 +765,16 @@ PRE is the plist returned by `--save-render-state'."
            saved-offset (opencode-chat--input-start))
       (let* ((content-start (opencode-chat--input-content-start))
              (content-end (opencode-chat--input-content-end))
+             ;; `content-end' is the first read-only position after the user's
+             ;; text, so the valid offsets are 0..LENGTH inclusive --- LENGTH
+             ;; being the cursor sitting after the last character, which is
+             ;; where someone typing actually is.  Clamping to LENGTH-1 put the
+             ;; cursor one character back every time a refresh landed
+             ;; mid-typing, so the next keystroke went inside the word.
              (target (when content-start
                        (+ content-start
                           (min saved-offset
-                               (max 0 (1- (- content-end content-start))))))))
+                               (max 0 (- content-end content-start)))))))
         (if target (goto-char target) (opencode-chat--goto-latest))))
      (in-input-p (opencode-chat--goto-latest))
      (saved-msg-pos
@@ -822,29 +841,69 @@ active inline popup across re-renders — see the `--save-render-state'
 / `--restore-*' helper family for the details."
   (let ((inhibit-read-only t)
         (inhibit-redisplay t)
-        (buffer-undo-list t)
-        (pre (opencode-chat--save-render-state)))
+        (buffer-undo-list t))
+    (if (opencode-chat--transcript-preservable-p)
+        (opencode-chat--rerender-transcript messages)
+      (opencode-chat--rebuild-buffer messages))
+    (opencode-chat--input-history-seed)))
+
+(defun opencode-chat--rerender-transcript (messages)
+  "Redraw MESSAGES in place, leaving the input area alone.
+
+The transcript and the input area share one buffer, so redrawing used to
+mean erasing both and rebuilding the input area around whatever the user
+had typed --- saving their text and cursor offset first, then putting
+both back.  Narrowing to the transcript removes that entirely: the input
+area is not inside the region being replaced, so their text is never
+destroyed and a refresh landing mid-keystroke cannot move the cursor.
+
+Cursor handling outside the input area is still needed, because the
+transcript itself is still replaced.  A cursor reading a message must be
+restored by message id and offset, and one parked in the read-only footer
+is moved somewhere it can type --- neither is compensation for damage to
+the input area, so neither goes away."
+  (let ((pre (opencode-chat--save-render-state)))
+    (save-excursion
+      (save-restriction
+        (narrow-to-region (point-min) (opencode-chat-message-messages-end))
+        (opencode-chat--clear-transcript)
+        (opencode-chat-message-render-all messages)
+        (when (> (point) (point-min))
+          (opencode-chat--apply-message-props (point-min) (point)))
+      ;; `--clear-transcript' nils `messages-end'; the cold path recreates it
+      ;; while drawing the input area, which this path does not touch.  Inside
+      ;; the narrowing `point-max' is the transcript/input boundary, which is
+      ;; exactly where the marker belongs.
+        (opencode-chat-message-init-messages-end (point-max))
+        (set-marker-insertion-type (opencode-chat-message-messages-end) t)))
+    ;; A cursor in the input area was never inside the replaced region, so
+    ;; `save-excursion' already put it back exactly.  Anywhere else, the text
+    ;; it pointed at is gone and has to be found again.
+    (unless (plist-get pre :in-input-p)
+      (opencode-chat--restore-cursor pre)
+      (opencode-chat--restore-window-position pre))))
+
+(defun opencode-chat--rebuild-buffer (messages)
+  "Build the whole buffer for MESSAGES, input area included.
+The cold path, taken when there is no input area to preserve --- a first
+render or a session switch.  This is the only path that still has to save
+and restore state around the redraw."
+  (let ((pre (opencode-chat--save-render-state)))
     (opencode-chat--clear-for-rerender)
-    ;; Messages
     (opencode-chat-message-render-all messages)
-    ;; Make the message area read-only with navigation keymap.
     (when (> (point) (point-min))
       (opencode-chat--apply-message-props (point-min) (point)))
-    ;; Input area (editable) — same for all sessions
     (opencode-chat--render-input-area)
-    ;; Child sessions: append sub-agent indicator below the input area
     (when (opencode-chat--child-session-p)
       (opencode-chat--render-child-indicator))
     ;; Now switch messages-end to insert-after semantics
     (set-marker-insertion-type (opencode-chat-message-messages-end) t)
-    ;; Restore user input
     (when-let* ((saved-input (plist-get pre :saved-input))
                 ((not (string-empty-p saved-input))))
       (opencode-chat--replace-input saved-input))
     (opencode-chat--restore-cursor pre)
     (opencode-chat--restore-window-position pre)
-    (opencode-chat--restore-popup-or-drain pre)
-    (opencode-chat--input-history-seed)))
+    (opencode-chat--restore-popup-or-drain pre)))
 
 ;;; --- Input area ---
 
@@ -1154,7 +1213,8 @@ and handles chat-level side effects based on the return value."
        (when-let* ((timer (opencode-chat--refresh-timer)))
          (cancel-timer timer)
          (opencode-chat--set-refresh-timer nil))
-       (opencode-chat--schedule-streaming-fontify))
+       ;; Nothing to schedule: `jit-lock' refontifies the streamed span.
+       nil)
       (:need-msg
        (when-let* ((timer (opencode-chat--refresh-timer)))
          (cancel-timer timer)
@@ -1169,10 +1229,8 @@ and handles chat-level side effects based on the return value."
                                :time (list :created (* (float-time) 1000))))))
            (opencode-chat-message-upsert msg-id info)
            ;; Retry now that message exists
-           (when (eq :streamed
-                     (opencode-chat-message-update-part
-                      msg-id part-id part-type part delta))
-             (opencode-chat--schedule-streaming-fontify)))))
+           (opencode-chat-message-update-part
+            msg-id part-id part-type part delta))))
       (:upserted nil)
       (:rendered nil)
       ('nil nil)  ; finalized part — no-op
@@ -1331,6 +1389,32 @@ Use only for initial load or testing; prefer `opencode-chat--refresh'."
                                     :session (opencode-chat--session))))
       (error (message "Refresh failed: %s" (error-message-string err))))))
 
+;;; --- Recovery ---
+
+(defun opencode-chat-hard-reset ()
+  "Discard all cached render state and redraw the transcript from the server.
+
+The escape hatch for a chat buffer whose store and the buffer itself have
+diverged.  An ordinary refresh reuses the store, so a section whose
+overlay the store has lost -- or has recorded at the wrong place -- stays
+wrong across refreshes; this drops the store and the streaming state
+first, so the redraw starts from nothing but the server's messages.
+
+Reaching for this should be rare.  `opencode-chat--store-find-overlay'
+logs when it repairs a desync by scanning the buffer, and that log is the
+thing worth reporting: this command hides the symptom, it does not fix
+the cause."
+  (interactive)
+  (unless (derived-mode-p 'opencode-chat-mode)
+    (user-error "Not in an OpenCode chat buffer"))
+  (unless (opencode-chat--session-id)
+    (user-error "No session attached to this buffer"))
+  (let ((inhibit-read-only t))
+    (opencode-chat--clear-streaming-state)
+    (opencode-chat--store-clear)
+    (opencode-chat--refresh-sync))
+  (message "opencode: chat redrawn from server"))
+
 ;;; --- Open chat buffer ---
 
 (declare-function opencode-window-child-frame "opencode-window" (buffer &optional placement))
@@ -1449,6 +1533,18 @@ as a prompt)."
         fork-id))))
 
 ;;; --- Buffer lookup ---
+
+(defun opencode-chat-state-for-session (session-id &optional backend)
+  "Return the `opencode-chat-state' for SESSION-ID, or nil.
+When BACKEND is non-nil, only match a chat using that backend.
+
+The object-level counterpart of `opencode-chat--find-buffer'.  Callers
+that look up a chat in order to act on it should take the state and use
+`opencode-chat--with-chat', rather than taking a buffer and arranging
+`with-current-buffer' themselves --- that pattern is what left the buffer
+and its state tracked separately."
+  (when-let* ((buf (opencode-chat--find-buffer session-id backend)))
+    (buffer-local-value 'opencode-chat--state buf)))
 
 (defun opencode-chat--find-buffer (session-id &optional backend)
   "Find the chat buffer for SESSION-ID, or nil.
