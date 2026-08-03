@@ -31,7 +31,8 @@
 (declare-function opencode--chat-buffer-for-session "opencode" (session-id))
 (declare-function opencode--all-chat-buffers "opencode" ())
 (declare-function opencode--ensure-ready "opencode" ())
-(declare-function opencode-chat-open "opencode-chat" (session-id &optional directory display-action))
+(declare-function opencode-chat-open "opencode-chat"
+                  (session-id &optional directory display-action backend))
 
 (defvar opencode-default-directory)
 
@@ -476,6 +477,70 @@ In project groups: delete the session (with confirmation)."
 
 ;;; --- Create session ---
 
+(defun opencode-sidebar--project-candidates (projects)
+  "Build completion candidates from canonical PROJECTS.
+Each candidate is a cons of a unique display label and project directory."
+  (let ((seen (make-hash-table :test 'equal))
+        candidates)
+    (dolist (project (seq-into (or projects []) 'list))
+      (when-let ((dir (plist-get project :directory)))
+        (unless (gethash dir seen)
+          (puthash dir t seen)
+          (let* ((name (or (plist-get project :name)
+                           (file-name-nondirectory dir)))
+                 (id (plist-get project :id))
+                 (label (format "%s — %s%s"
+                                name dir
+                                (if id (format " (%s)" id) ""))))
+            (push (cons label dir) candidates)))))
+    (nreverse candidates)))
+
+(defun opencode-sidebar--read-project ()
+  "Prompt for an OpenCode project and return its canonical directory."
+  (unless (opencode-backend-supports-p 'list-projects 'opencode)
+    (user-error "OpenCode backend does not support project listing"))
+  (let* ((projects (opencode-backend-list-projects 'opencode))
+         (candidates (opencode-sidebar--project-candidates projects)))
+    (unless candidates
+      (user-error "No OpenCode projects found"))
+    (let ((choice (completing-read "OpenCode project: " candidates nil t)))
+      (alist-get choice candidates nil nil #'equal))))
+
+(defun opencode-sidebar--new-session-in-project (project-dir &optional backend)
+  "Create a new session in PROJECT-DIR and open the chat buffer.
+Prompts for an optional title.  BACKEND defaults to the current backend."
+  (let* ((project-dir (and project-dir
+                           (directory-file-name
+                            (expand-file-name project-dir))))
+         (opencode-default-directory
+          (or project-dir opencode-default-directory))
+         (sidebar-buf (current-buffer)))
+    (condition-case err
+        (let* ((title (read-string "Session title (optional): "))
+               (_ (opencode--ensure-ready))
+               (session (opencode-session-create
+                         (if (string-empty-p title) nil title)
+                         nil backend)))
+          (when session
+            (when (and project-dir
+                       (not (member project-dir
+                                    opencode-sidebar--known-project-dirs)))
+              (push project-dir opencode-sidebar--known-project-dirs))
+            (when project-dir
+              (opencode-api-cache-invalidate-project-sessions project-dir))
+            (let ((target-win (opencode-sidebar--find-main-window)))
+              (select-window target-win))
+            (opencode-chat-open (plist-get session :id)
+                                (or (plist-get session :directory)
+                                    project-dir
+                                    opencode-default-directory)
+                                nil backend))
+          (when (buffer-live-p sidebar-buf)
+            (with-current-buffer sidebar-buf
+              (opencode-sidebar--rerender))))
+      (error
+       (user-error "Failed to create session: %s" (error-message-string err))))))
+
 (defun opencode-sidebar--new-session ()
   "Create a new session and open the chat buffer.
 Prompts for an optional title.
@@ -484,26 +549,23 @@ The session is created in the project directory of the node at point."
   (let* ((node (opencode-sidebar--node-at-point))
          (item (and node (button-get node :item)))
          (project-dir (or (plist-get item :project-dir)
-                          opencode-sidebar--primary-project-dir))
-         (opencode-default-directory
-          (or project-dir opencode-default-directory))
-         (sidebar-buf (current-buffer)))
-    (condition-case err
-        (let* ((title (read-string "Session title (optional): "))
-               (_ (opencode--ensure-ready))
-               (session (opencode-session-create
-                         (if (string-empty-p title) nil title))))
-          (when session
-            (let ((target-win (opencode-sidebar--find-main-window)))
-              (select-window target-win))
-            (opencode-chat-open (plist-get session :id)
-                                (or (plist-get session :directory)
-                                    opencode-default-directory)))
-          (when (buffer-live-p sidebar-buf)
-            (with-current-buffer sidebar-buf
-              (opencode-sidebar--rerender))))
-      (error
-       (user-error "Failed to create session: %s" (error-message-string err))))))
+                          opencode-sidebar--primary-project-dir)))
+    (opencode-sidebar--new-session-in-project project-dir)))
+
+(defun opencode-sidebar--new-session-choose-project ()
+  "Choose an OpenCode project, then create and open a session there."
+  (interactive)
+  (let ((project-dir
+         (condition-case err
+             (progn
+               (opencode--ensure-ready)
+               (opencode-sidebar--read-project))
+           (quit
+            (signal 'quit nil))
+           (error
+            (user-error "Failed to choose project: %s"
+                        (error-message-string err))))))
+    (opencode-sidebar--new-session-in-project project-dir 'opencode)))
 
 ;;; --- Session expansion helpers ---
 
@@ -776,7 +838,8 @@ DIRECTION is `right' for a vertical split or `below' for a horizontal split."
   "w" #'opencode-sidebar--set-width
   "d" #'opencode-sidebar--delete-or-close
   "R" #'opencode-sidebar--rename-session
-  "c" #'opencode-sidebar--new-session)
+  "c" #'opencode-sidebar--new-session
+  "C" #'opencode-sidebar--new-session-choose-project)
 
 (defun opencode-sidebar--ret-wrapper (&optional arg)
   "Wrapper for RET that logs diagnostics then delegates to treemacs.

@@ -10,26 +10,24 @@
 ;; owns message/part *structure* while this module owns tool-body
 ;; *rendering*.
 ;;
-;; Registry API (public):
-;;   `opencode-chat-register-tool-renderer' TOOL-NAME FN &optional BUILTIN
+;; Renderer APIs:
+;;   `opencode-chat-set-tool-renderer' TOOL-NAME FN
+;;   `opencode-chat-remove-tool-renderer' TOOL-NAME
 ;;
 ;; Dispatch (internal, called by `opencode-chat--render-tool-part'):
-;;   `opencode-chat--render-tool-body-dispatch' TOOL-NAME INPUT OUTPUT METADATA
+;;   `opencode-chat--tool-render-model' TOOL-NAME STATUS INPUT OUTPUT METADATA PART
 ;;
-;; All 8 built-ins are registered on load with `:builtin t':
+;; Built-ins are declared in `opencode-chat-tool-renderers':
 ;;   - bash                              → `--render-bash-body'
 ;;   - read, write                       → `--render-file-path-body'
 ;;   - grep, glob                        → `--render-search-body'
 ;;   - task                              → `--render-task-body'
 ;;   - edit                              → `--render-edit-body'
+;;   - apply_patch                       → `--render-apply-patch-body'
 ;;   - todowrite, todo_write             → `--render-todowrite-body'
 ;;
 ;; Unregistered tools (MCP, or unknown) fall through to
-;; `--render-mcp-generic-body' — the only non-registry code path.
-;;
-;; The `opencode-chat--builtin-tool-p' predicate is used by
-;; `render-tool-part' to decide whether a tool section should start
-;; collapsed by default (built-ins collapse, MCP/unknown expand).
+;; `--render-mcp-generic-body' and stay expanded by default.
 
 ;;; Code:
 
@@ -71,37 +69,191 @@ When set to -1, render all characters without a character-count limit."
 
 ;;; --- Registry ---
 
-(defvar opencode-chat--tool-renderers (make-hash-table :test 'equal)
-  "Registry mapping tool-name string → plist (:fn RENDERER :builtin BOOL).
-Renderers take (INPUT OUTPUT METADATA) and insert rendered content at
-point.  The :builtin flag distinguishes server-side built-ins from
-user/MCP registrations; used by render-tool-part's collapse heuristic
-and MCP detection.")
+(defvar-local opencode-chat--tool-renderer-overrides nil
+  "Buffer-local tool renderer overrides.
+Hash table mapping tool-name string to declarative renderer function.")
 
-(defun opencode-chat-register-tool-renderer (tool-name renderer-fn &optional builtin)
-  "Register RENDERER-FN as the body renderer for TOOL-NAME.
-RENDERER-FN accepts (INPUT OUTPUT METADATA) and inserts rendered
-content at point.  When BUILTIN is non-nil, marks this as a built-in
-server-side tool — affects the default-collapse heuristic and the
-`--builtin-tool-p' predicate."
+(defvar opencode-chat--core-tool-renderers (make-hash-table :test 'equal)
+  "Private registry for core-controlled reserved tool renderers.")
+
+(defvar opencode-chat--tool-renderer-reserved '("question" "permission")
+  "Tool names reserved for core-controlled rendering.")
+
+(defcustom opencode-chat-tool-renderers
+  '(("bash"       :function opencode-chat--render-bash-body      :collapsed-p t :legacy t)
+    ("read"       :function opencode-chat--render-file-path-body :collapsed-p t :legacy t)
+    ("write"      :function opencode-chat--render-file-path-body :collapsed-p t :legacy t)
+    ("grep"       :function opencode-chat--render-search-body    :collapsed-p t :legacy t)
+    ("glob"       :function opencode-chat--render-search-body    :collapsed-p t :legacy t)
+    ("task"       :function opencode-chat--render-task-body      :collapsed-p t :legacy t)
+    ("edit"       :function opencode-chat--render-edit-body      :collapsed-p nil :legacy t)
+    ("apply_patch" :function opencode-chat--render-apply-patch-body
+                   :collapsed-p nil :legacy t)
+    ("todowrite"  :function opencode-chat--render-todowrite-body :collapsed-p nil :legacy t)
+    ("todo_write" :function opencode-chat--render-todowrite-body :collapsed-p nil :legacy t))
+  "Default declarative tool renderers.
+Each entry has the form (TOOL-NAME . PROPERTIES), written as
+\(TOOL-NAME :function FUNCTION ...).  FUNCTION is called in the
+current chat buffer with one context plist and should return nil or a
+declarative plist with optional keys :collapsed-p, :tool-name,
+:summary, :input, and :output.
+
+Entries with :legacy non-nil adapt an old imperative FUNCTION that
+accepts (INPUT OUTPUT METADATA), inserts into the current buffer, and
+returns no declarative value."
+  :type '(repeat (cons (string :tag "Tool name")
+                       (plist :options ((:function function)
+                                        (:collapsed-p boolean)
+                                        (:legacy boolean)))))
+  :group 'opencode-chat)
+
+(defun opencode-chat--reserved-tool-renderer-p (tool-name)
+  "Return non-nil if TOOL-NAME is reserved for core rendering."
+  (member tool-name opencode-chat--tool-renderer-reserved))
+
+(defun opencode-chat--ensure-tool-renderer-overrides ()
+  "Return the current buffer's tool renderer override hash table."
+  (unless (hash-table-p opencode-chat--tool-renderer-overrides)
+    (setq opencode-chat--tool-renderer-overrides (make-hash-table :test 'equal)))
+  opencode-chat--tool-renderer-overrides)
+
+(defun opencode-chat-set-tool-renderer (tool-name renderer-fn)
+  "Set a buffer-local declarative RENDERER-FN for TOOL-NAME.
+RENDERER-FN is called in the current chat buffer with one context
+plist containing at least :phase, :tool-name, :status, :input,
+:output, :metadata, and :part.  It returns nil to fall back to the
+default renderer, or a plist with optional :collapsed-p, :tool-name,
+:summary, :input, and :output keys.
+
+The reserved tool names \"question\" and \"permission\" are
+core-controlled and signal `user-error'."
+  (when (opencode-chat--reserved-tool-renderer-p tool-name)
+    (user-error "Tool renderer for %s is reserved by opencode.el" tool-name))
+  (unless (functionp renderer-fn)
+    (user-error "Tool renderer must be a function"))
+  (puthash tool-name renderer-fn (opencode-chat--ensure-tool-renderer-overrides)))
+
+(defun opencode-chat-remove-tool-renderer (tool-name)
+  "Remove the buffer-local tool renderer override for TOOL-NAME.
+Removing an override restores the default renderer.  The reserved tool
+names \"question\" and \"permission\" are core-controlled and signal
+`user-error'."
+  (when (opencode-chat--reserved-tool-renderer-p tool-name)
+    (user-error "Tool renderer for %s is reserved by opencode.el" tool-name))
+  (when (hash-table-p opencode-chat--tool-renderer-overrides)
+    (remhash tool-name opencode-chat--tool-renderer-overrides)))
+
+(defun opencode-chat--register-core-tool-renderer (tool-name renderer-fn &optional legacy)
+  "Privately register core-controlled RENDERER-FN for TOOL-NAME.
+When LEGACY is non-nil, RENDERER-FN is an old imperative renderer
+accepting (INPUT OUTPUT METADATA)."
   (puthash tool-name
-           (list :fn renderer-fn :builtin (and builtin t))
-           opencode-chat--tool-renderers))
+           (list :function renderer-fn
+                 :collapsed-p nil
+                 :legacy (and legacy t)
+                 :core t)
+           opencode-chat--core-tool-renderers))
 
-(defun opencode-chat--get-tool-renderer (tool-name)
-  "Return the registered renderer function for TOOL-NAME, or nil."
-  (plist-get (gethash tool-name opencode-chat--tool-renderers) :fn))
+(defun opencode-chat--default-tool-entry (tool-name)
+  "Return the default renderer entry for TOOL-NAME."
+  (assoc tool-name opencode-chat-tool-renderers))
 
 (defun opencode-chat--builtin-tool-p (tool-name)
-  "Return non-nil if TOOL-NAME is registered as a built-in server tool."
-  (plist-get (gethash tool-name opencode-chat--tool-renderers) :builtin))
+  "Return non-nil if TOOL-NAME has a built-in default renderer."
+  (and (opencode-chat--default-tool-entry tool-name) t))
 
-(defun opencode-chat--render-tool-body-dispatch (tool-name input output metadata)
-  "Dispatch rendering of TOOL-NAME's body via the registry.
-Unregistered names fall through to `--render-mcp-generic-body'."
-  (let ((fn (or (opencode-chat--get-tool-renderer tool-name)
-                #'opencode-chat--render-mcp-generic-body)))
-    (funcall fn input output metadata)))
+(defun opencode-chat--tool-status-phase (status)
+  "Map tool STATUS string to a renderer phase symbol."
+  (pcase status
+    ("running" 'running)
+    ((or "completed" "error") 'end)
+    (_ 'begin)))
+
+(defun opencode-chat--tool-effective-output (output metadata)
+  "Return effective full OUTPUT, falling back to METADATA.output."
+  (cond
+   ((and output (stringp output) (not (string-empty-p output))) output)
+   ((when-let* ((m-out (and metadata (plist-get metadata :output)))
+                ((stringp m-out))
+                ((not (string-empty-p m-out))))
+      m-out))
+   (output output)))
+
+(defun opencode-chat--capture-legacy-tool-renderer (fn input output metadata)
+  "Call legacy renderer FN and return a property-preserving string."
+  (let ((start (point)))
+    (unwind-protect
+        (progn
+          (funcall fn input output metadata)
+          (buffer-substring start (point)))
+      (delete-region start (point)))))
+
+(defun opencode-chat--adapt-legacy-tool-renderer (fn context)
+  "Adapt old imperative FN to a declarative model using CONTEXT."
+  (let* ((input (plist-get context :input))
+         (output (plist-get context :output))
+         (metadata (plist-get context :metadata))
+         (body (opencode-chat--capture-legacy-tool-renderer fn input output metadata)))
+    (when (and body (not (string-empty-p body)))
+      (list :output body))))
+
+(defun opencode-chat--call-tool-renderer-entry (entry context)
+  "Call renderer ENTRY with CONTEXT and return its declarative result."
+  (let ((fn (plist-get entry :function)))
+    (when fn
+      (if (plist-get entry :legacy)
+          (opencode-chat--adapt-legacy-tool-renderer fn context)
+        (funcall fn context)))))
+
+(defun opencode-chat--merge-tool-render-result (base result)
+  "Return BASE model merged with non-absent keys from RESULT."
+  (let ((merged (copy-sequence base)))
+    (dolist (key '(:collapsed-p :tool-name :summary :input :output))
+      (when (plist-member result key)
+        (setq merged (plist-put merged key (plist-get result key)))))
+    merged))
+
+(defun opencode-chat--tool-render-model
+    (tool-name status input output metadata part arg-summary)
+  "Return declarative render model for a tool part.
+TOOL-NAME, STATUS, INPUT, OUTPUT, METADATA, PART, and ARG-SUMMARY are
+the normalized part fields.  Buffer-local overrides are tried first;
+nil from an override falls back to defaults."
+  (let* ((effective-output (opencode-chat--tool-effective-output output metadata))
+         (context (list :phase (opencode-chat--tool-status-phase status)
+                        :tool-name tool-name
+                        :status status
+                        :input input
+                        :output effective-output
+                        :metadata metadata
+                        :part part))
+         (core-entry (gethash tool-name opencode-chat--core-tool-renderers))
+         (default-entry (opencode-chat--default-tool-entry tool-name))
+         (default-props (cdr default-entry))
+         (entry (or core-entry default-props))
+         (default-collapsed
+          (and (plist-member entry :collapsed-p)
+               (plist-get entry :collapsed-p)))
+         (base (list :collapsed-p default-collapsed
+                     :tool-name tool-name
+                     :summary arg-summary
+                     :input nil
+                     :output nil))
+         (override (and (not core-entry)
+                        (hash-table-p opencode-chat--tool-renderer-overrides)
+                        (gethash tool-name opencode-chat--tool-renderer-overrides)))
+         (override-result (and override (funcall override context)))
+         (result (or override-result
+                     (and entry
+                          (opencode-chat--call-tool-renderer-entry entry context))
+                     (opencode-chat--adapt-legacy-tool-renderer
+                      #'opencode-chat--render-mcp-generic-body context))))
+    (opencode-chat--merge-tool-render-result base result)))
+
+(defun opencode-chat--render-tool-field (field)
+  "Insert declarative tool FIELD if present."
+  (when field
+    (insert field)))
 
 ;;; --- Normalization ---
 
@@ -565,6 +717,142 @@ FILE-DIFF is a plist from the diff API with :file, :before, :after,
       (insert (propertize (format "%s(diff unavailable)\n" indent)
                           'face 'font-lock-comment-face)))))
 
+;;; --- Apply-patch renderer ---
+
+(defun opencode-chat--apply-patch-file-header (line)
+  "Return the file path named by an apply_patch header LINE, or nil."
+  (when (string-match
+         "\\`\\*\\*\\* \\(?:Add\\|Update\\|Delete\\) File: \\(.+\\)\\'"
+         line)
+    (string-trim (match-string 1 line))))
+
+(defun opencode-chat--apply-patch-operation (line)
+  "Return the operation symbol named by an apply_patch header LINE."
+  (when (string-match
+         "\\`\\*\\*\\* \\(Add\\|Update\\|Delete\\) File: " line)
+    (intern (downcase (match-string 1 line)))))
+
+(defun opencode-chat--apply-patch-content-line (line)
+  "Return LINE without its apply_patch diff prefix."
+  (if (and (> (length line) 0)
+           (memq (aref line 0) '(?\s ?+ ?-)))
+      (substring line 1)
+    line))
+
+(defun opencode-chat--apply-patch-image (lines excluded-prefix)
+  "Build a hunk image from LINES, excluding EXCLUDED-PREFIX lines."
+  (let (image)
+    (dolist (line lines (nreverse image))
+      (unless (and (> (length line) 0)
+                   (= (aref line 0) excluded-prefix))
+        (push (opencode-chat--apply-patch-content-line line) image)))))
+
+(defun opencode-chat--apply-patch-move-target (line)
+  "Return the destination path named by apply_patch move LINE, or nil."
+  (when (string-match "\\`\\*\\*\\* Move to: \\(.+\\)\\'" line)
+    (string-trim (match-string 1 line))))
+
+(defun opencode-chat--mark-patch-file-region (start end path)
+  "Make patch text from START to END open PATH with RET or `o'."
+  (when (and path (< start end))
+    (put-text-property start end 'opencode-file-path path)
+    (put-text-property start end 'keymap opencode-chat-message-file-map)
+    (put-text-property start end 'mouse-face 'highlight)
+    (put-text-property start end 'help-echo "RET: open file")))
+
+(defun opencode-chat--render-apply-patch-body (input output &optional _metadata)
+  "Render apply_patch INPUT as a colored, per-file clickable diff.
+INPUT contains :patchText.  Each Add/Update/Delete file section is
+tagged with its own file path, so RET or `o' opens the file belonging
+to the patch line at point.  OUTPUT is shown only when no patch text is
+available."
+  (let ((patch (plist-get input :patchText))
+        (indent "   ")
+        section-start
+        section-path
+        section-operation
+        hunk-header
+        hunk-lines)
+    (cl-labels
+        ((finish-hunk
+          ()
+          (when hunk-header
+            (let* ((lines (nreverse hunk-lines))
+                   (pre-image (opencode-chat--apply-patch-image lines ?+))
+                   (post-image (opencode-chat--apply-patch-image lines ?-))
+                   (header-start (point))
+                   (pre-offset 0)
+                   (new-offset 0)
+                   (header-metadata
+                    (list :operation section-operation
+                          :pre-image pre-image
+                          :post-image post-image
+                          :pre-offset 0
+                          :post-offset 0)))
+              (insert (propertize (format "%s%s\n" indent hunk-header)
+                                  'face 'opencode-diff-hunk-header))
+              (put-text-property header-start (point)
+                                 'opencode-apply-patch-line header-metadata)
+              (dolist (line lines)
+                (let ((start (point))
+                      (removed-p (string-prefix-p "-" line))
+                      (added-p (string-prefix-p "+" line)))
+                  (insert
+                   (propertize
+                    (format "%s%s\n" indent line)
+                    'face (opencode-diff--line-face
+                           line 'font-lock-comment-face)))
+                  (put-text-property
+                   start (point) 'opencode-apply-patch-line
+                   (list :operation section-operation
+                         :pre-image pre-image
+                         :post-image post-image
+                         :pre-offset pre-offset
+                         :post-offset new-offset))
+                  (unless added-p (cl-incf pre-offset))
+                  (unless removed-p (cl-incf new-offset))))))
+          (setq hunk-header nil
+                hunk-lines nil)))
+      (if (and (stringp patch) (not (string-empty-p patch)))
+          (progn
+            (dolist (line (string-lines patch))
+              (cond
+               ((member line '("*** Begin Patch" "*** End Patch"))
+                nil)
+               ((when-let* ((path (opencode-chat--apply-patch-file-header line)))
+                  (finish-hunk)
+                  (when section-start
+                    (opencode-chat--mark-patch-file-region
+                     section-start (point) section-path))
+                  (setq section-start (point)
+                        section-path path
+                        section-operation
+                        (opencode-chat--apply-patch-operation line))
+                  (insert (propertize (format "%s%s\n" indent path) 'face 'link))
+                  t))
+               ((when-let* ((path (opencode-chat--apply-patch-move-target line)))
+                  (setq section-path path)
+                  (insert (propertize (format "%s→ %s\n" indent path) 'face 'link))
+                   t))
+               ((string-prefix-p "@@" line)
+                (finish-hunk)
+                (setq hunk-header line))
+               ((string= line "*** End of File")
+                (finish-hunk))
+               (t
+                ;; Add-file patches commonly omit an explicit @@ line.  Treat
+                ;; their body (and other headerless bodies) as one hunk.
+                (unless hunk-header
+                  (setq hunk-header "@@"))
+                (push line hunk-lines))))
+            (finish-hunk)
+            (when section-start
+              (opencode-chat--mark-patch-file-region
+               section-start (point) section-path)))
+        (when (and output (stringp output) (not (string-empty-p output)))
+          (opencode--insert-prefixed-lines
+           output indent "" 'font-lock-comment-face))))))
+
 ;;; --- Todowrite renderer ---
 
 (defun opencode-chat--render-todowrite-body (input output &optional _metadata)
@@ -586,18 +874,6 @@ for consistent rendering."
     (if (or (null todos) (= (length todos) 0))
         (insert (propertize "   No todos\n" 'face 'font-lock-comment-face))
       (opencode-todo--render-compact todos :indent "   " :bar-width 16))))
-
-;;; --- Register all 8 built-ins ---
-
-(opencode-chat-register-tool-renderer "bash"       #'opencode-chat--render-bash-body 'builtin)
-(opencode-chat-register-tool-renderer "read"       #'opencode-chat--render-file-path-body 'builtin)
-(opencode-chat-register-tool-renderer "write"      #'opencode-chat--render-file-path-body 'builtin)
-(opencode-chat-register-tool-renderer "grep"       #'opencode-chat--render-search-body 'builtin)
-(opencode-chat-register-tool-renderer "glob"       #'opencode-chat--render-search-body 'builtin)
-(opencode-chat-register-tool-renderer "task"       #'opencode-chat--render-task-body 'builtin)
-(opencode-chat-register-tool-renderer "edit"       #'opencode-chat--render-edit-body 'builtin)
-(opencode-chat-register-tool-renderer "todowrite"  #'opencode-chat--render-todowrite-body 'builtin)
-(opencode-chat-register-tool-renderer "todo_write" #'opencode-chat--render-todowrite-body 'builtin)
 
 (provide 'opencode-tool-render)
 ;;; opencode-tool-render.el ends here

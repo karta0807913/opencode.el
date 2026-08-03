@@ -199,6 +199,125 @@
              :directory "/other-proj")))
     (should (member "/other-proj" opencode-sidebar--known-project-dirs))))
 
+;;; --- Create session tests ---
+
+(ert-deftest opencode-sidebar-project-candidates-use-worktree ()
+  "Project completion candidates consume canonical backend projects."
+  (let ((candidates
+         (opencode-sidebar--project-candidates
+          [(:id "prj_a" :name "Project A" :directory "/tmp/project-a")
+           (:id "prj_b" :directory "/tmp/project-b")
+           (:id "prj_duplicate" :directory "/tmp/project-a")
+           (:id "prj_missing")])))
+    (should (= 2 (length candidates)))
+    (should (equal "/tmp/project-a" (cdar candidates)))
+    (should (string-match-p "Project A.*prj_a" (caar candidates)))
+    (should (equal "/tmp/project-b" (cdadr candidates)))))
+
+(ert-deftest opencode-sidebar-read-project-returns-selected-worktree ()
+  "Project picker uses backend projects and returns the selected directory."
+  (let (requested-backend)
+    (cl-letf (((symbol-function 'opencode-backend-supports-p)
+               (lambda (operation backend)
+                 (and (eq operation 'list-projects)
+                      (eq backend 'opencode))))
+              ((symbol-function 'opencode-backend-list-projects)
+               (lambda (&optional backend)
+                 (setq requested-backend backend)
+                 [(:id "prj_a" :directory "/tmp/project-a")
+                  (:id "prj_b" :directory "/tmp/project-b")]))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt candidates &rest _)
+                 (car (rassoc "/tmp/project-b" candidates)))))
+      (should (equal "/tmp/project-b" (opencode-sidebar--read-project)))
+      (should (eq 'opencode requested-backend)))))
+
+(ert-deftest opencode-sidebar-read-project-errors-when-empty ()
+  "Project picker reports when the server has no usable projects."
+  (cl-letf (((symbol-function 'opencode-backend-supports-p)
+             (lambda (&rest _) t))
+            ((symbol-function 'opencode-backend-list-projects)
+             (lambda (&rest _) [])))
+    (should-error (opencode-sidebar--read-project) :type 'user-error)))
+
+(ert-deftest opencode-sidebar-new-session-reuses-project-helper ()
+  "Lowercase `c' delegates its node project to the shared creation helper."
+  (let (created-in)
+    (cl-letf (((symbol-function 'opencode-sidebar--node-at-point)
+               (lambda () 'node))
+              ((symbol-function 'button-get)
+               (lambda (_node _property)
+                 '(:project-dir "/tmp/project-a")))
+              ((symbol-function 'opencode-sidebar--new-session-in-project)
+               (lambda (dir) (setq created-in dir))))
+      (opencode-sidebar--new-session)
+      (should (equal "/tmp/project-a" created-in)))))
+
+(ert-deftest opencode-sidebar-new-session-in-project-preserves-title-flow ()
+  "Shared creation helper binds the project and treats an empty title as nil."
+  (let (created-title created-dir created-backend
+        opened-id opened-dir opened-backend invalidated-dir sidebar-buf)
+    (save-window-excursion
+      (with-temp-buffer
+        (setq sidebar-buf (current-buffer))
+        (setq-local opencode-sidebar--known-project-dirs nil)
+        (cl-letf (((symbol-function 'read-string)
+                   (lambda (&rest _) ""))
+                  ((symbol-function 'opencode--ensure-ready) #'ignore)
+                  ((symbol-function 'opencode-session-create)
+                   (lambda (&optional title _parent-id backend)
+                     (setq created-title title
+                           created-dir opencode-default-directory
+                           created-backend backend)
+                     '(:id "ses_new")))
+                  ((symbol-function
+                    'opencode-api-cache-invalidate-project-sessions)
+                   (lambda (dir) (setq invalidated-dir dir)))
+                  ((symbol-function 'opencode-sidebar--find-main-window)
+                   (lambda () (selected-window)))
+                  ((symbol-function 'opencode-chat-open)
+                   (lambda (session-id &optional directory
+                                       _display-action backend)
+                     (setq opened-id session-id
+                           opened-dir directory
+                           opened-backend backend)))
+                  ((symbol-function 'opencode-sidebar--rerender) #'ignore))
+          (opencode-sidebar--new-session-in-project
+           "/tmp/project-a/" 'opencode)
+          (should-not created-title)
+          (should (equal "/tmp/project-a" created-dir))
+          (should (eq 'opencode created-backend))
+          (should (equal "ses_new" opened-id))
+          (should (equal "/tmp/project-a" opened-dir))
+          (should (eq 'opencode opened-backend))
+          (should (equal "/tmp/project-a" invalidated-dir))
+          (with-current-buffer sidebar-buf
+            (should (member "/tmp/project-a"
+                            opencode-sidebar--known-project-dirs))))))))
+
+(ert-deftest opencode-sidebar-new-session-choose-project-delegates ()
+  "Uppercase `C' picks a project and creates it with the OpenCode backend."
+  (let (ready selected-dir selected-backend)
+    (cl-letf (((symbol-function 'opencode--ensure-ready)
+               (lambda () (setq ready t)))
+              ((symbol-function 'opencode-sidebar--read-project)
+               (lambda ()
+                 (should ready)
+                 "/tmp/project-b"))
+              ((symbol-function 'opencode-sidebar--new-session-in-project)
+               (lambda (dir &optional backend)
+                 (setq selected-dir dir
+                       selected-backend backend))))
+      (opencode-sidebar--new-session-choose-project)
+      (should (equal "/tmp/project-b" selected-dir))
+      (should (eq 'opencode selected-backend)))))
+
+(ert-deftest opencode-sidebar-keymap-binds-project-session-command ()
+  "Uppercase `C' opens the choose-project session flow."
+  (should
+   (eq (keymap-lookup opencode-sidebar--extra-map "C")
+       #'opencode-sidebar--new-session-choose-project)))
+
 ;;; --- Project session cache tests ---
 
 (ert-deftest opencode-sidebar-cache-get-put ()

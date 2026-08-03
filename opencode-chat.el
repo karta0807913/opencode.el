@@ -334,7 +334,8 @@ Format: *opencode: <project>/<title>*"
 Shows a read-only label and a [Parent] button for navigation."
   (let* ((parent-id (opencode-chat--parent-session-id))
          (directory (plist-get (opencode-chat--session) :directory))
-         (inhibit-read-only t))
+         (inhibit-read-only t)
+         (buffer-undo-list t))
     (goto-char (point-max))
     (insert (propertize " Sub-agent session  "
                         'face 'font-lock-comment-face
@@ -357,6 +358,12 @@ Shows a read-only label and a [Parent] button for navigation."
   "C-p" #'opencode-command-select
   "C-t" #'opencode-chat--cycle-variant
   "TAB" #'opencode-ui--toggle-section)
+
+;; Edit bodies use a specialized text-property keymap for RET/o file
+;; navigation.  Inherit the regular transcript map so TAB still toggles
+;; the enclosing tool section and the shared navigation bindings remain
+;; available while point is on diff text.
+(set-keymap-parent opencode-chat-message-file-map opencode-chat-message-map)
 
 (define-derived-mode opencode-chat-mode nil "OpenCode Chat"
   "Major mode for OpenCode chat conversations.
@@ -1144,7 +1151,8 @@ Registered on `window-buffer-change-functions' by `opencode-chat-mode'."
   (opencode-chat--set-busy nil)
   (message "Session %s was deleted" (opencode-chat--session-id))
   (when (opencode-chat--input-start)
-    (let ((inhibit-read-only t))
+    (let ((inhibit-read-only t)
+          (buffer-undo-list t))
       (add-text-properties (marker-position (opencode-chat--input-start))
                            (point-max)
                            '(read-only t face font-lock-comment-face))))

@@ -3561,6 +3561,225 @@ re-renders it.  The result should match a fresh render-tool-part call."
     ;; Both should produce the same visible text
     (should (string= fresh-text updated-text))))
 
+(defun opencode-chat-test--tool-part (&optional tool status)
+  "Return a simple tool part for declarative renderer tests.
+TOOL defaults to \"bash\" and STATUS defaults to \"completed\"."
+  (list :id "prt_decl"
+        :type "tool"
+        :tool (or tool "bash")
+        :state (list :status (or status "completed")
+                     :input (list :command "printf hi"
+                                  :description "Say hi")
+                     :output "hi\n"
+                     :metadata (list :output "stream\n")
+                     :time (list :start 1700000000000
+                                 :end 1700000001000))))
+
+(ert-deftest opencode-chat-tool-renderer-context-current-buffer ()
+  "Declarative renderers receive a context plist in the current chat buffer."
+  (opencode-test-with-temp-buffer "*test-tool-context*"
+    (opencode-chat-mode)
+    (let ((buf (current-buffer))
+          seen)
+      (opencode-chat-set-tool-renderer
+       "bash"
+       (lambda (ctx)
+         (setq seen (list :buffer (current-buffer)
+                          :phase (plist-get ctx :phase)
+                          :tool-name (plist-get ctx :tool-name)
+                          :status (plist-get ctx :status)
+                          :input (plist-get ctx :input)
+                          :output (plist-get ctx :output)
+                          :metadata (plist-get ctx :metadata)
+                          :part (plist-get ctx :part)))
+         (list :output "   custom\n")))
+      (let ((inhibit-read-only t))
+        (opencode-chat--render-tool-part (opencode-chat-test--tool-part "bash" "running")))
+      (should (eq (plist-get seen :buffer) buf))
+      (should (eq (plist-get seen :phase) 'running))
+      (should (equal (plist-get seen :tool-name) "bash"))
+      (should (equal (plist-get seen :status) "running"))
+      (should (equal (plist-get (plist-get seen :input) :command) "printf hi"))
+      (should (equal (plist-get seen :output) "hi\n"))
+      (should (plist-get seen :metadata))
+      (should (equal (plist-get (plist-get seen :part) :id) "prt_decl")))))
+
+(ert-deftest opencode-chat-tool-renderer-effective-output-falls-back-to-metadata ()
+  "Running tools pass metadata.output as the effective full output."
+  (opencode-test-with-temp-buffer "*test-tool-effective-output*"
+    (opencode-chat-mode)
+    (let ((seen-output nil))
+      (opencode-chat-set-tool-renderer
+       "bash"
+       (lambda (ctx)
+         (setq seen-output (plist-get ctx :output))
+         (list :output "   custom\n")))
+      (let* ((part (opencode-chat-test--tool-part "bash" "running"))
+             (state (plist-get part :state)))
+        (plist-put state :output nil)
+        (let ((inhibit-read-only t))
+          (opencode-chat--render-tool-part part)))
+      (should (equal seen-output "stream\n")))))
+
+(ert-deftest opencode-chat-tool-renderer-rich-result-header-body ()
+  "Declarative :tool-name, :summary, :input and :output control the render."
+  (opencode-test-with-temp-buffer "*test-tool-rich*"
+    (opencode-chat-mode)
+    (opencode-chat-set-tool-renderer
+     "bash"
+     (lambda (_ctx)
+       (list :tool-name "Shell"
+             :summary "custom summary"
+             :input (propertize "   input line\n" 'face 'bold)
+             :output (propertize "   output line\n" 'face 'italic))))
+    (let ((inhibit-read-only t))
+      (opencode-chat--render-tool-part (opencode-chat-test--tool-part)))
+    (should (string-match-p "Shell (custom summary)" (buffer-string)))
+    (should (string-match-p "input line" (buffer-string)))
+    (should (string-match-p "output line" (buffer-string)))
+    (let ((input-pos (string-match-p "input line" (buffer-string))))
+      (should input-pos)
+      (should (eq (get-text-property (1+ input-pos) 'face) 'bold)))))
+
+(ert-deftest opencode-chat-tool-renderer-nil-falls-back-to-default ()
+  "A buffer-local override returning nil falls back to the built-in renderer."
+  (opencode-test-with-temp-buffer "*test-tool-nil-fallback*"
+    (opencode-chat-mode)
+    (opencode-chat-set-tool-renderer "bash" (lambda (_ctx) nil))
+    (let ((inhibit-read-only t))
+      (opencode-chat--render-tool-part (opencode-chat-test--tool-part)))
+    (should (string-match-p "\\$ printf hi" (buffer-string)))
+    (should (string-match-p "hi" (buffer-string)))))
+
+(ert-deftest opencode-chat-tool-renderer-buffer-local-isolation ()
+  "Tool renderer overrides are buffer-local."
+  (let (custom-text default-text)
+    (opencode-test-with-temp-buffer "*test-tool-local-a*"
+      (opencode-chat-mode)
+      (opencode-chat-set-tool-renderer
+       "bash" (lambda (_ctx) (list :output "   only here\n")))
+      (let ((inhibit-read-only t))
+        (opencode-chat--render-tool-part (opencode-chat-test--tool-part)))
+      (setq custom-text (buffer-string)))
+    (opencode-test-with-temp-buffer "*test-tool-local-b*"
+      (opencode-chat-mode)
+      (let ((inhibit-read-only t))
+        (opencode-chat--render-tool-part (opencode-chat-test--tool-part)))
+      (setq default-text (buffer-string)))
+    (should (string-match-p "only here" custom-text))
+    (should-not (string-match-p "only here" default-text))
+    (should (string-match-p "\\$ printf hi" default-text))))
+
+(ert-deftest opencode-chat-tool-renderer-remove-restores-default ()
+  "Removing a buffer-local override restores the default renderer."
+  (opencode-test-with-temp-buffer "*test-tool-remove*"
+    (opencode-chat-mode)
+    (opencode-chat-set-tool-renderer
+     "bash" (lambda (_ctx) (list :output "   override\n")))
+    (opencode-chat-remove-tool-renderer "bash")
+    (let ((inhibit-read-only t))
+      (opencode-chat--render-tool-part (opencode-chat-test--tool-part)))
+    (should (string-match-p "\\$ printf hi" (buffer-string)))
+    (should-not (string-match-p "override" (buffer-string)))))
+
+(ert-deftest opencode-chat-tool-renderer-collapse-explicit-and-absent ()
+  "Explicit :collapsed-p t/nil override defaults; absent keeps default."
+  (let (explicit-true explicit-nil absent)
+    (opencode-test-with-temp-buffer "*test-tool-collapse-t*"
+      (opencode-chat-mode)
+      (opencode-chat-set-tool-renderer
+       "edit" (lambda (_ctx) (list :collapsed-p t :output "   body\n")))
+      (let ((inhibit-read-only t))
+        (opencode-chat--render-tool-part (opencode-chat-test--tool-part "edit")))
+      (setq explicit-true (buffer-string)))
+    (opencode-test-with-temp-buffer "*test-tool-collapse-nil*"
+      (opencode-chat-mode)
+      (opencode-chat-set-tool-renderer
+       "bash" (lambda (_ctx) (list :collapsed-p nil :output "   body\n")))
+      (let ((inhibit-read-only t))
+        (opencode-chat--render-tool-part (opencode-chat-test--tool-part "bash")))
+      (setq explicit-nil (buffer-string)))
+    (opencode-test-with-temp-buffer "*test-tool-collapse-absent*"
+      (opencode-chat-mode)
+      (opencode-chat-set-tool-renderer
+       "bash" (lambda (_ctx) (list :output "   body\n")))
+      (let ((inhibit-read-only t))
+        (opencode-chat--render-tool-part (opencode-chat-test--tool-part "bash")))
+      (setq absent (buffer-string)))
+    (should (string-match-p "\\[collapsed\\]" explicit-true))
+    (should-not (string-match-p "\\[collapsed\\]" explicit-nil))
+    (should (string-match-p "\\[collapsed\\]" absent))))
+
+(ert-deftest opencode-chat-tool-renderer-unknown-expanded ()
+  "Unknown/MCP tools use the generic fallback and remain expanded."
+  (opencode-test-with-temp-buffer "*test-tool-unknown*"
+    (opencode-chat-mode)
+    (let ((part (list :id "prt_unknown"
+                      :type "tool"
+                      :tool "mcp_custom"
+                      :state (list :status "completed"
+                                   :input (list :query "abc")
+                                   :output "done\n"))))
+      (let ((inhibit-read-only t))
+        (opencode-chat--render-tool-part part)))
+    (should (string-match-p "mcp_custom" (buffer-string)))
+    (should (string-match-p "query: abc" (buffer-string)))
+    (should-not (string-match-p "\\[collapsed\\]" (buffer-string)))))
+
+(ert-deftest opencode-chat-tool-renderer-reserved-rejection ()
+  "Public set/remove reject reserved tool names."
+  (opencode-test-with-temp-buffer "*test-tool-reserved*"
+    (opencode-chat-mode)
+    (should-error (opencode-chat-set-tool-renderer
+                   "question" (lambda (_ctx) nil))
+                  :type 'user-error)
+    (should-error (opencode-chat-remove-tool-renderer "permission")
+                  :type 'user-error)))
+
+(ert-deftest opencode-chat-tool-renderer-built-in-override ()
+  "Built-in renderers are overridable per buffer."
+  (opencode-test-with-temp-buffer "*test-tool-builtin-override*"
+    (opencode-chat-mode)
+    (opencode-chat-set-tool-renderer
+     "bash" (lambda (_ctx) (list :tool-name "Override" :output "   body\n")))
+    (let ((inhibit-read-only t))
+      (opencode-chat--render-tool-part (opencode-chat-test--tool-part)))
+    (should (string-match-p "Override" (buffer-string)))
+    (should-not (string-match-p "Say hi" (buffer-string)))))
+
+(ert-deftest opencode-chat-tool-renderer-expanded-built-in-defaults ()
+  "Edit and todo renderers remain expanded according to the defcustom."
+  (dolist (tool '("edit" "todowrite" "todo_write"))
+    (opencode-test-with-temp-buffer (format "*test-tool-expanded-%s*" tool)
+      (opencode-chat-mode)
+      (let ((inhibit-read-only t))
+        (opencode-chat--render-tool-part
+         (opencode-chat-test--tool-part tool)))
+      (should-not (string-match-p "\\[collapsed\\]" (buffer-string))))))
+
+(ert-deftest opencode-chat-tool-renderer-question-still-renders ()
+  "Reserved question transcript rendering remains core-controlled."
+  (opencode-test-with-temp-buffer "*test-tool-question*"
+    (opencode-chat-mode)
+    (let ((part (list :id "prt_q"
+                      :type "tool"
+                      :tool "question"
+                      :state (list :status "completed"
+                                   :input
+                                   (list :questions
+                                         (vector
+                                          (list :question "Choose DB"
+                                                :options
+                                                (vector (list :label "SQLite")
+                                                        (list :label "Postgres")))))
+                                   :metadata
+                                   (list :answers (vector (vector "SQLite")))))))
+      (let ((inhibit-read-only t))
+        (opencode-chat--render-tool-part part)))
+    (should (string-match-p "Choose DB" (buffer-string)))
+    (should (string-match-p "SQLite" (buffer-string)))
+    (should (string-match-p "● SQLite" (buffer-string)))))
+
 (ert-deftest opencode-chat-streaming-vs-render-step-start ()
   "Step-start parts rendered via update-part-inline match render-step-start.
 Both paths call the same render function."
@@ -3798,8 +4017,201 @@ Why this matters — users expect RET on edit diffs to open the edited file."
                   opencode-chat-message-file-map))
       ;; RET should be bound to open-file-at-point
       (goto-char (match-beginning 0))
+       (should (eq (key-binding (kbd "RET"))
+                   'opencode-chat-message-open-file-at-point)))))
+
+(ert-deftest opencode-chat-edit-tool-body-tab-toggles-section ()
+  "TAB on edit body text inherits the message map and toggles its section."
+  (opencode-test-with-temp-buffer "*test-edit-body-tab*"
+    (opencode-chat-mode)
+    (opencode-chat--set-current-message-id "msg_test")
+    (let ((inhibit-read-only t))
+      (opencode-chat--render-tool-part
+       (list :id "prt_edit_tab"
+             :type "tool"
+             :tool "edit"
+             :state (list :status "completed"
+                          :input (list :filePath "src/main.ts"
+                                       :oldString "old"
+                                       :newString "new")
+                          :output "Done"))))
+    (goto-char (point-min))
+    (should (search-forward "src/main.ts" nil t))
+    (goto-char (match-beginning 0))
+    (should (eq (key-binding (kbd "RET"))
+                #'opencode-chat-message-open-file-at-point))
+    (should (eq (key-binding (kbd "TAB"))
+                #'opencode-ui--toggle-section))))
+
+(ert-deftest opencode-chat-apply-patch-renders-clickable-multifile-diff ()
+  "Apply-patch colors diff lines and assigns each section its own file."
+  (opencode-test-with-temp-buffer "*test-apply-patch-render*"
+    (opencode-chat-mode)
+    (let ((inhibit-read-only t)
+          (patch
+           (concat
+            "*** Begin Patch\n"
+            "*** Update File: src/one.el\n"
+            "@@\n"
+            "-old\n"
+            "+new\n"
+            "*** Add File: src/two.el\n"
+            "+second\n"
+            "*** End Patch")))
+      (opencode-chat--render-tool-part
+       (list :id "prt_apply_patch"
+             :type "tool"
+             :tool "apply_patch"
+             :state (list :status "completed"
+                          :input (list :patchText patch)
+                          :output "Success"))))
+    (goto-char (point-min))
+    (should (search-forward "-old" nil t))
+    (let ((old-pos (match-beginning 0)))
+      (should (eq (get-text-property old-pos 'face)
+                  'opencode-diff-removed))
+      (should (equal (get-text-property old-pos 'opencode-file-path)
+                     "src/one.el")))
+    (should (search-forward "+new" nil t))
+    (should (eq (get-text-property (match-beginning 0) 'face)
+                'opencode-diff-added))
+    (should (search-forward "+second" nil t))
+    (let ((second-pos (match-beginning 0)))
+      (should (equal (get-text-property second-pos 'opencode-file-path)
+                     "src/two.el"))
+      (goto-char second-pos)
       (should (eq (key-binding (kbd "RET"))
-                  'opencode-chat-message-open-file-at-point)))))
+                  #'opencode-chat-message-open-file-at-point))
+      (should (eq (key-binding (kbd "TAB"))
+                  #'opencode-ui--toggle-section)))
+    (should-not (string-match-p "\\[collapsed\\]" (buffer-string)))))
+
+(ert-deftest opencode-chat-apply-patch-ret-opens-section-file ()
+  "RET on an apply-patch section opens that section's file."
+  (opencode-test-with-temp-buffer "*test-apply-patch-ret*"
+    (opencode-chat-mode)
+    (let ((default-directory "/tmp/")
+          opened)
+      (let ((inhibit-read-only t))
+        (opencode-chat--render-tool-part
+         (list :id "prt_apply_patch_ret"
+               :type "tool"
+               :tool "apply_patch"
+               :state
+               (list :status "completed"
+                     :input
+                     (list :patchText
+                           (concat
+                            "*** Begin Patch\n"
+                            "*** Update File: first.el\n"
+                            "+one\n"
+                            "*** Update File: second.el\n"
+                            "+two\n"
+                            "*** End Patch"))))))
+      (goto-char (point-min))
+      (should (search-forward "+two" nil t))
+      (cl-letf (((symbol-function 'file-exists-p) (lambda (_path) t))
+                ((symbol-function 'find-buffer-visiting) (lambda (_path) nil))
+                ((symbol-function 'find-file-other-window)
+                 (lambda (path) (setq opened path))))
+        (opencode-chat-message-open-file-at-point))
+      (should (equal opened "/tmp/second.el")))))
+
+(ert-deftest opencode-chat-apply-patch-resolves-lines-only-on-navigation ()
+  "Apply-patch rendering is stable; current file matching happens on RET."
+  (let* ((project-dir (make-temp-file "opencode-apply-range-" t))
+         (file-path (expand-file-name "sample.txt" project-dir)))
+    ;; This is the post-patch file.  Rendering must not rewrite the raw @@
+    ;; headers based on it, but navigation may use it to resolve line numbers.
+    (with-temp-file file-path
+      (insert "a\ninserted\nb\nc\nchanged\ne\n"))
+    (unwind-protect
+        (opencode-test-with-temp-buffer "*test-apply-patch-ranges*"
+          (opencode-chat-mode)
+          (setq default-directory (file-name-as-directory project-dir))
+          (let ((inhibit-read-only t))
+            (opencode-chat--render-tool-part
+             (list
+              :id "prt_apply_ranges"
+              :type "tool"
+              :tool "apply_patch"
+              :state
+              (list
+               :status "completed"
+               :input
+               (list
+                :patchText
+                (concat
+                 "*** Begin Patch\n"
+                 "*** Update File: sample.txt\n"
+                 "@@\n"
+                 " a\n"
+                 "+inserted\n"
+                 " b\n"
+                 "@@\n"
+                 " c\n"
+                 "-old\n"
+                 "+changed\n"
+                 " e\n"
+                 "*** End Patch"))))))
+          (should-not (string-search "@@ -" (buffer-string)))
+          (should (= 2 (how-many "^   @@$" (point-min) (point-max))))
+          (goto-char (point-min))
+          (should (search-forward "+changed" nil t))
+          (goto-char (match-beginning 0))
+          (should-not (get-text-property (point) 'opencode-diff-line))
+          (should (plist-get
+                   (get-text-property (point) 'opencode-apply-patch-line)
+                   :post-image))
+          (should (= 5
+                     (opencode-chat-message--estimate-line-number file-path))))
+      (delete-directory project-dir t))))
+
+(ert-deftest opencode-chat-apply-patch-line-resolution-fallbacks ()
+  "Navigation uses pre-image fallback and rejects ambiguous matches."
+  (let ((file (make-temp-file "opencode-apply-line-")))
+    (unwind-protect
+        (let ((metadata
+               (list :operation 'update
+                     :pre-image '("before" "tail")
+                     :post-image '("after" "tail")
+                     :pre-offset 1
+                     :post-offset 1)))
+          ;; Patch has not been applied: resolve through the pre-image.
+          (with-temp-file file
+            (insert "top\nbefore\ntail\nbottom\n"))
+          (should (= 3
+                     (opencode-chat-message--apply-patch-line
+                      file metadata)))
+          ;; Duplicate context is unsafe, so do not select either match.
+          (with-temp-file file
+            (insert "before\ntail\nmiddle\nbefore\ntail\n"))
+          (should-not
+           (opencode-chat-message--apply-patch-line file metadata)))
+      (delete-file file))))
+
+(ert-deftest opencode-chat-apply-patch-ambiguous-does-not-use-raw-range ()
+  "Apply-patch metadata blocks stale raw @@ fallback when matching fails."
+  (let ((file (make-temp-file "opencode-apply-ambiguous-")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "same\nsame\nsame\nsame\n"))
+          (opencode-test-with-temp-buffer "*test-apply-ambiguous-range*"
+            (insert
+             (propertize
+              "@@ -10,2 +50,2 @@\n+same\n"
+              'opencode-apply-patch-line
+              (list :operation 'update
+                    :pre-image '("same" "same")
+                    :post-image '("same" "same")
+                    :pre-offset 0
+                    :post-offset 0)))
+            (goto-char (point-max))
+            (backward-char)
+            (should-not
+             (opencode-chat-message--estimate-line-number file))))
+      (delete-file file))))
 
 ;;; --- Test: Edit tool RET opens file in other window ---
 

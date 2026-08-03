@@ -624,10 +624,12 @@ Called from the tool renderer registry when rendering question tool parts."
                   (insert (propertize (format " — %s" desc) 'face dim-face)))
                 (insert "\n")))))))))
 
-;; Register the question tool renderer
-(declare-function opencode-chat-register-tool-renderer "opencode-chat-message" (tool-name renderer-fn))
-(with-eval-after-load 'opencode-chat-message
-  (opencode-chat-register-tool-renderer "question" #'opencode-question--render-tool-body))
+;; Register the reserved question tool renderer through the private core API.
+(require 'opencode-tool-render)
+(declare-function opencode-chat--register-core-tool-renderer "opencode-tool-render"
+                  (tool-name renderer-fn &optional legacy))
+(opencode-chat--register-core-tool-renderer
+ "question" #'opencode-question--render-tool-body t)
 
 (provide 'opencode-question)
 ;;; opencode-question.el ends here

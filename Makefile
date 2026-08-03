@@ -9,14 +9,14 @@ BATCH = $(EMACS) -Q -batch -L . -L test \
   --eval "(package-initialize)" \
   --eval "(dolist (d (directory-files package-user-dir t \"[^.].*\")) (when (file-directory-p d) (push d load-path)))"
 else
-DEPS = -L $(ELPA_DIR)/treemacs-3.2 \
-       -L $(ELPA_DIR)/s-1.13.0 \
-       -L $(ELPA_DIR)/dash-2.20.0 \
-       -L $(ELPA_DIR)/ht-2.3 \
-       -L $(ELPA_DIR)/pfuture-1.10.3 \
-       -L $(ELPA_DIR)/cfrs-1.7.0 \
-       -L $(ELPA_DIR)/ace-window-20220911.358 \
-       -L $(ELPA_DIR)/posframe-1.4.4
+DEPS = $(foreach d,$(wildcard \
+         $(ELPA_DIR)/markdown-mode-* \
+         $(ELPA_DIR)/treemacs-* \
+         $(ELPA_DIR)/s-* \
+         $(ELPA_DIR)/dash-* \
+         $(ELPA_DIR)/ht-* \
+         $(ELPA_DIR)/pfuture-* \
+         $(ELPA_DIR)/ace-window-*),-L $(d))
 BATCH = $(EMACS) -Q -batch -L . -L test $(DEPS)
 endif
 
