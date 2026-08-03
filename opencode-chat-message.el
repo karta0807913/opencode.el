@@ -35,48 +35,114 @@
 
 ;;; --- File path keymap (for edit tool sections) ---
 
-(defun opencode-chat-message--estimate-line-number ()
+(defun opencode-chat-message--find-unique-line-sequence (lines needle)
+  "Return the zero-based start of unique NEEDLE in LINES, or nil."
+  (when needle
+    (let ((limit (- (length lines) (length needle)))
+          (index 0)
+          found)
+      (while (<= index limit)
+        (when (equal needle
+                     (seq-subseq lines index (+ index (length needle))))
+          (if found
+              (setq found :multiple
+                    index (1+ limit))
+            (setq found index)))
+        (cl-incf index))
+      (and (integerp found) found))))
+
+(defun opencode-chat-message--apply-patch-file-lines (path)
+  "Return current contents of PATH as lines, preferring a visiting buffer."
+  (when path
+    (let ((buffer (find-buffer-visiting path)))
+      (cond
+       ((buffer-live-p buffer)
+        (with-current-buffer buffer
+          (string-lines
+           (buffer-substring-no-properties (point-min) (point-max)))))
+       ((file-readable-p path)
+        (with-temp-buffer
+          (insert-file-contents path)
+          (string-lines (buffer-string))))))))
+
+(defun opencode-chat-message--apply-patch-line (path metadata)
+  "Resolve an apply_patch line in PATH from deterministic METADATA.
+Prefer the post-image for an already-applied patch, then the pre-image
+for a patch that is not yet applied.  Ambiguous or missing images return
+nil rather than choosing an arbitrary match."
+  (let ((operation (plist-get metadata :operation))
+        (pre-image (plist-get metadata :pre-image))
+        (post-image (plist-get metadata :post-image))
+        (pre-offset (plist-get metadata :pre-offset))
+        (post-offset (plist-get metadata :post-offset)))
+    (cond
+     ((and (eq operation 'add) (integerp post-offset))
+      (1+ post-offset))
+     ((when-let* ((lines (opencode-chat-message--apply-patch-file-lines path))
+                  (start
+                   (opencode-chat-message--find-unique-line-sequence
+                    lines post-image))
+                  ((integerp post-offset)))
+        (+ start post-offset 1)))
+     ((when-let* ((lines (opencode-chat-message--apply-patch-file-lines path))
+                  (start
+                   (opencode-chat-message--find-unique-line-sequence
+                    lines pre-image))
+                  ((integerp pre-offset)))
+        (+ start pre-offset 1))))))
+
+(defun opencode-chat-message--estimate-line-number (&optional path)
   "Estimate the file line number at point from diff context.
 Searches backward for an @@ hunk header and counts lines forward.
+For apply_patch, resolve deterministic hunk metadata against PATH only
+when the user navigates, so transcript rendering never depends on the
+current workspace.
 Returns a line number or nil."
-  (save-excursion
-    (let ((target-pos (point))
-          (hunk-line nil))
-      ;; Search backward for @@ -N,M +L,K @@
-      (when (re-search-backward "@@ [^@]+ \\+\\([0-9]+\\)" nil t)
-        (setq hunk-line (string-to-number (match-string 1)))
-        ;; Count forward from hunk header to target, tracking new-file lines
-        (forward-line 1)
-        (let ((offset 0))
-          (while (< (point) target-pos)
-            (let ((ch (char-after)))
-              (when (and ch (not (= ch ?-)))
-                ;; Context lines and + lines advance the new-file line counter
-                (cl-incf offset)))
-            (forward-line 1))
-          (+ hunk-line offset))))))
+  (let ((metadata
+         (get-text-property (point) 'opencode-apply-patch-line)))
+    (if metadata
+        ;; Do not fall back to a raw @@ range when deterministic apply_patch
+        ;; context is present but no longer matches the workspace.  Historical
+        ;; ranges may be stale; opening without a line is safer.
+        (opencode-chat-message--apply-patch-line path metadata)
+      (save-excursion
+        (let ((target-pos (point))
+              (hunk-line nil))
+          ;; Search backward for @@ -N,M +L,K @@
+          (when (re-search-backward "@@ [^@]+ \\+\\([0-9]+\\)" nil t)
+            (setq hunk-line (string-to-number (match-string 1)))
+            ;; Count forward from hunk header to target, tracking new-file lines
+            (forward-line 1)
+            (let ((offset 0))
+              (while (< (point) target-pos)
+                (let ((ch (char-after)))
+                  (when (and ch (not (= ch ?-)))
+                    ;; Context lines and + lines advance the new-file line counter
+                    (cl-incf offset)))
+                (forward-line 1))
+              (+ hunk-line offset))))))))
 
 (defun opencode-chat-message-open-file-at-point ()
   "Open the file at point, using `opencode-file-path' text property.
 If the file is already displayed in a window, switch to that window.
 Estimates the line number from surrounding diff hunk context."
   (interactive)
-  (let ((path (get-text-property (point) 'opencode-file-path))
-        (line (opencode-chat-message--estimate-line-number)))
+  (let* ((path (get-text-property (point) 'opencode-file-path))
+         (abs-path (and path (expand-file-name path)))
+         (line (opencode-chat-message--estimate-line-number abs-path)))
     (if path
-        (let ((abs-path (expand-file-name path)))
-          (if (file-exists-p abs-path)
-              (let ((existing-buf (find-buffer-visiting abs-path)))
-                (if-let ((win (and existing-buf
-                                   (get-buffer-window existing-buf t))))
-                    ;; File already visible — switch to that window
-                    (progn
-                      (select-window win)
-                      (when line (goto-char (point-min)) (forward-line (1- line))))
-                  ;; Open in other window
-                  (find-file-other-window abs-path)
-                  (when line (goto-char (point-min)) (forward-line (1- line)))))
-            (user-error "File not found: %s" abs-path)))
+        (if (file-exists-p abs-path)
+            (let ((existing-buf (find-buffer-visiting abs-path)))
+              (if-let ((win (and existing-buf
+                                 (get-buffer-window existing-buf t))))
+                  ;; File already visible — switch to that window
+                  (progn
+                    (select-window win)
+                    (when line (goto-char (point-min)) (forward-line (1- line))))
+                ;; Open in other window
+                (find-file-other-window abs-path)
+                (when line (goto-char (point-min)) (forward-line (1- line)))))
+          (user-error "File not found: %s" abs-path))
       (user-error "No file at point"))))
 
 (defvar opencode-chat-message-file-map
@@ -108,12 +174,12 @@ preserved across re-renders without needing a parent-chain trick.")
 ;; go through the generated `opencode-chat--SLOT' functions, writes
 ;; through `opencode-chat--set-SLOT'.
 
-;; Tool renderer registry (`opencode-chat--tool-renderers'),
-;; `opencode-chat-register-tool-renderer', tool input-summary helpers,
-;; and all built-in body renderers (bash, read/write, grep/glob, task,
-;; edit, todowrite) have moved to `opencode-tool-render.el'.  Dispatch
-;; goes through `opencode-chat--render-tool-body-dispatch'; collapse
-;; heuristics consult `opencode-chat--builtin-tool-p'.
+;; Tool renderer registries, `opencode-chat-set-tool-renderer',
+;; `opencode-chat-remove-tool-renderer',
+;; tool input-summary helpers, and all built-in body renderers (bash,
+;; read/write, grep/glob, task, edit, todowrite) have moved to
+;; `opencode-tool-render.el'.  Dispatch goes through
+;; `opencode-chat--tool-render-model'.
 
 ;;; --- Store accessors ---
 
@@ -793,32 +859,32 @@ unregistered tools route to the MCP-generic renderer."
          (input       (plist-get norm :input))
          (output      (plist-get norm :output))
          (metadata    (plist-get norm :metadata))
-         (section (opencode-ui--make-section 'tool-call (plist-get part :id) part))
-         (tool-prefix (propertize opencode--stripe-char 'face 'opencode-assistant-block))
-         ;; Collapse built-ins by default, except edit / todowrite which
-         ;; are always expanded (diff and todo tables are the whole point).
-         ;; MCP / unregistered tools stay expanded so the user can see
-         ;; their arbitrary payload.
-         (should-collapse-p
-          (and (opencode-chat--builtin-tool-p tool-name)
-               (not (string= tool-name "edit"))
-               (not (string-match-p "todowrite\\|todo_write" tool-name))))
-         (section-ov
-          (opencode-ui--with-section section
-            ;; Header line
-            (let ((header-start (point)))
-              (insert " ")
-              (opencode-ui--insert-icon (if should-collapse-p 'collapsed 'expanded))
-              (insert " ")
-              (insert (propertize tool-name 'face 'opencode-tool-name))
-              (when (and arg-summary
-                         (stringp arg-summary)
-                         (not (string-empty-p arg-summary)))
-                (insert " ")
-                (insert (propertize (format "(%s)" (opencode--truncate-string arg-summary 60))
-                                    'face 'opencode-tool-arg)))
-              (when (and duration (> duration 0))
-                (let* ((secs (round (/ duration 1000.0)))
+          (tool-prefix (propertize opencode--stripe-char 'face 'opencode-assistant-block))
+          (model (opencode-chat--tool-render-model
+                  tool-name state input output metadata part arg-summary))
+          (render-tool-name (or (plist-get model :tool-name) tool-name))
+          (summary (if (plist-member model :summary)
+                       (plist-get model :summary)
+                     arg-summary))
+          (should-collapse-p (and (plist-member model :collapsed-p)
+                                  (plist-get model :collapsed-p)))
+          (section (opencode-ui--make-section 'tool-call (plist-get part :id) part))
+          (section-ov
+           (opencode-ui--with-section section
+             ;; Header line
+             (let ((header-start (point)))
+               (insert " ")
+               (opencode-ui--insert-icon (if should-collapse-p 'collapsed 'expanded))
+               (insert " ")
+               (insert (propertize render-tool-name 'face 'opencode-tool-name))
+               (when (and summary
+                          (stringp summary)
+                          (not (string-empty-p summary)))
+                 (insert " ")
+                 (insert (propertize (format "(%s)" (opencode--truncate-string summary 60))
+                                     'face 'opencode-tool-arg)))
+               (when (and duration (> duration 0))
+                 (let* ((secs (round (/ duration 1000.0)))
                        (dur-str (if (>= secs 60)
                                     (format "%dm%ds" (/ secs 60) (mod secs 60))
                                   (format "%ds" secs))))
@@ -834,14 +900,15 @@ unregistered tools route to the MCP-generic renderer."
                 ("error"     (insert (propertize "✗" 'face 'opencode-tool-error)))
                 (_           (insert "·")))
               (put-text-property header-start (point) 'line-prefix tool-prefix)
-              (insert "\n"))
-            ;; Body: data-driven dispatch through the registry.
-            (let ((body-start (point)))
-              (opencode-chat--render-tool-body-dispatch tool-name input output metadata)
-              (when (> (point) body-start)
-                (put-text-property body-start (max body-start (1- (point)))
-                                   'line-prefix tool-prefix))))))
-    ;; Default-collapse built-in non-edit / non-todo sections.
+               (insert "\n"))
+             ;; Body: declarative fields returned by the tool renderer.
+             (let ((body-start (point)))
+               (opencode-chat--render-tool-field (plist-get model :input))
+               (opencode-chat--render-tool-field (plist-get model :output))
+               (when (> (point) body-start)
+                 (put-text-property body-start (max body-start (1- (point)))
+                                    'line-prefix tool-prefix))))))
+    ;; Collapse sections when the renderer model requests it.
     (when (and should-collapse-p section-ov)
       (let* ((start (overlay-start section-ov))
              (end (overlay-end section-ov))
@@ -1082,7 +1149,8 @@ Returns:
           (save-excursion
             (goto-char pos)
             (unless (bolp)
-              (let ((inhibit-read-only t))
+              (let ((inhibit-read-only t)
+                    (buffer-undo-list t))
                 (insert "\n"))
               (setq pos (point)))
             ;; Invariant: after the guard, the marker's anchor MUST be at

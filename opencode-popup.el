@@ -105,6 +105,7 @@ area including separator and prompt), re-renders via `render-input-area',
 and restores any saved user text.  Must be called from within
 the chat buffer where the popup was displayed."
   (let ((inhibit-read-only t)
+        (buffer-undo-list t)
         (saved opencode-popup--saved-input)
         (me (opencode-chat-message-messages-end)))
     ;; Delete from messages-end to end of buffer (popup + any residual)
@@ -290,6 +291,7 @@ so callers can catch and recover gracefully."
      (unless (opencode-popup--input-area-valid-p)
        (error "Popup: input-start marker is nil or invalid, cannot render inline"))
      (let ((inhibit-read-only t)
+           (buffer-undo-list t)
            (me (opencode-chat-message-messages-end)))
        ;; Delete the entire input area (separator + prompt + footer)
        ;; from messages-end, not input-start, to avoid leaving a

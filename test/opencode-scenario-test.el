@@ -1369,6 +1369,49 @@ which wipes and rebuilds the entire buffer.  Undo must not reverse this."
         (error nil))
       (should (string= text-before (buffer-string))))))
 
+(ert-deftest opencode-scenario-undo-safe-after-section-toggle ()
+  "TAB collapse/expand must not record undo entries.
+Bug: `opencode-ui--toggle-section' bound only `inhibit-read-only', so its
+edits (icon swap, [collapsed] indicator insert/delete, invisible props)
+leaked into `buffer-undo-list'.  A later C-/ in the input area would
+then replay those transcript mutations — visually \"undoing\" the
+rendered messages above."
+  (opencode-scenario-with-replay
+      (concat
+       ":session ses_toggle_undo\n"
+       ":refresh [{\"info\":{\"id\":\"msg_u1\",\"role\":\"user\",\"time\":{\"created\":1700000000000}},\"parts\":[{\"id\":\"prt_u1\",\"type\":\"text\",\"text\":\"hello\"}]},{\"info\":{\"id\":\"msg_a1\",\"role\":\"assistant\",\"time\":{\"created\":1700000001000},\"modelID\":\"claude-opus-4-6\",\"providerID\":\"anthropic\",\"tokens\":{\"input\":10,\"output\":20,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}},\"parts\":[{\"id\":\"prt_a1\",\"type\":\"text\",\"text\":\"world\",\"time\":{\"start\":1700000001000,\"end\":1700000002000}}]}]\n"
+       ":assert-contains world\n")
+    ;; Clean slate — replay renders are already undo-guarded
+    (setq buffer-undo-list nil)
+    (let ((text-before (buffer-string)))
+      (goto-char (point-min))
+      (search-forward "world")
+      (opencode-ui--toggle-section)          ; collapse
+      (should (null buffer-undo-list))
+      (opencode-ui--toggle-section)          ; expand
+      (should (null buffer-undo-list))
+      (should (string= text-before (buffer-string))))))
+
+(ert-deftest opencode-scenario-undo-safe-after-permission-popup ()
+  "Showing and answering an inline permission popup must not record undo.
+Bug: `opencode-popup--with-inline-region' (popup show deletes the input
+area and inserts popup content) and `opencode-popup--restore-input'
+(dismiss deletes the popup and re-renders the input area) bound only
+`inhibit-read-only'.  Every popup round-trip left insert/delete pairs in
+`buffer-undo-list'; C-/ afterwards re-materialized popup text and ate
+the freshly rendered input area."
+  (opencode-scenario-with-replay
+      (concat
+       ":session ses_popup_undo\n"
+       ":refresh [{\"info\":{\"id\":\"msg_u1\",\"role\":\"user\",\"time\":{\"created\":1700000000000}},\"parts\":[{\"id\":\"prt_u1\",\"type\":\"text\",\"text\":\"hello\"}]}]\n"
+       ":api POST /permission/per_undo1/reply 200 true\n"
+       ":eval (setq buffer-undo-list nil)\n"
+       ":sse {\"type\":\"permission.asked\",\"properties\":{\"id\":\"per_undo1\",\"sessionID\":\"ses_popup_undo\",\"permission\":\"bash\",\"patterns\":[\"echo hi\"],\"metadata\":{}}}\n"
+       ":assert-permission\n"
+       ":answer-permission allow-once\n"
+       ":assert-no-permission\n")
+    (should (null buffer-undo-list))))
+
 ;;; --- @-mention chip tests ---
 
 (ert-deftest opencode-scenario-mention-sequential-folder-chips ()

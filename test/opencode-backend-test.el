@@ -38,6 +38,27 @@ Without this boundary, alternate backends would have to mimic OpenCode's
     (should (= (plist-get session :created-at) 1))
     (should (eq (plist-get session :raw) raw))))
 
+(ert-deftest opencode-backend-opencode-project-normalizes-worktree ()
+  "OpenCode projects expose `worktree' as canonical `directory'."
+  (let* ((raw '(:id "prj_1" :worktree "/tmp/project/" :name "Project"))
+         (project (opencode-backend-opencode-project raw)))
+    (should (equal (plist-get project :id) "prj_1"))
+    (should (equal (plist-get project :directory) "/tmp/project"))
+    (should (equal (plist-get project :name) "Project"))
+    (should (eq (plist-get project :raw) raw))))
+
+(ert-deftest opencode-backend-opencode-list-projects-uses-project-api ()
+  "OpenCode project listing stays behind the backend adapter boundary."
+  (let (requested-path)
+    (cl-letf (((symbol-function 'opencode-api-get-sync)
+               (lambda (path &optional _params)
+                 (setq requested-path path)
+                 [(:id "prj_1" :worktree "/tmp/project")])))
+      (let ((projects (opencode-backend-opencode-list-projects)))
+        (should (equal "/project" requested-path))
+        (should (equal "/tmp/project"
+                       (plist-get (car projects) :directory)))))))
+
 (ert-deftest opencode-backend-opencode-message-normalizes-parts ()
   "OpenCode message payloads must adapt to canonical messages with
 canonical parts, so renderers can eventually consume opencode.el's own
@@ -128,6 +149,17 @@ and can drift from it; `opencode-backend-supports-p' cannot."
     (should (opencode-backend-supports-p 'list-sessions b))
     (should-not (opencode-backend-supports-p 'get-todos b))
     (should-not (opencode-backend-supports-p 'no-such-operation b))))
+
+(ert-deftest opencode-backend-list-projects-is-optional ()
+  "Project listing is discoverable without becoming a required operation."
+  (let ((without (opencode-backend-test--stub :name 'without-projects))
+        (with (opencode-backend-test--stub
+               :name 'with-projects
+               :list-projects-fn (lambda () '((:id "prj_1"))))))
+    (should-not (opencode-backend-supports-p 'list-projects without))
+    (should (opencode-backend-supports-p 'list-projects with))
+    (should (equal '((:id "prj_1"))
+                   (opencode-backend-list-projects with)))))
 
 (ert-deftest opencode-backend-register-rejects-missing-required-ops ()
   "Verify registration fails loudly when a required operation is absent.

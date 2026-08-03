@@ -3,6 +3,16 @@
 Emacs 30 frontend for the OpenCode AI coding agent.
 Talks to the OpenCode HTTP REST API (`http://127.0.0.1:<port>`) and SSE event stream.
 
+## Project-local Skills
+
+- **`opencode-api-discovery`** (`.opencode/skills/opencode-api-discovery/SKILL.md`) —
+  load this skill before implementing, debugging, or documenting any OpenCode
+  HTTP/SSE endpoint, SDK method/type, event, or API migration. It discovers the
+  current contract from the live server's `GET /doc`, the published
+  `@opencode-ai/sdk`, or pinned upstream generated SDK sources, and distinguishes
+  root, v2, experimental, released, and unreleased surfaces. Do not treat the
+  static endpoint lists below as the source of truth for new API work.
+
 ## Built-in Commands
 
 These client-side commands are available via `C-p` (opencode-command-select) in the chat buffer:
@@ -987,6 +997,12 @@ Properties structure for finalized: `{part: {sessionID, id, type, text, time: {s
 
 ## Key API Endpoints
 
+This section records the API assumptions currently implemented by opencode.el;
+it is not a live catalog. Before adding or changing an endpoint, use the
+project-local `opencode-api-discovery` skill and cite the target server version,
+npm SDK version, or upstream commit. The exact installed-server contract is
+available from `GET /doc` with `Accept: application/json`.
+
 All requests require `Accept: application/json` header (without it, the SPA fallback returns HTML).
 All session-scoped requests (`/session/:id/*`) require `X-OpenCode-Directory` header matching the project directory that created the session. The server hashes this header into a `projectID` to locate session storage on disk — a mismatched directory causes `NotFoundError` (silent 204 on `prompt_async`, empty responses on GET).
 
@@ -1301,6 +1317,7 @@ M-x opencode-window-toggle-sidebar
 | `TAB` | `opencode-sidebar--toggle-node` | Expand/collapse session node |
 | `g` | `opencode-sidebar--refresh` | Refresh session list from server |
 | `c` | `opencode-sidebar--new-session` | Create new session and open chat |
+| `C` | `opencode-sidebar--new-session-choose-project` | Choose an OpenCode project, then create a session |
 | `d` | `opencode-sidebar--delete-session` | Delete session at point |
 | `R` | `opencode-sidebar--rename-session` | Rename session at point |
 | `w` | `opencode-sidebar--set-width` | Resize sidebar width |

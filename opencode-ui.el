@@ -164,6 +164,7 @@ independently collapsed."
   (let ((ov (opencode-ui--innermost-section-overlay (or pos (point)))))
     (when ov
       (let* ((inhibit-read-only t)
+             (buffer-undo-list t)
              (start (overlay-start ov))
              (end (overlay-end ov))
              ;; Body starts after the header line's newline

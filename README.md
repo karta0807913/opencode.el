@@ -77,14 +77,14 @@ M-x package-vc-upgrade RET opencode RET
 
 ### Quick Reference
 
-| Action | Key / Command |
-|--------|---------------|
-| Start server | `C-c o o` or `M-x opencode-start` |
-| Attach to server | `C-c o O` or `M-x opencode-attach` |
-| Open chat | `C-c o c` or `M-x opencode-chat` |
-| Toggle sidebar | `C-c o s` or `M-x opencode-window-toggle-sidebar` |
-| Send message | `C-c C-c` (in chat buffer) |
-| Abort generation | `C-c C-k` (in chat buffer) |
+| Action           | Key / Command                                     |
+|------------------|---------------------------------------------------|
+| Start server     | `C-c o o` or `M-x opencode-start`                 |
+| Attach to server | `C-c o O` or `M-x opencode-attach`                |
+| Open chat        | `C-c o c` or `M-x opencode-chat`                  |
+| Toggle sidebar   | `C-c o s` or `M-x opencode-window-toggle-sidebar` |
+| Send message     | `C-c C-c` (in chat buffer)                        |
+| Abort generation | `C-c C-k` (in chat buffer)                        |
 
 ### Step-by-Step Guide
 
@@ -119,16 +119,16 @@ M-x package-vc-upgrade RET opencode RET
 
 All commands are available under the prefix key (`C-c o` by default):
 
-| Key | Command | Description |
-|-----|---------|-------------|
-| `o` | `opencode-start` | Start OpenCode server and connect |
-| `O` | `opencode-attach` | Attach to an existing server by port |
-| `c` | `opencode-chat` | Open or create a chat session |
-| `l` | `opencode-list-sessions` | List all sessions in a project |
-| `s` | `opencode-window-toggle-sidebar` | Toggle the project sidebar |
-| `k` | `opencode-stop` | Stop the server and disconnect |
-| `r` | `opencode-refresh` | Refresh all cached data |
-| `d` | `opencode-show-debug-log` | Open the debug log buffer |
+| Key | Command                          | Description                          |
+|-----|----------------------------------|--------------------------------------|
+| `o` | `opencode-start`                 | Start OpenCode server and connect    |
+| `O` | `opencode-attach`                | Attach to an existing server by port |
+| `c` | `opencode-chat`                  | Open or create a chat session        |
+| `l` | `opencode-list-sessions`         | List all sessions in a project       |
+| `s` | `opencode-window-toggle-sidebar` | Toggle the project sidebar           |
+| `k` | `opencode-stop`                  | Stop the server and disconnect       |
+| `r` | `opencode-refresh`               | Refresh all cached data              |
+| `d` | `opencode-show-debug-log`        | Open the debug log buffer            |
 
 ## Chat Buffer
 
@@ -143,7 +143,7 @@ The chat buffer is the primary interface for interacting with OpenCode.
 │ ▼ You  14:30:25                                              │
 │ │ help me commit                                             │
 │                                                              │
-│ ▼ Assistant Agent claude-opus-4-6  14:30:28                 │
+│ ▼ Assistant Agent claude-opus-4-6  14:30:28                  │
 │ │ ▶ bash ($ git status)  ⏳                                  │  ← collapsible tool
 │ │ [collapsed]                                                │
 │ │                                                            │
@@ -153,7 +153,7 @@ The chat buffer is the primary interface for interacting with OpenCode.
 │ > _                                                          │  ← input area
 ├──────────────────────────────────────────────────────────────┤
 │ [claude-opus-4-6] Agent Name                                 │  ← footer info
-│  Tokens: 1,437  (⬆0 ⬇1,437  cache: ...)                      │
+│  Tokens: 1,437  (⬆0 ⬇1,437  cache: ...)                     │
 │  Context: ████░░░░░░  0.7%  (1,437/200k)                     │
 ├──────────────────────────────────────────────────────────────┤
 │ C-c C-c send  C-c C-k abort  TAB agent                       │  ← shortcuts
@@ -162,29 +162,29 @@ The chat buffer is the primary interface for interacting with OpenCode.
 
 ### Chat Keybindings
 
-| Key | Command | Description |
-|-----|---------|-------------|
-| `C-c C-c` | `opencode-chat-send` | Send the current message |
-| `C-c C-k` | `opencode-chat-abort` | Abort the current generation |
-| `TAB` | `opencode-chat-cycle-agent` | Cycle through available agents |
-| `M-p` | `opencode-chat-input-history-prev` | Previous message in history |
-| `M-n` | `opencode-chat-input-history-next` | Next message in history |
-| `C-c C-v` | `opencode-chat-paste-image` | Paste image from clipboard |
-| `C-p` | `opencode-command-select` | Open command palette |
+| Key       | Command                            | Description                    |
+|-----------|------------------------------------|--------------------------------|
+| `C-c C-c` | `opencode-chat-send`               | Send the current message       |
+| `C-c C-k` | `opencode-chat-abort`              | Abort the current generation   |
+| `TAB`     | `opencode-chat-cycle-agent`        | Cycle through available agents |
+| `M-p`     | `opencode-chat-input-history-prev` | Previous message in history    |
+| `M-n`     | `opencode-chat-input-history-next` | Next message in history        |
+| `C-c C-v` | `opencode-chat-paste-image`        | Paste image from clipboard     |
+| `C-p`     | `opencode-command-select`          | Open command palette           |
 
 ### Slash Commands
 
 Type `/` in the input area to see available commands:
 
-| Command | Description |
-|---------|-------------|
+| Command    | Description                              |
+|------------|------------------------------------------|
 | `/compact` | Summarize session history to save tokens |
-| `/rename` | Rename the current session |
-| `/fork` | Fork the session to a new history |
-| `/share` | Generate a shareable URL |
-| `/unshare` | Revoke the shareable URL |
-| `/undo` | Revert to the previous user message |
-| `/redo` | Restore the reverted message |
+| `/rename`  | Rename the current session               |
+| `/fork`    | Fork the session to a new history        |
+| `/share`   | Generate a shareable URL                 |
+| `/unshare` | Revoke the shareable URL                 |
+| `/undo`    | Revert to the previous user message      |
+| `/redo`    | Restore the reverted message             |
 
 ### @-Mentions
 
@@ -206,16 +206,17 @@ v Session: "Fix login bug" (ses_abc...)
 
 ### Sidebar Keybindings
 
-| Key | Command | Description |
-|-----|---------|-------------|
-| `RET` | Open session / view diff | Open the session chat or view file diff |
-| `TAB` | Toggle expand/collapse | Expand or collapse a session node |
-| `g` | Refresh | Refresh the session list |
-| `c` | New session | Create a new session |
-| `d` | Delete session | Delete the session at point |
-| `R` | Rename session | Rename the session at point |
-| `w` | Set width | Resize the sidebar width |
-| `q` | Quit | Close the sidebar |
+| Key   | Command                  | Description                                       |
+|-------|--------------------------|---------------------------------------------------|
+| `RET` | Open session / view diff | Open the session chat or view file diff           |
+| `TAB` | Toggle expand/collapse   | Expand or collapse a session node                 |
+| `g`   | Refresh                  | Refresh the session list                          |
+| `c`   | New session              | Create a new session                              |
+| `C`   | New session in project   | Choose an OpenCode project, then create a session |
+| `d`   | Delete session           | Delete the session at point                       |
+| `R`   | Rename session           | Rename the session at point                       |
+| `w`   | Set width                | Resize the sidebar width                          |
+| `q`   | Quit                     | Close the sidebar                                 |
 
 ## Customizations
 
@@ -223,79 +224,82 @@ All customizable variables are in the `opencode` customization group. Use `M-x c
 
 ### Core Settings
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `opencode-keymap-prefix` | `"C-c o"` | Global key prefix for commands |
-| `opencode-default-directory` | `nil` | Default project directory (`nil` = current buffer) |
-| `opencode-debug` | `nil` | Enable debug logging to `*opencode: debug*` |
-| `opencode-debug-max-lines` | `10000` | Maximum lines in debug log buffer |
+| Variable                     | Default   | Description                                        |
+|------------------------------|-----------|----------------------------------------------------|
+| `opencode-keymap-prefix`     | `"C-c o"` | Global key prefix for commands                     |
+| `opencode-default-directory` | `nil`     | Default project directory (`nil` = current buffer) |
+| `opencode-debug`             | `nil`     | Enable debug logging to `*opencode: debug*`        |
+| `opencode-debug-max-lines`   | `10000`   | Maximum lines in debug log buffer                  |
 
 ### Server Settings
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `opencode-server-command` | `"opencode"` | Path to `opencode` binary |
-| `opencode-server-args` | `("serve" "--port" "0" "--print-logs")` | Arguments for server startup |
-| `opencode-server-host` | `"127.0.0.1"` | Server host address |
-| `opencode-server-port` | `nil` | Fixed port (`nil` = auto-assign) |
-| `opencode-server-log-level` | `"WARN"` | Server log level |
-| `opencode-server-auto-restart` | `t` | Auto-restart server on crash |
-| `opencode-server-health-retries` | `5` | Health check retries on startup |
-| `opencode-server-restart-delay` | `2` | Seconds to wait before restart |
-| `opencode-server-log-max-lines` | `5000` | Maximum lines in server log |
+| Variable                         | Default                                 | Description                      |
+|----------------------------------|-----------------------------------------|----------------------------------|
+| `opencode-server-command`        | `"opencode"`                            | Path to `opencode` binary        |
+| `opencode-server-args`           | `("serve" "--port" "0" "--print-logs")` | Arguments for server startup     |
+| `opencode-server-host`           | `"127.0.0.1"`                           | Server host address              |
+| `opencode-server-port`           | `nil`                                   | Fixed port (`nil` = auto-assign) |
+| `opencode-server-log-level`      | `"WARN"`                                | Server log level                 |
+| `opencode-server-auto-restart`   | `t`                                     | Auto-restart server on crash     |
+| `opencode-server-health-retries` | `5`                                     | Health check retries on startup  |
+| `opencode-server-restart-delay`  | `2`                                     | Seconds to wait before restart   |
+| `opencode-server-log-max-lines`  | `5000`                                  | Maximum lines in server log      |
 
 ### Window Settings
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `opencode-window-display` | `'side` | Display mode: `side`, `float`, `split`, `full` |
-| `opencode-window-side` | `'right` | Side window position: `left`, `right`, `bottom` |
-| `opencode-window-width` | `80` | Window width in columns |
-| `opencode-window-persistent` | `t` | Keep window across session switches |
-| `opencode-float-frame-alist` | `((width . 100) (height . 40))` | Frame parameters for float mode |
+| Variable                     | Default                         | Description                                     |
+|------------------------------|---------------------------------|-------------------------------------------------|
+| `opencode-window-display`    | `'side`                         | Display mode: `side`, `float`, `split`, `full`  |
+| `opencode-window-side`       | `'right`                        | Side window position: `left`, `right`, `bottom` |
+| `opencode-window-width`      | `80`                            | Window width in columns                         |
+| `opencode-window-persistent` | `t`                             | Keep window across session switches             |
+| `opencode-float-frame-alist` | `((width . 100) (height . 40))` | Frame parameters for float mode                 |
 
 ### Chat Settings
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `opencode-chat-image-max-size` | `10485760` | Max image size for paste (bytes) |
-| `opencode-chat-input-history-size` | `50` | Input history ring size |
-| `opencode-chat-refresh-delay` | `0.3` | Debounce delay for refresh (seconds) |
-| `opencode-chat-streaming-fontify-delay` | `0.4` | Delay for markdown fontification during streaming |
-| `opencode-chat-message-limit` | `100` | Max messages per session in memory |
+| Variable                                | Default                 | Description                                                |
+|-----------------------------------------|-------------------------|------------------------------------------------------------|
+| `opencode-chat-image-max-size`          | `10485760`              | Max image size for paste (bytes)                           |
+| `opencode-chat-input-history-size`      | `50`                    | Input history ring size                                    |
+| `opencode-chat-refresh-delay`           | `0.3`                   | Debounce delay for refresh (seconds)                       |
+| `opencode-chat-streaming-fontify-delay` | `0.4`                   | Delay for markdown fontification during streaming          |
+| `opencode-chat-message-limit`           | `100`                   | Max messages per session in memory                         |
+| `opencode-chat-tool-renderers`          | Built-in renderer alist | Default renderer and collapse behavior for each tool       |
+| `opencode-chat-tool-output-max-lines`   | `-1`                    | Maximum rendered tool-output lines (`-1` = unlimited)      |
+| `opencode-chat-tool-output-max-chars`   | `-1`                    | Maximum rendered tool-output characters (`-1` = unlimited) |
 
 ### Sidebar Settings
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `opencode-sidebar-session-limit` | `100` | Max sessions to fetch |
-| `opencode-sidebar-refresh-delay` | `0.5` | Debounce delay for sidebar refresh |
+| Variable                         | Default | Description                        |
+|----------------------------------|---------|------------------------------------|
+| `opencode-sidebar-session-limit` | `100`   | Max sessions to fetch              |
+| `opencode-sidebar-refresh-delay` | `0.5`   | Debounce delay for sidebar refresh |
 
 ### API Settings
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `opencode-api-timeout` | `30` | HTTP request timeout (seconds) |
-| `opencode-api-directory` | `nil` | Override `X-OpenCode-Directory` header |
-| `opencode-api-cache-session-timeout` | `0.5` | Session cache stale timeout (seconds) |
-| `opencode-config-cache-ttl` | `30` | Config cache TTL (seconds) |
+| Variable                             | Default | Description                            |
+|--------------------------------------|---------|----------------------------------------|
+| `opencode-api-timeout`               | `30`    | HTTP request timeout (seconds)         |
+| `opencode-api-directory`             | `nil`   | Override `X-OpenCode-Directory` header |
+| `opencode-api-cache-session-timeout` | `0.5`   | Session cache stale timeout (seconds)  |
+| `opencode-config-cache-ttl`          | `30`    | Config cache TTL (seconds)             |
 
 ### SSE Settings
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `opencode-sse-auto-reconnect` | `t` | Auto-reconnect on disconnect |
-| `opencode-sse-heartbeat-timeout` | `60` | Seconds before considering connection dead |
-| `opencode-sse-max-reconnect-delay` | `30` | Max reconnect backoff delay (seconds) |
+| Variable                           | Default | Description                                |
+|------------------------------------|---------|--------------------------------------------|
+| `opencode-sse-auto-reconnect`      | `t`     | Auto-reconnect on disconnect               |
+| `opencode-sse-heartbeat-timeout`   | `60`    | Seconds before considering connection dead |
+| `opencode-sse-max-reconnect-delay` | `30`    | Max reconnect backoff delay (seconds)      |
 
 ### Markdown Settings
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `opencode-markdown-fontify-enabled` | `t` | Enable markdown fontification |
-| `opencode-markdown-max-fontified-code-blocks` | `20` | Max code blocks to fontify per message |
-| `opencode-markdown-max-code-block-lines` | `300` | Max lines per code block to fontify |
-| `opencode-markdown-fontify-max-size` | `32768` | Max text size for fontification (bytes) |
+| Variable                                      | Default | Description                             |
+|-----------------------------------------------|---------|-----------------------------------------|
+| `opencode-markdown-fontify-enabled`           | `t`     | Enable markdown fontification           |
+| `opencode-markdown-max-fontified-code-blocks` | `20`    | Max code blocks to fontify per message  |
+| `opencode-markdown-max-code-block-lines`      | `300`   | Max lines per code block to fontify     |
+| `opencode-markdown-fontify-max-size`          | `32768` | Max text size for fontification (bytes) |
 
 ### Example Configuration
 
@@ -338,59 +342,266 @@ Global hooks for server lifecycle events:
 
 Global hooks for all SSE events (run in no buffer context):
 
-| Hook | Event Type |
-|------|------------|
-| `opencode-sse-event-hook` | All events (catch-all) |
-| `opencode-sse-server-connected-hook` | Server connection established |
-| `opencode-sse-server-heartbeat-hook` | Heartbeat received |
-| `opencode-sse-server-instance-disposed-hook` | Server instance disposed |
-| `opencode-sse-global-disposed-hook` | Global disposal event |
-| `opencode-sse-installation-update-available-hook` | Update available |
-| `opencode-sse-session-created-hook` | New session created |
-| `opencode-sse-session-updated-hook` | Session metadata changed |
-| `opencode-sse-session-deleted-hook` | Session deleted |
-| `opencode-sse-session-status-hook` | Session busy/idle status |
-| `opencode-sse-session-idle-hook` | Session became idle |
-| `opencode-sse-session-error-hook` | Session error occurred |
-| `opencode-sse-session-diff-hook` | Session diff changed |
-| `opencode-sse-session-compacted-hook` | Session history compacted |
-| `opencode-sse-message-updated-hook` | Message created/updated |
-| `opencode-sse-message-removed-hook` | Message removed |
-| `opencode-sse-message-part-updated-hook` | Message part updated (streaming) |
-| `opencode-sse-message-part-removed-hook` | Message part removed |
-| `opencode-sse-todo-updated-hook` | Todo list changed |
-| `opencode-sse-permission-asked-hook` | Permission request received |
-| `opencode-sse-permission-replied-hook` | Permission replied |
-| `opencode-sse-question-asked-hook` | Question received |
-| `opencode-sse-question-replied-hook` | Question answered |
-| `opencode-sse-question-rejected-hook` | Question rejected |
+| Hook                                              | Event Type                       |
+|---------------------------------------------------|----------------------------------|
+| `opencode-sse-event-hook`                         | All events (catch-all)           |
+| `opencode-sse-server-connected-hook`              | Server connection established    |
+| `opencode-sse-server-heartbeat-hook`              | Heartbeat received               |
+| `opencode-sse-server-instance-disposed-hook`      | Server instance disposed         |
+| `opencode-sse-global-disposed-hook`               | Global disposal event            |
+| `opencode-sse-installation-update-available-hook` | Update available                 |
+| `opencode-sse-session-created-hook`               | New session created              |
+| `opencode-sse-session-updated-hook`               | Session metadata changed         |
+| `opencode-sse-session-deleted-hook`               | Session deleted                  |
+| `opencode-sse-session-status-hook`                | Session busy/idle status         |
+| `opencode-sse-session-idle-hook`                  | Session became idle              |
+| `opencode-sse-session-error-hook`                 | Session error occurred           |
+| `opencode-sse-session-diff-hook`                  | Session diff changed             |
+| `opencode-sse-session-compacted-hook`             | Session history compacted        |
+| `opencode-sse-message-updated-hook`               | Message created/updated          |
+| `opencode-sse-message-removed-hook`               | Message removed                  |
+| `opencode-sse-message-part-updated-hook`          | Message part updated (streaming) |
+| `opencode-sse-message-part-removed-hook`          | Message part removed             |
+| `opencode-sse-todo-updated-hook`                  | Todo list changed                |
+| `opencode-sse-permission-asked-hook`              | Permission request received      |
+| `opencode-sse-permission-replied-hook`            | Permission replied               |
+| `opencode-sse-question-asked-hook`                | Question received                |
+| `opencode-sse-question-replied-hook`              | Question answered                |
+| `opencode-sse-question-rejected-hook`             | Question rejected                |
 
 ### Chat Buffer Hooks
 
 Buffer-local hooks run in the chat buffer context:
 
-| Hook | When Run |
-|------|----------|
-| `opencode-chat-on-message-sent-hook` | After user sends a message |
-| `opencode-chat-on-message-updated-hook` | Message updated in this session |
-| `opencode-chat-on-message-removed-hook` | Message removed from this session |
-| `opencode-chat-on-part-updated-hook` | Part updated (streaming delta) |
-| `opencode-chat-on-session-updated-hook` | Session metadata changed |
-| `opencode-chat-on-session-status-hook` | Session busy/idle status |
-| `opencode-chat-on-session-idle-hook` | Session became idle |
-| `opencode-chat-on-session-error-hook` | Session error |
-| `opencode-chat-on-session-deleted-hook` | Session deleted |
-| `opencode-chat-on-session-diff-hook` | Diff changed |
-| `opencode-chat-on-session-compacted-hook` | History compacted |
-| `opencode-chat-on-todo-updated-hook` | Todo list changed |
-| `opencode-chat-on-server-instance-disposed-hook` | Server disposed |
-| `opencode-chat-on-installation-update-available-hook` | Update available |
-| `opencode-chat-on-refresh-hook` | After buffer refresh |
+| Hook                                                  | When Run                          |
+|-------------------------------------------------------|-----------------------------------|
+| `opencode-chat-on-message-sent-hook`                  | After user sends a message        |
+| `opencode-chat-on-message-updated-hook`               | Message updated in this session   |
+| `opencode-chat-on-message-removed-hook`               | Message removed from this session |
+| `opencode-chat-on-part-updated-hook`                  | Part updated (streaming delta)    |
+| `opencode-chat-on-session-updated-hook`               | Session metadata changed          |
+| `opencode-chat-on-session-status-hook`                | Session busy/idle status          |
+| `opencode-chat-on-session-idle-hook`                  | Session became idle               |
+| `opencode-chat-on-session-error-hook`                 | Session error                     |
+| `opencode-chat-on-session-deleted-hook`               | Session deleted                   |
+| `opencode-chat-on-session-diff-hook`                  | Diff changed                      |
+| `opencode-chat-on-session-compacted-hook`             | History compacted                 |
+| `opencode-chat-on-todo-updated-hook`                  | Todo list changed                 |
+| `opencode-chat-on-server-instance-disposed-hook`      | Server disposed                   |
+| `opencode-chat-on-installation-update-available-hook` | Update available                  |
+| `opencode-chat-on-refresh-hook`                       | After buffer refresh              |
+
+### Tool Renderer Hooks
+
+Tool renderers customize how one tool call is shown in a chat buffer. They use
+an abnormal hook-style API rather than a normal `add-hook` variable: each chat
+buffer can have at most one override function for each tool name.
+
+```elisp
+(opencode-chat-set-tool-renderer TOOL-NAME RENDERER)
+(opencode-chat-remove-tool-renderer TOOL-NAME)
+```
+
+Both functions operate on the **current chat buffer**. A convenient way to
+install a renderer in every newly-created chat buffer is
+`opencode-chat-mode-hook`:
+
+```elisp
+(defun my-opencode-install-tool-renderers ()
+  (opencode-chat-set-tool-renderer "bash" #'my-opencode-bash-renderer))
+
+(add-hook 'opencode-chat-mode-hook
+          #'my-opencode-install-tool-renderers)
+```
+
+Removing the override restores the renderer from
+`opencode-chat-tool-renderers`:
+
+```elisp
+(opencode-chat-remove-tool-renderer "bash")
+```
+
+#### Renderer Function Type
+
+In type-like notation, the callback contract is:
+
+```text
+ToolRenderer =
+  (ToolRenderContext) -> ToolRenderResult | nil
+
+ToolRenderContext =
+  (:phase     begin | running | end
+   :tool-name string
+   :status    "pending" | "running" | "completed" | "error" | string | nil
+   :input     plist | nil
+   :output    string | nil
+   :metadata  plist | nil
+   :part      plist)
+
+ToolRenderResult =
+  (:collapsed-p boolean       ; optional
+   :tool-name    string | nil ; optional
+   :summary      string | nil ; optional
+   :input        string | nil ; optional
+   :output       string | nil); optional
+```
+
+The literal values of `:phase` are Emacs Lisp symbols:
+
+| Tool status            | `:phase` value |
+|------------------------|----------------|
+| `"pending"`            | `'begin`       |
+| `"running"`            | `'running`     |
+| `"completed"`          | `'end`         |
+| `"error"`              | `'end`         |
+| Unknown/missing status | `'begin`       |
+
+For example, a running bash call may invoke the renderer with this literal
+shape:
+
+```elisp
+'(:phase running
+ :tool-name "bash"
+ :status "running"
+ :input (:command "make test"
+         :description "Run the test suite")
+ :output "Running 877 tests...\n"
+ :metadata (:output "Running 877 tests...\n")
+ :part (:id "prt_..."
+        :type "tool"
+        :tool "bash"
+        :state (:status "running" ...)))
+```
+
+Here `running` is a symbol, while `"running"` is a string.
+
+The remaining context fields are:
+
+- `:tool-name` — normalized tool name, such as `"bash"`, `"edit"`, or an MCP
+  tool name.
+- `:input` — raw tool input plist from the normalized message part. Its keys
+  are tool-specific; for example, bash normally has `:command` and
+  `:description`, while `apply_patch` has `:patchText`.
+- `:output` — the complete output currently available, not a delta. During a
+  running call this falls back to `metadata.output`; at the end it is normally
+  the final `state.output`.
+- `:metadata` — raw tool metadata plist, or `nil`.
+- `:part` — the original complete tool-part plist. Use the top-level context
+  fields when possible; they contain the normalized name, status, input, and
+  effective output.
+
+JSON values inside `:input`, `:metadata`, and `:part` use the project's normal
+Emacs representation: objects are plists, arrays are vectors, JSON `null` is
+`nil`, and JSON `false` is the literal `:false` (not `nil`).
+
+The callback runs with the chat buffer current, so it can use
+`(current-buffer)` and read buffer-local chat state. It should not insert,
+delete, or receive buffer positions. Instead, it returns a declarative result.
+The core renderer continues to own section overlays, the TAB keymap,
+collapse/expand behavior, status icons, duration, indentation, and redraws.
+
+#### Result Semantics
+
+- Returning `nil` means “not handled” and falls back to the default renderer
+  in `opencode-chat-tool-renderers`.
+- Returning a plist handles the tool. Missing body fields do **not** inherit
+  the built-in body; only the core header defaults remain.
+- If `:collapsed-p` is absent, the tool's configured default is used.
+- `:collapsed-p t` starts collapsed; `:collapsed-p nil` starts expanded.
+- If `:tool-name` is absent or `nil`, the original tool name is used.
+- If `:summary` is absent, the normal input summary is used. Supplying
+  `:summary nil` explicitly suppresses it.
+- `:input` and `:output` are inserted in that order below the header.
+- Body strings may carry non-structural Emacs text properties such as `face`,
+  `help-echo`, `mouse-face`, or `display`. Do not set `keymap`, `read-only`,
+  `invisible`, `line-prefix`, or section properties; those remain core-owned.
+  Header name/summary strings still receive the standard core header styling.
+- Include any desired indentation and trailing newlines in body strings.
+
+A literal result can therefore look like:
+
+```elisp
+'(:collapsed-p nil
+ :tool-name "Shell"
+ :summary "Run the test suite"
+ :input #("   $ make test\n" 0 15 (face opencode-assistant-body))
+ :output #("   877 tests passed\n" 0 20 (face font-lock-comment-face)))
+```
+
+The `#("..." START END (PROPERTY VALUE ...))` forms above are Emacs'
+printed representation of strings carrying text properties. In normal code,
+use `propertize` rather than writing that representation by hand.
+
+`"question"` and `"permission"` are reserved because their rendering and
+reply lifecycle are controlled by opencode.el. Attempting to set or remove
+their public renderer signals `user-error`.
+
+#### Complete Example
+
+This renderer keeps bash expanded while it runs, shows the current full
+output, then collapses completed calls:
+
+```elisp
+(defun my-opencode-bash-renderer (context)
+  (let* ((phase (plist-get context :phase))
+         (input (plist-get context :input))
+         (command (plist-get input :command))
+         (description (plist-get input :description))
+         (output (plist-get context :output))
+         (rendered-command
+          (and command
+               (propertize (format "   $ %s\n" command)
+                           'face 'opencode-assistant-body)))
+         (rendered-output
+          (and output
+               (propertize
+                (mapconcat (lambda (line) (concat "   " line))
+                           (string-lines output)
+                           "\n")
+                'face 'font-lock-comment-face))))
+    (pcase phase
+      ('begin
+       (list :collapsed-p nil
+             :summary description
+             :input rendered-command))
+      ('running
+       (list :collapsed-p nil
+             :summary description
+             :input rendered-command
+             :output (and rendered-output
+                          (concat rendered-output "\n"))))
+      ('end
+       (list :collapsed-p t
+             :summary description
+             :input rendered-command
+             :output (and rendered-output
+                          (concat rendered-output "\n")))))))
+```
+
+To override a tool only under certain conditions, return `nil` otherwise:
+
+```elisp
+(defun my-project-bash-renderer (context)
+  (when (string-prefix-p "/work/special-project/"
+                         (expand-file-name default-directory))
+    (list :collapsed-p nil
+          :input
+          (format "   command: %s\n"
+                  (plist-get (plist-get context :input) :command)))))
+```
+
+The default renderer list can also be customized globally:
+
+```elisp
+(add-to-list
+ 'opencode-chat-tool-renderers
+ '("my_tool" :function my-opencode-tool-renderer :collapsed-p nil))
+```
 
 ### Sidebar Hooks
 
-| Hook | When Run |
-|------|----------|
+| Hook                                     | When Run                      |
+|------------------------------------------|-------------------------------|
 | `opencode-sidebar-on-session-event-hook` | Session event in this project |
 
 ### Example: Log All SSE Events
@@ -581,21 +792,21 @@ make compile
 
 opencode.el follows a modular architecture with clear boundaries:
 
-| Module | Responsibility |
-|--------|----------------|
-| `opencode.el` | Entry point, keymaps, customization |
-| `opencode-server.el` | Server subprocess lifecycle |
-| `opencode-api.el` | HTTP client, JSON handling |
-| `opencode-api-cache.el` | Cache facade for agents/config/providers |
-| `opencode-sse.el` | SSE transport via curl |
-| `opencode-chat.el` | Chat buffer, SSE routing, state machine |
-| `opencode-chat-state.el` | Buffer-local state struct |
-| `opencode-chat-input.el` | Input area, CAPF, history |
-| `opencode-chat-message.el` | Message store and rendering |
-| `opencode-session.el` | Session CRUD |
-| `opencode-sidebar.el` | Project sidebar (treemacs-based) |
-| `opencode-permission.el` | Permission popups |
-| `opencode-question.el` | Question popups |
+| Module                     | Responsibility                           |
+|----------------------------|------------------------------------------|
+| `opencode.el`              | Entry point, keymaps, customization      |
+| `opencode-server.el`       | Server subprocess lifecycle              |
+| `opencode-api.el`          | HTTP client, JSON handling               |
+| `opencode-api-cache.el`    | Cache facade for agents/config/providers |
+| `opencode-sse.el`          | SSE transport via curl                   |
+| `opencode-chat.el`         | Chat buffer, SSE routing, state machine  |
+| `opencode-chat-state.el`   | Buffer-local state struct                |
+| `opencode-chat-input.el`   | Input area, CAPF, history                |
+| `opencode-chat-message.el` | Message store and rendering              |
+| `opencode-session.el`      | Session CRUD                             |
+| `opencode-sidebar.el`      | Project sidebar (treemacs-based)         |
+| `opencode-permission.el`   | Permission popups                        |
+| `opencode-question.el`     | Question popups                          |
 
 See `AGENTS.md` for detailed architecture documentation.
 

@@ -38,6 +38,7 @@ with `opencode-backend-register' before use."
   start-fn
   stop-fn
   connected-p-fn
+  list-projects-fn
   list-sessions-fn
   get-session-fn
   get-session-sync-fn
@@ -157,7 +158,14 @@ probing `opencode-backend-supports-p' first."
 (defun opencode-backend-list-sessions (&optional query-params backend)
   "Return sessions from BACKEND matching QUERY-PARAMS."
   (opencode-backend--call backend 'list-sessions
-                          #'opencode-backend-list-sessions-fn query-params))
+                           #'opencode-backend-list-sessions-fn query-params))
+
+(defun opencode-backend-list-projects (&optional backend)
+  "Return canonical projects from BACKEND.
+This is an optional operation; callers should probe `list-projects'
+with `opencode-backend-supports-p' before invoking it."
+  (opencode-backend--call backend 'list-projects
+                           #'opencode-backend-list-projects-fn))
 
 (defun opencode-backend-get-session (session-id callback &optional backend)
   "Fetch SESSION-ID from BACKEND asynchronously and call CALLBACK."
@@ -324,6 +332,11 @@ event object."
 
 ;;; --- Canonical opencode.el shapes ---
 
+(defun opencode-backend-project (&rest plist)
+  "Return a canonical project PLIST.
+Known keys: :id, :directory, :name, :raw."
+  plist)
+
 (defun opencode-backend-session (&rest plist)
   "Return a canonical session PLIST.
 Known keys: :id, :title, :directory, :parent-id, :created-at,
@@ -361,6 +374,12 @@ Known keys: :type, :session-id, :message-id, :part-id, :delta,
   (and (listp value) value))
 
 ;;; --- OpenCode shape adapter ---
+
+(defun opencode-backend-opencode-list-projects ()
+  "Return OpenCode projects normalized to canonical project shapes."
+  (let ((projects (opencode-api-get-sync "/project")))
+    (mapcar #'opencode-backend-opencode-project
+            (seq-into (or projects []) 'list))))
 
 (defun opencode-backend-opencode-list-sessions (&optional query-params)
   "OpenCode implementation of `opencode-backend-list-sessions'."
@@ -503,6 +522,21 @@ The BUSY flag is ignored: OpenCode queues server-side."
    :summary (plist-get session :summary)
    :raw session))
 
+(defun opencode-backend-opencode-project (project)
+  "Convert OpenCode PROJECT plist to the canonical project shape."
+  (let* ((directory (or (plist-get project :worktree)
+                        (plist-get project :directory)))
+         (directory (and directory
+                         (directory-file-name
+                          (expand-file-name directory)))))
+    (opencode-backend-project
+     :id (plist-get project :id)
+     :directory directory
+     :name (or (plist-get project :name)
+               (and directory
+                    (file-name-nondirectory directory)))
+     :raw project)))
+
 (defun opencode-backend-opencode-part (part)
   "Convert OpenCode PART plist to the canonical part shape."
   (opencode-backend-part
@@ -578,6 +612,7 @@ The BUSY flag is ignored: OpenCode queues server-side."
   :start-fn nil
   :stop-fn nil
   :connected-p-fn nil
+  :list-projects-fn #'opencode-backend-opencode-list-projects
   :list-sessions-fn #'opencode-backend-opencode-list-sessions
   :get-session-fn #'opencode-backend-opencode-get-session
   :get-session-sync-fn #'opencode-backend-opencode-get-session-sync
