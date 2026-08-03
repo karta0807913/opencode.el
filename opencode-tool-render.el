@@ -76,7 +76,7 @@ Hash table mapping tool-name string to declarative renderer function.")
 (defvar opencode-chat--core-tool-renderers (make-hash-table :test 'equal)
   "Private registry for core-controlled reserved tool renderers.")
 
-(defvar opencode-chat--tool-renderer-reserved '("question" "permission")
+(defconst opencode-chat--tool-renderer-reserved '("question" "permission")
   "Tool names reserved for core-controlled rendering.")
 
 (defcustom opencode-chat-tool-renderers
@@ -180,13 +180,24 @@ accepting (INPUT OUTPUT METADATA)."
    (output output)))
 
 (defun opencode-chat--capture-legacy-tool-renderer (fn input output metadata)
-  "Call legacy renderer FN and return a property-preserving string."
-  (let ((start (point)))
-    (unwind-protect
-        (progn
-          (funcall fn input output metadata)
-          (buffer-substring start (point)))
-      (delete-region start (point)))))
+  "Call legacy renderer FN and return a property-preserving string.
+
+FN draws into a temp buffer, not the transcript.  Drawing into the real
+buffer and deleting the result afterwards left anything FN inserted
+inside a `save-excursion' behind permanently --- point returns to where
+it started, so the cleanup deletes an empty region --- and it ran the
+chat buffer's `after-change-functions' over text the user never sees.
+
+The originating chat state is carried across so renderers that read it
+still work: `--render-task-body' consults `opencode-chat--session-id' to
+record the child->parent link.  Only reads are safe here; a write would
+trip the state's own buffer-ownership check, which is correct --- a
+renderer capturing its output has no business mutating session state."
+  (let ((state opencode-chat--state))
+    (with-temp-buffer
+      (setq opencode-chat--state state)
+      (funcall fn input output metadata)
+      (buffer-string))))
 
 (defun opencode-chat--adapt-legacy-tool-renderer (fn context)
   "Adapt old imperative FN to a declarative model using CONTEXT."

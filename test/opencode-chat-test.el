@@ -1663,6 +1663,36 @@ Silently doing nothing would let a stale state look like a working one."
       (setq state opencode-chat--state))
     (should-error (opencode-chat--with-chat state (point)))))
 
+(ert-deftest opencode-chat-legacy-tool-renderer-does-not-touch-transcript ()
+  "Verify a legacy tool renderer draws into a temp buffer, not the chat.
+It used to draw into the real buffer and delete the result afterwards.
+Anything inserted inside a `save-excursion' survived that cleanup —
+point returns to where it started, so the delete covered nothing — and
+the insert ran the chat buffer's `after-change-functions' over text the
+user never sees."
+  (opencode-test-with-temp-buffer "*test-chat-legacy-capture*"
+    (opencode-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "TRANSCRIPT")
+      (let ((captured (opencode-chat--capture-legacy-tool-renderer
+                       (lambda (_i _o _m) (save-excursion (insert "BODY")))
+                       nil nil nil)))
+        (should (string= "BODY" captured))
+        (should (string= "TRANSCRIPT" (buffer-string)))))))
+
+(ert-deftest opencode-chat-legacy-tool-renderer-sees-chat-state ()
+  "Verify a captured renderer can still read the chat's state.
+`--render-task-body' consults `opencode-chat--session-id' to record the
+child-to-parent link, so isolating the render must not hide it."
+  (opencode-test-with-temp-buffer "*test-chat-legacy-state*"
+    (opencode-chat-mode)
+    (opencode-chat--set-session-id "ses_capture")
+    (let ((seen nil))
+      (opencode-chat--capture-legacy-tool-renderer
+       (lambda (_i _o _m) (setq seen (opencode-chat--session-id)) (insert "x"))
+       nil nil nil)
+      (should (string= "ses_capture" seen)))))
+
 ;;; --- Delta helper (insert-streaming-delta) ---
 
 (ert-deftest opencode-chat-insert-delta-single-line ()
