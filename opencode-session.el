@@ -11,7 +11,7 @@
 
 (require 'subr-x)
 (require 'opencode-log)
-(require 'opencode-backend)
+(require 'opencode-backend-core)
 
 (defgroup opencode-session nil
   "OpenCode session management."
@@ -43,57 +43,59 @@ Returns the created session plist."
   (opencode--debug "opencode-session: creating session title=%S parent=%S" title parent-id)
   (opencode-backend-create-session :title title :parent-id parent-id :backend backend))
 
-(defun opencode-session-rename (session-id title)
-  "Rename session SESSION-ID to TITLE.
+(defun opencode-session-rename (session-id title &optional backend)
+  "Rename session SESSION-ID to TITLE in BACKEND.
 Uses PATCH /session/:sessionID to update session metadata.
 Returns the updated session plist."
-  (opencode-backend-rename-session session-id title))
+  (opencode-backend-rename-session session-id title backend))
 
-(defun opencode-session-delete (session-id)
-  "Delete session SESSION-ID."
-  (opencode-backend-delete-session session-id))
+(defun opencode-session-delete (session-id &optional backend)
+  "Delete session SESSION-ID from BACKEND."
+  (opencode-backend-delete-session session-id backend))
 
-(defun opencode-session-abort (session-id)
-  "Abort the active prompt in session SESSION-ID."
+(defun opencode-session-abort (session-id &optional backend)
+  "Abort the active prompt in session SESSION-ID on BACKEND."
   (opencode--debug "opencode-session: aborting session %s" session-id)
-  (opencode-backend-abort-session session-id))
+  (opencode-backend-abort-session session-id backend))
 
-(defun opencode-session-compact (session-id &optional model-id provider-id)
-  "Compact (summarize) session SESSION-ID.
+(defun opencode-session-compact
+    (session-id &optional model-id provider-id backend)
+  "Compact (summarize) session SESSION-ID on BACKEND.
 Requires MODEL-ID and PROVIDER-ID for the summarization model.
 Triggers a summarization of the session history on the server."
-  (opencode-backend-compact-session session-id model-id provider-id))
+  (opencode-backend-compact-session
+   session-id model-id provider-id backend))
 
-(defun opencode-session-fork (session-id &optional message-id)
-  "Fork session SESSION-ID at MESSAGE-ID.
+(defun opencode-session-fork (session-id &optional message-id backend)
+  "Fork session SESSION-ID at MESSAGE-ID in BACKEND.
 Returns the new session plist."
-  (opencode-backend-fork-session session-id message-id))
+  (opencode-backend-fork-session session-id message-id backend))
 
-(defun opencode-session-share (session-id)
-  "Create a share link for session SESSION-ID."
-  (opencode-backend-share-session session-id))
+(defun opencode-session-share (session-id &optional backend)
+  "Create a share link for session SESSION-ID in BACKEND."
+  (opencode-backend-share-session session-id backend))
 
-(defun opencode-session-unshare (session-id)
-  "Delete the share link for session SESSION-ID."
-  (opencode-backend-unshare-session session-id))
+(defun opencode-session-unshare (session-id &optional backend)
+  "Delete the share link for session SESSION-ID in BACKEND."
+  (opencode-backend-unshare-session session-id backend))
 
-(defun opencode-session-revert (session-id message-id)
-  "Revert session SESSION-ID to state before MESSAGE-ID.
+(defun opencode-session-revert (session-id message-id &optional backend)
+  "Revert session SESSION-ID in BACKEND to state before MESSAGE-ID.
 This effectively \='undoes\=' the conversation back to that point."
-  (opencode-backend-revert-session session-id message-id))
+  (opencode-backend-revert-session session-id message-id backend))
 
-(defun opencode-session-unrevert (session-id)
-  "Un-revert (redo) session SESSION-ID to its latest state."
-  (opencode-backend-unrevert-session session-id))
+(defun opencode-session-unrevert (session-id &optional backend)
+  "Un-revert (redo) session SESSION-ID in BACKEND to its latest state."
+  (opencode-backend-unrevert-session session-id backend))
 
 (defun opencode-session-status-all ()
   "Fetch status of all active sessions.
 Returns a plist mapping session IDs to status plists."
   (opencode-backend-session-status-all))
 
-(defun opencode-session-diff (session-id &optional message-id)
-  "Fetch file diffs for SESSION-ID, optionally for MESSAGE-ID."
-  (opencode-backend-get-diff-sync session-id message-id))
+(defun opencode-session-diff (session-id &optional message-id backend)
+  "Fetch file diffs for SESSION-ID in BACKEND, optionally for MESSAGE-ID."
+  (opencode-backend-get-diff-sync session-id message-id backend))
 
 ;;; --- Session data helpers ---
 

@@ -7,7 +7,8 @@
 
 ;; Main conversation buffer for opencode.el.
 ;; Displays messages (user/assistant), renders parts (text, tool, reasoning),
-;; handles streaming responses via SSE, provides input area for sending messages.
+;; handles backend-shaped streaming responses, and provides an input area for
+;; sending messages.
 ;;
 ;; Emacs 30: Uses `visual-wrap-prefix-mode', `mode-line-format-right-align',
 ;; `set-window-cursor-type' for input area vs read-only.
@@ -19,11 +20,8 @@
 (require 'ring)
 (require 'opencode-faces)
 (require 'opencode-ui)
-(require 'opencode-api)
-(require 'opencode-sse)
 (require 'opencode-log)
 (require 'opencode-util)
-(require 'opencode-api)
 (require 'opencode-markdown)
 (require 'opencode-session)
 (require 'opencode-agent)
@@ -35,8 +33,8 @@
 (require 'opencode-chat-state)
 (require 'opencode-chat-message)
 (require 'opencode-chat-input)
-(require 'opencode-api-cache)
-(require 'opencode-backend)
+(require 'opencode-backend-core)
+(require 'opencode-tool-render)
 
 (declare-function opencode--register-chat-buffer "opencode" (session-id buffer))
 (declare-function opencode--deregister-chat-buffer "opencode" (session-id))
@@ -61,10 +59,22 @@ there is no longer a debounce to tune.")
                         "fontification is driven by jit-lock." "0.2.0")
 
 (defcustom opencode-chat-message-limit 100
-  "Maximum number of messages to fetch from the server.
+  "Maximum number of messages to fetch from the backend.
 Limits the history size to prevent performance issues with large sessions."
   :type 'integer
   :group 'opencode-chat)
+
+(defconst opencode-chat--navigable-section-types
+  '(message tool-call reasoning subtask)
+  "Section types that count as a section for defun navigation.")
+
+(defconst opencode-chat--heading-faces
+  '(opencode-md-header-1 opencode-md-header-2
+    opencode-md-header-3 opencode-md-header-4)
+  "Faces marking a Markdown heading in rendered transcript text.
+`opencode-markdown' translates `markdown-mode''s header faces onto these
+when it copies fontification into the buffer, so a heading is already
+identifiable without re-parsing the text.")
 
 ;;; --- Internal state ---
 ;;
@@ -259,8 +269,6 @@ where MESSAGES is the vector from GET /session/:id/message
 and SESSION is the plist from GET /session/:id.
 Use this to update derived state like the footer token display.")
 
-(declare-function opencode-session-get "opencode-session.el")
-
 (defun opencode-chat--child-session-p ()
   "Return non-nil if the buffer-local session has a parent session.
 Uses the struct's cached session plist."
@@ -272,7 +280,7 @@ Returns nil if the session has no parent."
   (plist-get (opencode-chat--session) :parentID))
 
 (defun opencode-chat--child-sessions (session-id)
-  "Return child sessions of SESSION-ID from the server.
+  "Return child sessions of SESSION-ID from the backend.
 Uses the official /session/:id/children endpoint."
   (condition-case err
       (opencode-backend-get-child-sessions session-id (opencode-chat--backend))
@@ -280,11 +288,6 @@ Uses the official /session/:id/children endpoint."
      (opencode--debug "opencode-chat: children fetch failed: %s"
                       (error-message-string err))
      nil)))
-
-(defun opencode-chat--session-parent-id (session-id)
-  "Return the :parentID of SESSION-ID from server session data.
-Uses `opencode-session-get' to fetch fresh session information."
-  (plist-get (opencode-session-get session-id) :parentID))
 
 ;;; --- Buffer naming ---
 
@@ -350,14 +353,31 @@ Shows a read-only label and a [Parent] button for navigation."
                         'help-echo "Return to parent session")
     (insert (propertize "\n" 'read-only t))))
 
+(defun opencode-chat--render-input-tail ()
+  "Render the input area and any session-specific navigation below it."
+  (opencode-chat--render-input-area)
+  (when (opencode-chat--child-session-p)
+    (opencode-chat--render-child-indicator)))
+
+(defun opencode-chat--toggle-section ()
+  "Collapse or expand the transcript section at point.
+
+Goes through `opencode-chat--in-transcript' rather than calling
+`opencode-ui--toggle-section' directly: showing or hiding a section adds
+or removes the `[collapsed]' indicator, which moves everything below it
+--- including the input area, whose recorded undo positions have to move
+with it."
+  (interactive)
+  (opencode-chat--in-transcript
+    (opencode-ui--toggle-section)))
+
 (defvar-keymap opencode-chat-message-map
   :doc "Keymap for the read-only message area (applied via text property)."
-  "g" #'opencode-chat--refresh
   "G" #'opencode-chat--goto-latest
   "q" #'opencode-chat--quit-or-goto-parent
   "C-p" #'opencode-command-select
   "C-t" #'opencode-chat--cycle-variant
-  "TAB" #'opencode-ui--toggle-section)
+  "TAB" #'opencode-chat--toggle-section)
 
 ;; Edit bodies use a specialized text-property keymap for RET/o file
 ;; navigation.  Inherit the regular transcript map so TAB still toggles
@@ -376,6 +396,12 @@ Read-only protection is via text properties.
   (setq truncate-lines nil
         word-wrap t
         buffer-read-only nil)  ; We use text-property 'read-only instead
+  ;; Section navigation goes through the standard defun API rather than
+  ;; through Evil-specific bindings, so `[[', `]]', `mark-defun' and
+  ;; anything else built on it all move by transcript section.
+  (setq-local beginning-of-defun-function
+              #'opencode-chat--beginning-of-defun)
+  (setq-local end-of-defun-function #'opencode-chat--end-of-defun)
   (add-to-invisibility-spec 'opencode-section)
   (add-to-invisibility-spec 'opencode-md)
   ;; Markdown fontification runs from jit-lock over spans the renderer
@@ -403,6 +429,8 @@ Read-only protection is via text properties.
   (add-hook 'window-buffer-change-functions #'opencode-chat--on-window-buffer-change)
   ;; Optimistic busy/queued on send — chat.el owns state transitions
   (add-hook 'opencode-chat-on-message-sent-hook #'opencode-chat--on-message-sent nil t)
+  (setq-local opencode-tool-render-refresh-callback
+              #'opencode-chat--schedule-refresh)
   (visual-line-mode 1)
   (cursor-intangible-mode 1)
   (add-hook 'kill-buffer-hook
@@ -445,8 +473,7 @@ removal.  Idempotent."
   (when-let* ((end-marker (opencode-chat-message-messages-end)))
     (when (and (marker-position end-marker)
                (not (opencode-chat--queued-overlay)))
-      (let ((inhibit-read-only t)
-            (buffer-undo-list t))
+      (opencode-chat--in-transcript
         ;; Temporarily switch to nil insertion type so messages-end
         ;; does NOT advance past the QUEUED badge text
         (set-marker-insertion-type end-marker nil)
@@ -484,23 +511,22 @@ Each call replaces the previous retry badge."
   (opencode-chat--hide-retry-indicator)
   (when-let* ((end-marker (opencode-chat-message-messages-end)))
     (when (marker-position end-marker)
-      (let ((inhibit-read-only t)
-            (buffer-undo-list t)
-            (text (format "  ⚠ %s (attempt %s%s)\n"
+      (let ((text (format "  ⚠ %s (attempt %s%s)\n"
                           (or error-msg "unknown error")
                           (or attempt "?")
                           (if secs (format ", retry in %ds" secs) ""))))
-        (set-marker-insertion-type end-marker nil)
-        (save-excursion
-          (goto-char end-marker)
-          (let ((start (point)))
-            (insert (propertize text 'face 'opencode-tool-error
-                                'read-only t))
-            (let ((ov (make-overlay start (point))))
-              (overlay-put ov 'opencode-retry t)
-              (overlay-put ov 'evaporate t)
-              (opencode-chat--set-retry-overlay ov))))
-        (set-marker-insertion-type end-marker t)))))
+        (opencode-chat--in-transcript
+          (set-marker-insertion-type end-marker nil)
+          (save-excursion
+            (goto-char end-marker)
+            (let ((start (point)))
+              (insert (propertize text 'face 'opencode-tool-error
+                                  'read-only t))
+              (let ((ov (make-overlay start (point))))
+                (overlay-put ov 'opencode-retry t)
+                (overlay-put ov 'evaporate t)
+                (opencode-chat--set-retry-overlay ov))))
+          (set-marker-insertion-type end-marker t))))))
 
 (defun opencode-chat--hide-retry-indicator ()
   "Remove the retry error badge if currently shown."
@@ -608,7 +634,7 @@ replace the cached value with the new message's data."
 ;;; --- Pending popup fetch on refresh ---
 
 (defun opencode-chat--fetch-pending-popups (buf)
-  "Fetch pending questions and permissions from the server.
+  "Fetch pending questions and permissions from the backend.
 BUF is the chat buffer to merge results into (buffer-local queues).
 Fires two async GET requests in parallel; each callback filters items
 by session-id, merges into the buffer-local queues (deduplicating by
@@ -730,7 +756,7 @@ Uses `delete-region' rather than `erase-buffer' deliberately:
 `erase-buffer' widens first, so under a narrowing it deletes the whole
 buffer anyway and takes the input area with it.  Verified, not assumed."
   (delete-region (point-min) (point-max))
-  (opencode-chat-message-clear-all))
+  (opencode-chat-message-reset))
 
 (defun opencode-chat--clear-for-rerender ()
   "Wipe buffer and reset state that must not carry across a rerender.
@@ -740,10 +766,8 @@ Nils the input-start marker BEFORE rendering messages: after
 message area into the input keymap, clobbering edit-tool file-path
 and message-map bindings."
   (erase-buffer)
-  (opencode-chat-message-clear-all)
-  (when (opencode-chat--input-start)
-    (set-marker (opencode-chat--input-start) nil)
-    (opencode-chat--set-input-start nil))
+  (opencode-chat-message-reset)
+  (opencode-chat-input-reset)
   ;; Clear `stale' bit — this IS the refresh.  If we're mid-refresh
   ;; (state = in-flight), refresh-end handles it; this only matters
   ;; when render-messages is called directly (scenario tests, sync).
@@ -836,7 +860,9 @@ block subsequent ones."
         (opencode-chat--drain-popup-queue)))
     (error
      (opencode--debug "opencode-chat: popup re-show error: %S" err)
-     (setq opencode-popup--inline-p nil)
+     (when-let* ((recovery-error (opencode-popup--recover-render-error)))
+       (opencode--debug
+        "opencode-chat: popup re-show recovery error: %S" recovery-error))
      (opencode-chat--drain-popup-queue))))
 
 (defun opencode-chat--render-messages (&optional messages)
@@ -847,11 +873,15 @@ Preserves user input text, cursor position, window scroll, and any
 active inline popup across re-renders — see the `--save-render-state'
 / `--restore-*' helper family for the details."
   (let ((inhibit-read-only t)
-        (inhibit-redisplay t)
-        (buffer-undo-list t))
+        (inhibit-redisplay t))
     (if (opencode-chat--transcript-preservable-p)
         (opencode-chat--rerender-transcript messages)
-      (opencode-chat--rebuild-buffer messages))
+      (let ((buffer-undo-list t))
+        (opencode-chat--rebuild-buffer messages))
+      ;; The cold path rebuilds the input area too, so nothing the undo
+      ;; list refers to survives; keeping it would only let `undo' edit
+      ;; text it never saw.
+      (setq buffer-undo-list nil))
     (opencode-chat--input-history-seed)))
 
 (defun opencode-chat--rerender-transcript (messages)
@@ -870,7 +900,7 @@ restored by message id and offset, and one parked in the read-only footer
 is moved somewhere it can type --- neither is compensation for damage to
 the input area, so neither goes away."
   (let ((pre (opencode-chat--save-render-state)))
-    (save-excursion
+    (opencode-chat--in-transcript
       (save-restriction
         (narrow-to-region (point-min) (opencode-chat-message-messages-end))
         (opencode-chat--clear-transcript)
@@ -900,9 +930,7 @@ and restore state around the redraw."
     (opencode-chat-message-render-all messages)
     (when (> (point) (point-min))
       (opencode-chat--apply-message-props (point-min) (point)))
-    (opencode-chat--render-input-area)
-    (when (opencode-chat--child-session-p)
-      (opencode-chat--render-child-indicator))
+    (opencode-chat--render-input-tail)
     ;; Now switch messages-end to insert-after semantics
     (set-marker-insertion-type (opencode-chat-message-messages-end) t)
     (when-let* ((saved-input (plist-get pre :saved-input))
@@ -923,10 +951,19 @@ and restore state around the redraw."
                       opencode-chat-refresh-delay
                       #'opencode-chat--refresh))
 
-;;; --- SSE event handling ---
+(defun opencode-chat--handle-message-status (status)
+  "Handle message-module mutation STATUS.
+The message module reports semantic outcomes and never reaches upward
+into chat.el.  Chat is the controller that turns `:needs-refresh' into a
+debounced refresh request."
+  (pcase status
+    (:needs-refresh (opencode-chat--schedule-refresh))
+    (_ nil)))
+
+;;; --- Backend event handling ---
 
 (defun opencode-chat--session-id-from-event (event)
-  "Extract session-id from SSE EVENT properties.
+  "Extract session-id from OpenCode-shaped EVENT properties.
 Tries flat :sessionID, nested :info :sessionID, nested :info :id,
 then :part :sessionID."
   (let ((props (plist-get event :properties)))
@@ -936,7 +973,7 @@ then :part :sessionID."
         (plist-get (plist-get props :part) :sessionID))))
 
 (defun opencode-chat--on-session-updated (event)
-  "Handle a `session.updated' SSE EVENT.
+  "Handle a `session.updated' OpenCode-shaped EVENT.
 Updates session data and renames the buffer if the title changed."
   (let* ((props (plist-get event :properties))
          (info (plist-get props :info)))
@@ -944,7 +981,8 @@ Updates session data and renames the buffer if the title changed."
     (opencode-chat--set-session info)
     ;; Keep session cache fresh for stale-on-timeout fallback
     (when info
-      (opencode-api-cache-put-session (opencode-chat--session-id) info))
+      (opencode-backend-cache-session
+       (opencode-chat--session-id) info (opencode-chat--backend)))
     ;; Rename buffer to reflect the (possibly new) title
     (when info
       (let ((new-name (opencode-chat--buffer-name info)))
@@ -954,7 +992,7 @@ Updates session data and renames the buffer if the title changed."
     (run-hook-with-args 'opencode-chat-on-session-updated-hook event)))
 
 (defun opencode-chat--on-message-updated (event)
-  "Handle a `message.updated' SSE EVENT.
+  "Handle a `message.updated' OpenCode-shaped EVENT.
 Caches assistant message info for streaming bootstrap.  For new assistant
 messages (not yet in the buffer), immediately bootstraps an empty message
 so subsequent part.updated events (step-start, tool, text delta) can find
@@ -982,29 +1020,33 @@ footer in-place via `opencode-chat-message-update'."
       (when (and msg-id
                  (opencode-chat-message-messages-end)
                  (not (opencode-chat-message-exists-p msg-id)))
-        (opencode-chat-message-upsert msg-id info)))
+        (opencode-chat--handle-message-status
+         (opencode-chat-message-upsert msg-id info))))
      ;; Optimistic user message → delete and let server rebuild
      ((and (equal role "user")
            (opencode-chat--optimistic-msg-id)
            (opencode-chat-message-exists-p (opencode-chat--optimistic-msg-id)))
       (opencode-chat--hide-queued-indicator)
       (opencode-chat-message-delete (opencode-chat--optimistic-msg-id))
-      (opencode-chat--set-optimistic-msg-id nil)
-      (opencode-chat-message-upsert msg-id info))
+      (opencode-chat-input-set-optimistic-msg-id nil)
+      (opencode-chat--handle-message-status
+       (opencode-chat-message-upsert msg-id info)))
      ;; New user message (SSE-only, no prior optimistic send)
      ((and (equal role "user")
            msg-id
            (not (opencode-chat--optimistic-msg-id))
            (opencode-chat-message-messages-end)
            (not (opencode-chat-message-exists-p msg-id)))
-      (opencode-chat-message-upsert msg-id info))
+      (opencode-chat--handle-message-status
+       (opencode-chat-message-upsert msg-id info)))
      ;; Existing message — update header/footer
      ((and msg-id (opencode-chat-message-exists-p msg-id))
-      (opencode-chat-message-upsert msg-id info)))
+      (opencode-chat--handle-message-status
+       (opencode-chat-message-upsert msg-id info))))
     ;; Cache tokens from finalized assistant messages (has :completed + :tokens)
     (when (and (equal role "assistant") completed (plist-get info :tokens))
       (opencode-chat--update-cached-tokens-from-event info))
-    ;; Update state agent/model from assistant messages
+    ;; Update state agent/model/variant from assistant messages
     ;; (matches TUI: local.agent.set(msg.agent) on every message return)
     (when (equal role "assistant")
       (when-let* ((a (plist-get info :agent)))
@@ -1014,29 +1056,35 @@ footer in-place via `opencode-chat-message-update'."
       (when-let* ((m (plist-get info :modelID)))
         (opencode-chat--set-model-id m))
       (when-let* ((p (plist-get info :providerID)))
-        (opencode-chat--set-provider-id p)))
+        (opencode-chat--set-provider-id p))
+      (when (plist-member info :variant)
+        (opencode-chat--set-variant (plist-get info :variant))))
     (run-hook-with-args 'opencode-chat-on-message-updated-hook event)))
 
 (defun opencode-chat--on-message-removed (event)
-  "Handle a `message.removed' SSE EVENT."
+  "Handle a `message.removed' OpenCode-shaped EVENT."
   (opencode--debug "opencode-chat: on-message-removed")
   (opencode-chat--schedule-refresh)
   (run-hook-with-args 'opencode-chat-on-message-removed-hook event))
 
 (defun opencode-chat--on-session-diff (event)
-  "Handle a `session.diff' SSE EVENT.
+  "Handle a `session.diff' OpenCode-shaped EVENT.
 Invalidates the diff cache and pre-fetches fresh diffs asynchronously."
   (opencode--debug "opencode-chat: on-session-diff session=%s" (opencode-chat--session-id))
   (when (opencode-backend-capable-p 'diffs (opencode-chat--backend))
     (opencode-chat-message-invalidate-diffs)
-    (condition-case nil
+    (condition-case err
         (opencode-chat-message-prefetch-diffs (opencode-chat--session-id))
-      (error nil)))
+      (error
+       (opencode--debug
+        "opencode-chat: diff prefetch failed for %s: %s"
+        (opencode-chat--session-id)
+        (error-message-string err)))))
   (opencode-chat--schedule-refresh)
   (run-hook-with-args 'opencode-chat-on-session-diff-hook event))
 
 (defun opencode-chat--on-session-status (event)
-  "Handle a `session.status' SSE EVENT.
+  "Handle a `session.status' OpenCode-shaped EVENT.
 \"retry\" keeps the session busy (server is still working on it) and
 surfaces the attempt/error message via the echo area so the user
 knows why the session appears stuck."
@@ -1066,14 +1114,13 @@ knows why the session appears stuck."
     (run-hook-with-args 'opencode-chat-on-session-status-hook event)))
 
 (defun opencode-chat--on-session-idle (event)
-  "Handle a `session.idle' SSE EVENT.
-Clears busy state, queued state, and streaming state, triggers full refresh.
+  "Handle a `session.idle' OpenCode-shaped EVENT.
+Clears busy and queued state, then triggers a full refresh.
 Force-clears the refresh-in-flight guard because `session.idle' is the
 authoritative \"all done\" signal — any previously in-flight refresh is
 irrelevant (its callback may have been lost or is about to land with
 stale data that this refresh will supersede)."
   (opencode--debug "opencode-chat: on-session-idle session=%s" (opencode-chat--session-id))
-  (opencode-chat-message-clear-streaming)
   (opencode-chat--set-busy nil)
   (opencode-chat--hide-retry-indicator)
   (opencode-chat--clear-queued-state)
@@ -1097,10 +1144,9 @@ stale data that this refresh will supersede)."
   (run-hook-with-args 'opencode-chat-on-session-idle-hook event))
 
 (defun opencode-chat--on-session-compacted (event)
-  "Handle a `session.compacted' SSE EVENT.
-Compaction rewrites message history — clear streaming state and re-fetch."
+  "Handle a `session.compacted' OpenCode-shaped EVENT.
+Compaction rewrites message history, so re-fetch it."
   (opencode--debug "opencode-chat: on-session-compacted session=%s" (opencode-chat--session-id))
-  (opencode-chat-message-clear-streaming)
   (opencode-chat-message-invalidate-diffs)
   (when opencode-chat--state
     (opencode-chat--set-tokens nil))
@@ -1109,12 +1155,11 @@ Compaction rewrites message history — clear streaming state and re-fetch."
   (run-hook-with-args 'opencode-chat-on-session-compacted-hook event))
 
 (defun opencode-chat--on-server-instance-disposed (event)
-  "Handle a `server.instance.disposed' SSE EVENT.
-Broadcast event — applies to all chat buffers.  Clears streaming state.
+  "Handle a `server.instance.disposed' OpenCode-shaped EVENT.
+Broadcast event — applies to all chat buffers.
 Defers refresh if idle (lets the server restart); marks stale if busy or hidden."
   (opencode--debug "opencode-chat: on-server-instance-disposed session=%s" (opencode-chat--session-id))
   (let ((was-busy (opencode-chat--busy)))
-    (opencode-chat-message-clear-streaming)
     (opencode-chat-message-invalidate-diffs)
     (opencode-chat--clear-queued-state)
     (when opencode-chat--state
@@ -1146,7 +1191,7 @@ Registered on `window-buffer-change-functions' by `opencode-chat-mode'."
             (opencode-chat--refresh)))))))
 
 (defun opencode-chat--on-session-deleted (event)
-  "Handle a `session.deleted' SSE EVENT."
+  "Handle a `session.deleted' OpenCode-shaped EVENT."
   (opencode--debug "opencode-chat: on-session-deleted session=%s" (opencode-chat--session-id))
   (opencode-chat--set-busy nil)
   (message "Session %s was deleted" (opencode-chat--session-id))
@@ -1159,7 +1204,7 @@ Registered on `window-buffer-change-functions' by `opencode-chat-mode'."
   (run-hook-with-args 'opencode-chat-on-session-deleted-hook event))
 
 (defun opencode-chat--on-session-error (event)
-  "Handle a `session.error' SSE EVENT.
+  "Handle a `session.error' OpenCode-shaped EVENT.
 Skips MessageAbortedError (normal abort, not a real error)."
   (let* ((props (plist-get event :properties))
          (error-obj (plist-get props :error))
@@ -1177,7 +1222,7 @@ Skips MessageAbortedError (normal abort, not a real error)."
   (run-hook-with-args 'opencode-chat-on-session-error-hook event))
 
 (defun opencode-chat--on-installation-update-available (event)
-  "Handle an `installation.update-available' SSE EVENT.
+  "Handle an `installation.update-available' OpenCode-shaped EVENT.
 Stores the update info in buffer-local var.  The notification appears
 on the next natural re-render (session.idle, manual refresh, etc.).
 No immediate HTTP fetch is needed for a cosmetic footer line."
@@ -1190,7 +1235,7 @@ No immediate HTTP fetch is needed for a cosmetic footer line."
     (run-hook-with-args 'opencode-chat-on-installation-update-available-hook event)))
 
 (defun opencode-chat--on-todo-updated (event)
-  "Handle a `todo.updated' SSE EVENT.
+  "Handle a `todo.updated' OpenCode-shaped EVENT.
 Updates the inline todo list in the chat footer.  The todos vector
 from the event is stored in `(opencode-chat--inline-todos)' and the
 inline todo section is re-rendered cheaply."
@@ -1198,21 +1243,21 @@ inline todo section is re-rendered cheaply."
          (todos (plist-get props :todos)))
     (opencode--debug "opencode-chat: on-todo-updated session=%s count=%d"
              (opencode-chat--session-id) (length todos))
-    (opencode-chat--set-inline-todos todos)
-    (opencode-chat--refresh-inline-todos todos)
+    (opencode-chat-input-set-inline-todos todos)
     (run-hook-with-args 'opencode-chat-on-todo-updated-hook event)))
 
 
 (defun opencode-chat--on-part-updated (event)
-  "Handle a `message.part.updated' or `message.part.delta' SSE EVENT.
-Normalizes both SSE formats, delegates to `opencode-chat-message-update-part',
+  "Handle a `message.part.updated' or `message.part.delta' EVENT.
+Delegates to `opencode-chat-message-update-part',
 and handles chat-level side effects based on the return value."
   (let* ((props (plist-get event :properties))
          (part  (plist-get props :part))
-         ;; Normalize both SSE formats
          (part-id   (or (plist-get part :id) (plist-get props :partID)))
          (msg-id    (or (plist-get part :messageID) (plist-get props :messageID)))
-         (part-type (plist-get part :type))
+         ;; New-format delta events omit :part and identify the streamed
+         ;; content kind through :field ("text" or "reasoning").
+         (part-type (or (plist-get part :type) (plist-get props :field)))
          (delta     (plist-get props :delta)))
     (opencode--debug "opencode-chat: on-part-updated part=%s type=%s delta=%s"
                      part-id part-type (and delta t))
@@ -1235,25 +1280,157 @@ and handles chat-level side effects based on the return value."
                                :agent (opencode-chat--effective-agent)
                                :modelID (plist-get (opencode-chat--effective-model) :modelID)
                                :time (list :created (* (float-time) 1000))))))
-           (opencode-chat-message-upsert msg-id info)
-           ;; Retry now that message exists
-           (opencode-chat-message-update-part
-            msg-id part-id part-type part delta))))
+            (opencode-chat--handle-message-status
+             (opencode-chat-message-upsert msg-id info))
+            ;; Retry now that message exists
+            (opencode-chat--handle-message-status
+             (opencode-chat-message-update-part
+              msg-id part-id part-type part delta)))))
       (:upserted nil)
       (:rendered nil)
       ('nil nil)  ; finalized part — no-op
+      (:needs-refresh (opencode-chat--schedule-refresh))
       (_ (opencode-chat--schedule-refresh)))
     (run-hook-with-args 'opencode-chat-on-part-updated-hook event)))
 
-(defun opencode-chat--prev-message ()
-  "Move to the previous message."
-  (interactive)
-  (opencode-ui--prev-section))
+(defun opencode-chat--section-starts (types)
+  "Return the sorted starts of every section overlay whose type is in TYPES."
+  (let (starts)
+    (dolist (ov (overlays-in (point-min) (point-max)))
+      (when (memq (plist-get (overlay-get ov 'opencode-section) :type) types)
+        (push (overlay-start ov) starts)))
+    (sort (delete-dups starts) #'<)))
 
-(defun opencode-chat--next-message ()
-  "Move to the next message."
-  (interactive)
-  (opencode-ui--next-section))
+(defun opencode-chat--heading-at-p (pos)
+  "Return non-nil when POS carries a rendered Markdown heading face."
+  (seq-some (lambda (face) (memq face opencode-chat--heading-faces))
+            (ensure-list (get-text-property pos 'face))))
+
+(defun opencode-chat--heading-start-candidate (direction origin)
+  "Return the nearest Markdown heading line start from ORIGIN in DIRECTION.
+DIRECTION is 1 to search backward and -1 to search forward.
+
+Headings are found by the face `opencode-markdown' left behind, and that
+fontification is driven by `jit-lock', so a heading in a part of the
+transcript that has never been displayed is not a boundary yet.  The
+motion then falls back to the enclosing section, which is why this does
+not force fontification of text the user has not looked at."
+  (let ((pos origin)
+        (found nil))
+    (if (> direction 0)
+        (while (and (not found) (> pos (point-min)))
+          (setq pos (or (previous-single-property-change pos 'face)
+                        (point-min)))
+          (when (opencode-chat--heading-at-p pos)
+            (let ((bol (save-excursion (goto-char pos) (pos-bol))))
+              (when (< bol origin)
+                (setq found bol)))))
+      (while (and (not found) (< pos (point-max)))
+        (setq pos (or (next-single-property-change pos 'face) (point-max)))
+        (when (and (< pos (point-max))
+                   (opencode-chat--heading-at-p pos))
+          (let ((bol (save-excursion (goto-char pos) (pos-bol))))
+            (when (> bol origin)
+              (setq found bol))))))
+    found))
+
+(defun opencode-chat--nearest-section-start (direction)
+  "Return the nearest section beginning from point in DIRECTION.
+DIRECTION is 1 to move backward and -1 to move forward.  A section
+begins at a message, tool call, reasoning block, subtask, or Markdown
+heading, whichever lies closest."
+  (let* ((origin (point))
+         (starts (opencode-chat--section-starts
+                  opencode-chat--navigable-section-types))
+         (section-candidate
+          (if (> direction 0)
+              (seq-find (lambda (start) (< start origin)) (reverse starts))
+            (seq-find (lambda (start) (> start origin)) starts)))
+         (heading-candidate
+          (opencode-chat--heading-start-candidate direction origin))
+         (candidates (delq nil (list section-candidate heading-candidate))))
+    (when candidates
+      (if (> direction 0)
+          (apply #'max candidates)
+        (apply #'min candidates)))))
+
+(defun opencode-chat--beginning-of-defun (&optional count)
+  "Move to the COUNT-th section beginning, as `beginning-of-defun-function'.
+Positive COUNT moves backward, negative COUNT moves forward.  Point
+inside a section moves to that section's beginning first, so repeating
+the motion walks outward through the transcript."
+  (let* ((count (or count 1))
+         (direction (if (< count 0) -1 1))
+         (remaining (abs count))
+         (found nil))
+    (while (> remaining 0)
+      (if-let* ((target (opencode-chat--nearest-section-start direction)))
+          (progn
+            (goto-char target)
+            (setq found t
+                  remaining (1- remaining)))
+        (setq remaining 0)))
+    found))
+
+(defun opencode-chat--innermost-section-end (pos)
+  "Return the end of the smallest navigable section covering POS."
+  (let ((best nil)
+        (best-size most-positive-fixnum))
+    (dolist (ov (overlays-at pos))
+      (when (memq (plist-get (overlay-get ov 'opencode-section) :type)
+                  opencode-chat--navigable-section-types)
+        (let ((size (- (overlay-end ov) (overlay-start ov))))
+          (when (< size best-size)
+            (setq best (overlay-end ov)
+                  best-size size)))))
+    best))
+
+(defun opencode-chat--end-of-defun ()
+  "Move past the section at point, as `end-of-defun-function'.
+Whichever comes first wins: the end of the innermost section covering
+point, or the next section beginning.  A Markdown heading has no overlay
+of its own, so it ends where the next heading or section starts rather
+than running to the end of the message that contains it."
+  (let* ((section-end (opencode-chat--innermost-section-end (point)))
+         (next-start (opencode-chat--nearest-section-start -1))
+         (candidates (delq nil (list section-end next-start))))
+    (when candidates
+      (goto-char (apply #'min candidates)))))
+
+(defun opencode-chat--prev-message (&optional count)
+  "Move to the beginning of the current or previous message.
+When point is inside a message, the first move goes to that message's
+beginning.  When point is already at a message beginning, it goes to the
+previous message.  Repeat COUNT times."
+  (interactive "p")
+  (let ((remaining (max 1 (or count 1)))
+        (starts (opencode-chat--section-starts '(message)))
+        target)
+    (while (> remaining 0)
+      (setq target (seq-find (lambda (start) (< start (point)))
+                             (reverse starts)))
+      (if target
+          (progn
+            (goto-char target)
+            (setq remaining (1- remaining)))
+        (setq remaining 0)
+        (message "No previous message")))))
+
+(defun opencode-chat--next-message (&optional count)
+  "Move to the beginning of the next message.
+Repeat COUNT times."
+  (interactive "p")
+  (let ((remaining (max 1 (or count 1)))
+        (starts (opencode-chat--section-starts '(message)))
+        target)
+    (while (> remaining 0)
+      (setq target (seq-find (lambda (start) (> start (point))) starts))
+      (if target
+          (progn
+            (goto-char target)
+            (setq remaining (1- remaining)))
+        (setq remaining 0)
+        (message "No next message")))))
 
 (defun opencode-chat--fetch-inline-todos ()
   "Fetch todos for the current session asynchronously.
@@ -1270,14 +1447,13 @@ No-op for backends without the `todos' capability (e.g. Pi)."
            (with-current-buffer buf
              (opencode-chat--debug-cursor-trace "todo-cb-enter")
              (when-let* ((body (plist-get response :body)))
-               (opencode-chat--set-inline-todos body)
-               (opencode-chat--refresh-inline-todos body))
+                (opencode-chat-input-set-inline-todos body))
               (opencode-chat--debug-cursor-trace "todo-cb-exit"))))
        (opencode-chat--backend)))))
 
 
 (defun opencode-chat--refresh (&optional initial)
-  "Refresh chat from the server (async).
+  "Refresh chat from the backend (async).
 When INITIAL is non-nil, passes fetched messages to `opencode-chat--state-init'
 so it can extract agent/model from the last assistant message (first open).
 When nil (live re-refresh), state-init preserves existing state set by SSE.
@@ -1378,7 +1554,7 @@ refresh.  This ensures at most two overlapping request chains."
      (= (point) (point-max)))))
 
 (defun opencode-chat--refresh-sync (&optional initial)
-  "Refresh chat from the server (synchronous).
+  "Refresh chat from the backend (synchronous).
 INITIAL has the same meaning as in `opencode-chat--refresh'.
 Use only for initial load or testing; prefer `opencode-chat--refresh'."
   (when (opencode-chat--session-id)
@@ -1400,13 +1576,13 @@ Use only for initial load or testing; prefer `opencode-chat--refresh'."
 ;;; --- Recovery ---
 
 (defun opencode-chat-hard-reset ()
-  "Discard all cached render state and redraw the transcript from the server.
+  "Discard all cached render state and redraw the transcript from the backend.
 
 The escape hatch for a chat buffer whose store and the buffer itself have
 diverged.  An ordinary refresh reuses the store, so a section whose
 overlay the store has lost -- or has recorded at the wrong place -- stays
-wrong across refreshes; this drops the store and the streaming state
-first, so the redraw starts from nothing but the server's messages.
+wrong across refreshes; this drops the store first, so the redraw starts
+from nothing but the backend's messages.
 
 Reaching for this should be rare.  `opencode-chat--store-find-overlay'
 logs when it repairs a desync by scanning the buffer, and that log is the
@@ -1418,7 +1594,6 @@ the cause."
   (unless (opencode-chat--session-id)
     (user-error "No session attached to this buffer"))
   (let ((inhibit-read-only t))
-    (opencode-chat--clear-streaming-state)
     (opencode-chat--store-clear)
     (opencode-chat--refresh-sync))
   (message "opencode: chat redrawn from server"))
@@ -1476,7 +1651,8 @@ to `opencode-backend-current'."
           ;; server to silently drop requests.
           (when-let ((dir (or directory
                               (bound-and-true-p opencode-default-directory))))
-            (setq-local opencode-api-directory (directory-file-name (expand-file-name dir)))
+            (setq-local opencode-backend-directory
+                        (directory-file-name (expand-file-name dir)))
             (setq default-directory (file-name-as-directory (expand-file-name dir))))
           ;; Show loading state (read-only so user doesn't type into it)
   (let ((inhibit-read-only t)
@@ -1489,7 +1665,7 @@ to `opencode-backend-current'."
           )
         (opencode-chat--display-buffer buf display-action)
         ;; Retry cache load if it failed during startup
-        (opencode-api-cache-ensure-loaded)
+        (opencode-backend-ensure-ready backend)
         ;; Fetch session info async, then rename buffer and load messages
         (opencode-backend-get-session
          session-id
@@ -1502,7 +1678,8 @@ to `opencode-backend-current'."
                  ;; The server stores the correct project directory;
                  ;; opencode-default-directory may differ (e.g. $HOME).
                  (when-let ((dir (plist-get session :directory)))
-                   (setq-local opencode-api-directory (directory-file-name dir))
+                    (setq-local opencode-backend-directory
+                                (directory-file-name dir))
                    (setq default-directory (file-name-as-directory dir)))
                  ;; Rename buffer to proper name
                  (let ((proper-name (opencode-chat--buffer-name session)))
@@ -1513,7 +1690,8 @@ to `opencode-backend-current'."
 
 ;;; --- /btw side conversation (OpenCode) ---
 
-(declare-function opencode-session-fork "opencode-session" (session-id &optional message-id))
+(declare-function opencode-session-fork
+                  "opencode-session" (session-id &optional message-id backend))
 
 (defun opencode-chat--btw (text)
   "Open an OpenCode `/btw' side conversation seeded from the current session.
@@ -1525,10 +1703,10 @@ This is the OpenCode implementation of `/btw'.  Pi buffers do NOT call
 this; they defer to the `pi-btw' extension (the slash text is forwarded
 as a prompt)."
   (let* ((session-id (opencode-chat--session-id))
-         (directory opencode-api-directory))
+         (directory opencode-backend-directory))
     (unless session-id
       (user-error "No active session to branch from"))
-    (let ((fork (opencode-session-fork session-id)))
+    (let ((fork (opencode-session-fork session-id nil 'opencode)))
       (unless fork
         (user-error "Fork failed"))
       (let ((fork-id (plist-get fork :id))

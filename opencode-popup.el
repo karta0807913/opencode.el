@@ -24,7 +24,7 @@
 
 ;; Cross-module references — avoid circular requires
 (declare-function opencode-chat--find-buffer "opencode-chat" (session-id))
-(declare-function opencode-chat--render-input-area "opencode-chat-input" ())
+(declare-function opencode-chat--render-input-tail "opencode-chat" ())
 (declare-function opencode-chat--input-text "opencode-chat-input" ())
 (declare-function opencode-chat--replace-input "opencode-chat-input" (text))
 (declare-function opencode-chat--goto-latest "opencode-chat-input" ())
@@ -101,31 +101,69 @@ Must be called from within the chat buffer."
 (defun opencode-popup--restore-input ()
   "Restore the chat buffer input area with previously saved text.
 Deletes everything from messages-end (popup replaced the entire input
-area including separator and prompt), re-renders via `render-input-area',
-and restores any saved user text.  Must be called from within
-the chat buffer where the popup was displayed."
+area including separator and prompt), re-renders the full input tail,
+and restores any saved user text.  The input tail includes child-session
+navigation such as the Parent link.  Must be called from within the chat
+buffer where the popup was displayed.
+
+Popup state and marker insertion semantics are restored even when tail
+rendering signals."
   (let ((inhibit-read-only t)
         (buffer-undo-list t)
         (saved opencode-popup--saved-input)
-        (me (opencode-chat-message-messages-end)))
-    ;; Delete from messages-end to end of buffer (popup + any residual)
-    (when me
-      (delete-region (marker-position me) (point-max)))
-    ;; Re-render the full input area (separator + prompt + footer)
-    (goto-char (marker-position me))
-    (opencode-chat--render-input-area)
-    ;; Restore saved text if any
-    (when (and saved (not (string-empty-p saved)))
-      (opencode-chat--replace-input saved))
-    ;; Clear inline state — overlay was inside the deleted region, but
-    ;; detach it explicitly so the struct never holds a stale overlay.
-    (when (overlayp opencode-popup--overlay)
-      (delete-overlay opencode-popup--overlay))
-    (setq opencode-popup--saved-input nil
-          opencode-popup--inline-p nil
-          opencode-popup--overlay nil)
-    ;; Move cursor to the input area so the user can type immediately.
-    (opencode-chat--goto-latest)))
+        (me (opencode-chat-message-messages-end))
+        (rendered nil))
+    (unless (and (markerp me) (marker-position me))
+      (error "Popup: messages-end marker is nil or invalid, cannot restore input"))
+    (unwind-protect
+        (progn
+          ;; Delete from messages-end to end of buffer (popup + any residual).
+          (delete-region (marker-position me) (point-max))
+          (goto-char (marker-position me))
+          (opencode-chat--render-input-tail)
+          (setq rendered t)
+          ;; Restore saved text if any.
+          (when (and saved (not (string-empty-p saved)))
+            (opencode-chat--replace-input saved))
+          ;; Move cursor to the input area so the user can type immediately.
+          (opencode-chat--goto-latest))
+      ;; The overlay was inside the deleted region, but detach it explicitly
+      ;; so the buffer-local state never retains a stale overlay.
+      (when (overlayp opencode-popup--overlay)
+        (delete-overlay opencode-popup--overlay))
+      (setq opencode-popup--saved-input nil
+            opencode-popup--inline-p nil
+            opencode-popup--overlay nil)
+      ;; A successful tail render creates a fresh marker with insertion type
+      ;; t.  If rendering failed before that happened, leave the old boundary
+      ;; usable by streaming and later recovery attempts.
+      (unless rendered
+        (when-let* ((boundary (opencode-chat-message-messages-end))
+                    ((markerp boundary))
+                    ((marker-position boundary)))
+          (set-marker-insertion-type boundary t))))))
+
+(defun opencode-popup--recover-render-error ()
+  "Restore the input tail after an inline popup render error.
+Return nil on successful recovery, or the recovery error object.  Popup
+state is cleared and a live messages-end marker is made insert-after even
+when restoration itself fails."
+  (condition-case err
+      (progn
+        (when opencode-popup--inline-p
+          (opencode-popup--restore-input))
+        nil)
+    (error
+     (when (overlayp opencode-popup--overlay)
+       (delete-overlay opencode-popup--overlay))
+     (setq opencode-popup--saved-input nil
+           opencode-popup--inline-p nil
+           opencode-popup--overlay nil)
+     (when-let* ((me (opencode-chat-message-messages-end))
+                 ((markerp me))
+                 ((marker-position me)))
+       (set-marker-insertion-type me t))
+     err)))
 
 ;;; --- Dual-dispatch deduplication ---
 
@@ -292,34 +330,41 @@ so callers can catch and recover gracefully."
        (error "Popup: input-start marker is nil or invalid, cannot render inline"))
      (let ((inhibit-read-only t)
            (buffer-undo-list t)
-           (me (opencode-chat-message-messages-end)))
-       ;; Delete the entire input area (separator + prompt + footer)
-       ;; from messages-end, not input-start, to avoid leaving a
-       ;; residual "> " prompt line.
-       (delete-region (marker-position me) (point-max))
-       ;; Switch messages-end to nil insertion type so it stays at
-       ;; the popup start (not pushed to the end by popup content).
-       ;; restore-input relies on messages-end pointing BEFORE the
-       ;; popup region so it can delete-region from there.
-       (set-marker-insertion-type me nil)
-       ;; Insert content at messages-end
-       (goto-char (marker-position me))
-       (let ((region-start (point)))
-         ;; Execute body — caller inserts popup content
-         ,@body
-         ;; Read-only + kind-identifying property stay as text properties.
-         (add-text-properties region-start (point)
-                              (list 'read-only t
-                                    ',prop t))
-         ;; Keymap moves to an overlay so it wins against any
-         ;; text-property keymap from the underlying chat buffer.
-         (let ((ov (make-overlay region-start (point))))
-           (overlay-put ov 'keymap ,keymap)
-           (overlay-put ov 'priority 100)
-           (overlay-put ov 'opencode-popup-kind ',prop)
-           (setq opencode-popup--overlay ov))
-         ;; Place cursor at start of region
-         (goto-char region-start)))))
+           (me (opencode-chat-message-messages-end))
+           (rendered nil))
+       (unless (and (markerp me) (marker-position me))
+         (error "Popup: messages-end marker is nil or invalid, cannot render inline"))
+       (unwind-protect
+           (progn
+             ;; Delete the entire input tail from messages-end, including
+             ;; child-session navigation, to avoid leaving residual UI.
+             (delete-region (marker-position me) (point-max))
+             ;; Keep messages-end before the popup while content is inserted.
+             (set-marker-insertion-type me nil)
+             (goto-char (marker-position me))
+             (let ((region-start (point)))
+               ;; Execute body — caller inserts popup content.
+               ,@body
+               ;; Read-only + kind-identifying property stay as text properties.
+               (add-text-properties region-start (point)
+                                    (list 'read-only t
+                                          ',prop t))
+               ;; Keymap moves to an overlay so it wins against any
+               ;; text-property keymap from the underlying chat buffer.
+               (when (overlayp opencode-popup--overlay)
+                 (delete-overlay opencode-popup--overlay))
+               (let ((ov (make-overlay region-start (point))))
+                 (overlay-put ov 'keymap ,keymap)
+                 (overlay-put ov 'priority 100)
+                 (overlay-put ov 'opencode-popup-kind ',prop)
+                 (setq opencode-popup--overlay ov))
+               (setq rendered t)
+               ;; Place cursor at start of region.
+               (goto-char region-start)))
+         ;; If BODY signals, callers restore the input tail; make the marker
+         ;; safe first so recovery is not left with insert-before semantics.
+         (unless rendered
+           (set-marker-insertion-type me t))))))
 
 
 ;;; --- Popup queue draining ---

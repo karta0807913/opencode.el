@@ -10,6 +10,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'opencode-backend-opencode)
 (require 'opencode-permission)
 (require 'opencode-chat)
 (require 'opencode-session)
@@ -202,6 +203,24 @@ answers a request without using the built-in popup state."
     (let ((req (opencode-test-last-request)))
       (should (equal (nth 1 req) "/permission/perm_selected/reply"))
       (should (equal (plist-get (nth 3 req) :reply) "once")))))
+
+(ert-deftest opencode-permission-popup-reply-uses-chat-backend ()
+  "Built-in popup replies use the backend stored in the chat buffer."
+  (opencode-test-with-temp-buffer "*opencode: permission-backend*"
+    (opencode-chat-mode)
+    (opencode-chat--set-backend 'pi)
+    (setq opencode-permission--current
+          '(:id "perm_pi" :sessionID "ses_pi"))
+    (let ((captured nil))
+      (cl-letf (((symbol-function 'opencode-backend-reply-permission)
+                 (lambda (id choice message &optional backend)
+                   (setq captured (list id choice message backend))))
+                ((symbol-function 'opencode-popup--purge-pending-by-id)
+                 #'ignore)
+                ((symbol-function 'opencode-popup--cleanup)
+                 #'ignore))
+        (opencode-permission--reply :choice "once")
+        (should (equal captured '("perm_pi" "once" nil pi)))))))
 
 ;;; --- Test: show returns nil for child sessions (no input area) ---
 

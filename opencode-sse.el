@@ -6,8 +6,8 @@
 ;;; Commentary:
 
 ;; Server-Sent Events (SSE) consumer for the OpenCode event stream.
-;; Connects to GET /event (or /global/event), parses SSE format,
-;; and dispatches events to hook variables.
+;; Connects to GET /global/event, parses SSE data frames, unwraps the
+;; `{directory, payload}' envelope, and dispatches events to hook variables.
 ;;
 ;; SSE format:
 ;;   event: <type>
@@ -23,7 +23,9 @@
 (require 'json)
 (require 'opencode-log)
 (require 'opencode-util)
-(require 'opencode-backend)
+(require 'opencode-backend-core)
+(require 'opencode-backend-opencode)
+(require 'opencode-event)
 (require 'map)
 
 (declare-function opencode-server-url "opencode-server" (&optional path))
@@ -367,7 +369,7 @@ every handler run."
       (let ((event (opencode-sse--parse-event event-type data-string id)))
         (when event
           (plist-put event :backend-event
-                     (opencode-backend-normalize-event event))
+                     (opencode-backend-normalize-event event 'opencode))
           (opencode-sse--run-hooks event)))
     (error
      (opencode--debug "opencode-sse: Error dispatching event %s: %s"
@@ -406,8 +408,11 @@ that canonical event is the adapter seam for non-OpenCode backends."
                :id id)))))
 
 (defun opencode-sse--run-hooks (event)
-  "Run the catch-all and type-specific hooks for EVENT."
+  "Run public SSE hooks and central canonical routing for EVENT."
   (let ((type (plist-get event :type)))
+    (unless (plist-get event :backend-event)
+      (plist-put event :backend-event
+                 (opencode-backend-normalize-event event 'opencode)))
     (opencode--debug "opencode-sse: [%s] dir=%s props-keys=%S"
              type
              (plist-get event :directory)
@@ -418,6 +423,8 @@ that canonical event is the adapter seam for non-OpenCode backends."
       (opencode--debug "opencode-sse: dispatching to %s (%d listeners)"
                hook (length (symbol-value hook)))
       (run-hook-with-args hook event))
+    (when-let* ((backend-event (plist-get event :backend-event)))
+      (opencode-event-dispatch backend-event event))
     (run-hook-with-args 'opencode-sse-after-dispatch-hook-global event)))
 
 (defconst opencode-sse--type->hook
@@ -426,7 +433,10 @@ that canonical event is the adapter seam for non-OpenCode backends."
     ("session.updated"                . opencode-sse-session-updated-hook)
     ("message.updated"                . opencode-sse-message-updated-hook)
     ("message.part.updated"           . opencode-sse-message-part-updated-hook)
-    ;; part.delta is an alias for part.updated — both fire the same hook.
+    ;; Newer OpenCode servers emit streaming text/reasoning as the separate
+    ;; `message.part.delta' format, while `message.part.updated' carries the
+    ;; complete part and tool state.  They share this public compatibility
+    ;; hook, but remain distinct event types in the canonical router.
     ("message.part.delta"             . opencode-sse-message-part-updated-hook)
     ("message.part.removed"           . opencode-sse-message-part-removed-hook)
     ("message.removed"                . opencode-sse-message-removed-hook)

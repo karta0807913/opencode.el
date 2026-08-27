@@ -70,7 +70,7 @@
 # Also confirm the generic message keymap is still in effect OUTSIDE the edit body.
 # Pick a position that does NOT have opencode-file-path and verify RET/g fall through.
 :eval (goto-char (point-min))
-:eval (let ((pos (point-min))) (while (and pos (get-text-property pos 'opencode-file-path)) (setq pos (next-single-property-change pos 'opencode-file-path))) (goto-char (or pos (point-min))) (should (eq (key-binding (kbd "g")) 'opencode-chat--refresh)))
+:eval (let ((pos (point-min))) (while (and pos (get-text-property pos 'opencode-file-path)) (setq pos (next-single-property-change pos 'opencode-file-path))) (goto-char (or pos (point-min))) (should-not (eq (key-binding (kbd "g")) 'opencode-chat--refresh)))
 
 # ============================================================
 # Test the three open-file behaviors (post-refresh)

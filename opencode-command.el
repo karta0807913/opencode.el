@@ -39,29 +39,43 @@
                             (provider-id (plist-get model :providerID)))
                         (unless (and model-id provider-id)
                           (user-error "No model configured for compaction"))
-                         (opencode-session-compact (opencode-chat--session-id) model-id provider-id))))
+                         (opencode-session-compact
+                          (opencode-chat--session-id) model-id provider-id
+                          (opencode-chat--backend)))))
    (list :name "model" :description "Select a different model"
          :callback #'opencode-command-select-model)
    (list :name "rename" :description "Rename the current session"
          :callback (lambda ()
                      (let ((title (read-string "New title: ")))
-                       (opencode-session-rename (opencode-chat--session-id) title))))
+                       (opencode-session-rename
+                        (opencode-chat--session-id) title
+                        (opencode-chat--backend)))))
    (list :name "fork" :description "Fork the current session"
          :callback (lambda ()
-                     (let ((new-session (opencode-session-fork (opencode-chat--session-id))))
+                     (let ((new-session
+                            (opencode-session-fork
+                             (opencode-chat--session-id) nil
+                             (opencode-chat--backend))))
                        (when new-session
                          (opencode-chat-open (plist-get new-session :id)
-                                            (plist-get new-session :directory))))))
+                                            (plist-get new-session :directory)
+                                            nil
+                                            (opencode-chat--backend))))))
    (list :name "share" :description "Create a shareable URL for this session"
          :callback (lambda ()
-                     (let ((res (opencode-session-share (opencode-chat--session-id))))
+                     (let ((res
+                            (opencode-session-share
+                             (opencode-chat--session-id)
+                             (opencode-chat--backend))))
                        (when-let* ((share (plist-get (plist-get res :body) :share))
                                    (url (plist-get share :url)))
                          (kill-new url)
                          (message "Share URL copied to clipboard: %s" url)))))
    (list :name "unshare" :description "Delete the share link for this session"
          :callback (lambda ()
-                     (opencode-session-unshare (opencode-chat--session-id))
+                     (opencode-session-unshare
+                      (opencode-chat--session-id)
+                      (opencode-chat--backend))
                      (message "Session unshared")))
    (list :name "undo" :description "Undo the last user message"
          :callback (lambda ()
@@ -73,12 +87,16 @@
                              (reverse (opencode-chat-message-sorted-ids)))))
                        (if last-user-id
                            (progn
-                             (opencode-session-revert (opencode-chat--session-id) last-user-id)
+                             (opencode-session-revert
+                              (opencode-chat--session-id) last-user-id
+                              (opencode-chat--backend))
                              (message "Undid last message"))
                          (user-error "No user message found to undo")))))
    (list :name "redo" :description "Redo the last undone message"
          :callback (lambda ()
-                     (opencode-session-unrevert (opencode-chat--session-id))
+                     (opencode-session-unrevert
+                      (opencode-chat--session-id)
+                      (opencode-chat--backend))
                      (message "Redo executed")))
    (list :name "btw" :description "Side conversation (fork on OpenCode; pi-btw on Pi)"
          :hints '("question")
@@ -124,29 +142,6 @@ Returns an alist of (candidate . command-plist) for annotation."
       (let ((candidate (opencode-command--format-candidate cmd)))
         (puthash candidate cmd table)))
     table))
-
-(defun opencode-command--annotator (table)
-  "Return an annotation function for completion TABLE.
-Shows command hints and whether it's an MCP command."
-  (lambda (candidate)
-    (when-let* ((cmd (gethash candidate table)))
-      (let ((hints (plist-get cmd :hints))
-            (mcp (plist-get cmd :mcp))
-            (agent (plist-get cmd :agent))
-            (parts nil))
-        (when (and hints (> (length hints) 0))
-          (push (propertize (format " %s" (mapconcat #'identity hints " "))
-                            'face 'font-lock-variable-name-face)
-                parts))
-        (when agent
-          (push (propertize (format " [%s]" agent)
-                            'face 'font-lock-type-face)
-                parts))
-        (when (eq mcp t)
-          (push (propertize " [MCP]" 'face 'font-lock-keyword-face)
-                parts))
-        (when parts
-          (apply #'concat (nreverse parts)))))))
 
 (defun opencode-command--read-arguments (cmd)
   "Prompt for arguments for command CMD if it has hints.

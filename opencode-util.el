@@ -107,14 +107,6 @@ Returns \"+N -N\" or \"+N -N  N files\"."
         (format "%s  %d files" base files)
       base)))
 
-;;; --- Right-aligned insertion ---
-
-(defun opencode-ui--insert-right-align (min-col)
-  "Insert spaces to right-align subsequent text at MIN-COL.
-Always inserts at least 2 spaces from the current column."
-  (let ((target (max (+ (current-column) 2) min-col)))
-    (insert (make-string (max 1 (- target (current-column))) ?\s))))
-
 ;;; --- ID generation ---
 
 (defun opencode-util--random-string (length)

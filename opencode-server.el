@@ -28,6 +28,7 @@
 (require 'url)
 (require 'url-http)
 (require 'opencode-util)
+(require 'opencode-workflow-bridge)
 
 (defvar url-http-end-of-headers)
 
@@ -345,10 +346,14 @@ or signal an error."
            (if (plist-get status :error)
                (funcall cb nil)
              (goto-char url-http-end-of-headers)
-             (condition-case nil
-                (funcall cb (opencode--json-parse
-                             (buffer-substring-no-properties (point) (point-max))))
-               (error (funcall cb nil)))))
+              (condition-case err
+                 (funcall cb (opencode--json-parse
+                              (buffer-substring-no-properties (point) (point-max))))
+                (error
+                 (opencode-server--log
+                  "Health response parse failed: %s"
+                  (error-message-string err))
+                 (funcall cb nil)))))
          (list callback)
          t)
       ;; Synchronous
@@ -431,7 +436,10 @@ Optional DIRECTORY is the working directory for the server."
          (args (append opencode-server-args
                        (list "--log-level" opencode-server-log-level
                              "--hostname" opencode-server-host)))
-         (process-environment (copy-sequence process-environment))
+         (bridge-file (opencode-workflow-bridge-start))
+         (process-environment
+          (cons (concat "OPENCODE_EL_BRIDGE=" bridge-file)
+                (copy-sequence process-environment)))
          (buf (get-buffer-create opencode-server--log-buffer-name))
          (proc (apply #'start-process
                       "opencode-server" buf

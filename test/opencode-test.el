@@ -344,6 +344,59 @@ The directory is normalized (no trailing slash) for consistent API query params.
         (opencode-mode -1)
         (setq opencode-default-directory nil)))))
 
+(ert-deftest opencode-chat-explicit-directory-takes-precedence ()
+  "An explicit chat DIRECTORY overrides project and global defaults."
+  (let ((opencode-default-directory "/tmp/global-project")
+        (opencode-backend-directory "/tmp/stale-chat-project")
+        (default-directory "/tmp/current-project/")
+        picker-directory
+        picker-backend-directory
+        opened-directory)
+    (cl-letf (((symbol-function 'opencode--ensure-ready) #'ignore)
+              ((symbol-function 'project-current) (lambda (&rest _) t))
+              ((symbol-function 'project-root)
+               (lambda (_project) "/tmp/detected-project/"))
+              ((symbol-function 'opencode--read-session)
+               (lambda (_prompt)
+                 (setq picker-directory opencode-default-directory
+                       picker-backend-directory opencode-backend-directory)
+                 '("ses_explicit" . "/tmp/stale-session-project")))
+              ((symbol-function 'opencode-chat-open)
+               (lambda (_session-id directory &rest _)
+                 (setq opened-directory directory))))
+      (opencode-chat nil 'opencode "/tmp/explicit-project/")
+      (should (equal picker-directory "/tmp/explicit-project"))
+      (should (equal picker-backend-directory "/tmp/explicit-project"))
+      (should (equal opened-directory "/tmp/explicit-project")))))
+
+(ert-deftest opencode-chat-new-session-does-not-repeat-readiness-check ()
+  "Choosing New session reuses the chat command's readiness check."
+  (let ((ready-count 0)
+        (opencode-backend-directory "/tmp/stale-chat-project")
+        created-title
+        created-backend
+        created-directory
+        opened-directory)
+    (cl-letf (((symbol-function 'opencode--ensure-ready)
+               (lambda () (cl-incf ready-count)))
+              ((symbol-function 'opencode--read-session)
+               (lambda (_prompt) 'new))
+              ((symbol-function 'opencode-session-create)
+               (lambda (&optional title _parent-id backend)
+                 (setq created-title title
+                       created-backend backend
+                       created-directory opencode-backend-directory)
+                 '(:id "ses_new" :directory "/tmp/stale-session-project")))
+              ((symbol-function 'opencode-chat-open)
+               (lambda (_session-id directory &rest _)
+                 (setq opened-directory directory))))
+      (opencode-chat nil 'opencode "/tmp/project")
+      (should (= ready-count 1))
+      (should-not created-title)
+      (should (eq created-backend 'opencode))
+      (should (equal created-directory "/tmp/project"))
+      (should (equal opened-directory "/tmp/project")))))
+
 ;;; --- Buffer registry tests ---
 
 (ert-deftest opencode-registry-sidebar-register-and-lookup ()
@@ -618,6 +671,164 @@ install global listeners and manually filter every event by session id."
             (opencode-sse--run-hooks event)
             (should (eq buf (car called)))
             (should (eq event (cadr called)))))
+      (setq opencode--chat-registry saved-registry)
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest opencode-event-route-suffix-matches-canonical-type ()
+  "Suffix routes (.sidebar/.global) match the canonical event type."
+  (let ((opencode-event-routes nil)
+        called)
+    (opencode-event-route "todo.updated.global"
+                          'opencode-sse-todo-updated-hook
+                          (lambda (event) (push (plist-get event :type) called))
+                          'global)
+    (opencode-event-dispatch
+     (opencode-backend-event :type "todo.updated"
+                             :backend 'opencode
+                             :session-id "ses_1"))
+    (should (equal '("todo.updated") called))))
+
+(ert-deftest opencode-event-routes-standalone-part-delta-to-chat ()
+  "A standalone `message.part.delta' reaches the owning chat buffer.
+The SSE hook aliases delta and updated events, but canonical routing
+matches exact event types and therefore needs an explicit delta route."
+  (let ((buf (get-buffer-create "*opencode: part-delta-route*"))
+        (saved-registry (copy-hash-table opencode--chat-registry)))
+    (unwind-protect
+        (progn
+          (clrhash opencode--chat-registry)
+          (with-current-buffer buf
+            (opencode-chat-mode)
+            (opencode-chat--set-session-id "ses_delta_route")
+            (opencode-chat--set-messages-end (copy-marker (point) t)))
+          (opencode--register-chat-buffer "ses_delta_route" buf)
+          (opencode-sse--run-hooks
+           (list :type "message.updated"
+                 :properties
+                 (list :info
+                       (list :id "msg_delta_route"
+                             :sessionID "ses_delta_route"
+                             :role "assistant"
+                             :time (list :created 1000)))))
+          (opencode-sse--run-hooks
+           (list :type "message.part.updated"
+                 :properties
+                 (list :sessionID "ses_delta_route"
+                       :part
+                       (list :id "prt_delta_route"
+                             :sessionID "ses_delta_route"
+                             :messageID "msg_delta_route"
+                             :type "text"
+                             :text ""
+                             :time (list :start 1001)))))
+          (opencode-sse--run-hooks
+           (list :type "message.part.delta"
+                 :properties
+                 (list :sessionID "ses_delta_route"
+                       :messageID "msg_delta_route"
+                       :partID "prt_delta_route"
+                       :field "text"
+                       :delta "streamed response")))
+          (with-current-buffer buf
+            (should (string-match-p "streamed response" (buffer-string)))))
+      (setq opencode--chat-registry saved-registry)
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest opencode-event-part-delta-preserves-reasoning-field ()
+  "A reasoning delta renders with reasoning styling without a full part.
+`message.part.delta' carries the part kind in `properties.field', so
+dropping that field would silently render thinking as response prose."
+  (let ((buf (get-buffer-create "*opencode: reasoning-delta-route*"))
+        (saved-registry (copy-hash-table opencode--chat-registry)))
+    (unwind-protect
+        (progn
+          (clrhash opencode--chat-registry)
+          (with-current-buffer buf
+            (opencode-chat-mode)
+            (opencode-chat--set-session-id "ses_reason_delta")
+            (opencode-chat--set-messages-end (copy-marker (point) t)))
+          (opencode--register-chat-buffer "ses_reason_delta" buf)
+          (opencode-sse--run-hooks
+           (list :type "message.updated"
+                 :properties
+                 (list :info
+                       (list :id "msg_reason_delta"
+                             :sessionID "ses_reason_delta"
+                             :role "assistant"
+                             :time (list :created 1000)))))
+          (opencode-sse--run-hooks
+           (list :type "message.part.delta"
+                 :properties
+                 (list :sessionID "ses_reason_delta"
+                       :messageID "msg_reason_delta"
+                       :partID "prt_reason_delta"
+                       :field "reasoning"
+                       :delta "private thought")))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (should (search-forward "private thought" nil t))
+            (should (eq (get-text-property (match-beginning 0) 'face)
+                        'opencode-reasoning))))
+      (setq opencode--chat-registry saved-registry)
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest opencode-event-streams-text-around-tool-updates ()
+  "Standalone text deltas remain visible before and after a tool part.
+Tool state arrives as `message.part.updated' while prose arrives as
+`message.part.delta'; both event types must interleave in one message."
+  (let ((buf (get-buffer-create "*opencode: text-tool-text-route*"))
+        (saved-registry (copy-hash-table opencode--chat-registry)))
+    (unwind-protect
+        (progn
+          (clrhash opencode--chat-registry)
+          (with-current-buffer buf
+            (opencode-chat-mode)
+            (opencode-chat--set-session-id "ses_text_tool")
+            (opencode-chat--set-messages-end (copy-marker (point) t)))
+          (opencode--register-chat-buffer "ses_text_tool" buf)
+          (opencode-sse--run-hooks
+           (list :type "message.updated"
+                 :properties
+                 (list :info
+                       (list :id "msg_text_tool"
+                             :sessionID "ses_text_tool"
+                             :role "assistant"
+                             :time (list :created 1000)))))
+          (opencode-sse--run-hooks
+           (list :type "message.part.delta"
+                 :properties
+                 (list :sessionID "ses_text_tool"
+                       :messageID "msg_text_tool"
+                       :partID "prt_before"
+                       :field "text"
+                       :delta "before tool")))
+          (opencode-sse--run-hooks
+           (list :type "message.part.updated"
+                 :properties
+                 (list :sessionID "ses_text_tool"
+                       :part
+                       (list :id "prt_tool"
+                             :sessionID "ses_text_tool"
+                             :messageID "msg_text_tool"
+                             :type "tool"
+                             :tool "bash"
+                             :state
+                             (list :status "completed"
+                                   :input (list :command "printf tool")
+                                   :output "tool output")))))
+          (opencode-sse--run-hooks
+           (list :type "message.part.delta"
+                 :properties
+                 (list :sessionID "ses_text_tool"
+                       :messageID "msg_text_tool"
+                       :partID "prt_after"
+                       :field "text"
+                       :delta "after tool")))
+          (with-current-buffer buf
+            (let ((text (buffer-string)))
+              (should (string-match-p "before tool" text))
+              (should (string-match-p "printf tool" text))
+              (should (string-match-p "after tool" text)))))
       (setq opencode--chat-registry saved-registry)
       (when (buffer-live-p buf) (kill-buffer buf)))))
 

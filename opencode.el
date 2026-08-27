@@ -1,4 +1,4 @@
-;;; opencode.el --- Emacs 30 frontend for OpenCode AI agent -*- lexical-binding: t; -*-
+;;; opencode.el --- Emacs 30 frontend for OpenCode and Pi AI agents -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025 opencode.el contributors
 ;; Author: opencode.el contributors
@@ -10,18 +10,21 @@
 
 ;;; Commentary:
 
-;; Emacs 30 frontend for the OpenCode AI coding agent.
-;; Talks to the OpenCode HTTP REST API and SSE event stream.
+;; Emacs 30 frontend for OpenCode and Pi AI coding agents.
+;; OpenCode sessions use HTTP REST plus /global/event SSE.
+;; Pi sessions use per-session `pi --mode rpc' JSONL subprocesses.
 ;;
 ;; Usage:
 ;;   M-x opencode-start    — Start the OpenCode server and connect
 ;;   M-x opencode-attach   — Attach to an existing server by port
 ;;   M-x opencode-chat     — Open a chat buffer for a session
+;;   M-x opencode-pi       — Open or resume a Pi JSONL session
 ;;   C-c o                 — Global command prefix (customizable)
 ;;
 ;; Features:
 ;;   - Spawns and manages the `opencode serve' subprocess
-;;   - Real-time streaming via Server-Sent Events (SSE)
+;;   - Supports Pi via per-session JSONL RPC subprocesses
+;;   - Real-time streaming via backend event transports
 ;;   - Session management with project grouping
 ;;   - Chat buffer with message rendering (text, tool calls, reasoning)
 ;;   - Floating frames and side window display modes
@@ -50,6 +53,11 @@
 (require 'opencode-domain)
 (require 'opencode-event)
 (require 'opencode-sse)
+(require 'opencode-lifecycle)
+(require 'opencode-pipeline)
+(require 'opencode-workflow)
+(require 'opencode-workflow-rpc)
+(require 'opencode-workflow-bridge)
 (require 'opencode-ui)
 (require 'opencode-window)
 (require 'opencode-session)
@@ -66,7 +74,7 @@
 ;;; --- Customization group ---
 
 (defgroup opencode nil
-  "Emacs frontend for the OpenCode AI coding agent."
+  "Emacs frontend for OpenCode and Pi AI coding agents."
   :group 'tools
   :prefix "opencode-"
   :link '(url-link :tag "Homepage" "https://github.com/user/opencode.el"))
@@ -130,7 +138,7 @@ When nil, uses `default-directory' of the current buffer."
 
 ;;;###autoload
 (define-minor-mode opencode-mode
-  "Global minor mode for the OpenCode AI coding agent.
+  "Global minor mode for OpenCode and Pi AI coding agents.
 When enabled, provides the `C-c o' prefix keymap and modeline indicator.
 
 \\{opencode-mode-map}"
@@ -159,6 +167,8 @@ When enabled, provides the `C-c o' prefix keymap and modeline indicator.
   (opencode-api-cache-ensure-loaded)
   ;; Pre-warm commands cache so slash completion is instant
   (opencode-config-prewarm)
+  ;; Publish the emacsclient bridge used by dynamic workflow tools
+  (opencode-workflow-bridge-start)
   ;; Always connect SSE when server connects
   (opencode-sse-connect))
 
@@ -276,33 +286,56 @@ Uses `url-generic-parse-url' for robust parsing."
         (user-error "Cannot parse host from: %s" input))
       (cons host port)))))
 
-;;;###autoload
-(defun opencode-chat (&optional session-id backend)
-  "Open a chat buffer for SESSION-ID.
-If SESSION-ID is nil, prompts for a session.
-The completion list includes a \"\u2605 New session\" option at the top.
-Auto-connects to the server if `opencode-server-port' is set.
-The picker is scoped to the current buffer's project (via
-`project-current'), so switching projects shows the right sessions.
-BACKEND defaults to `opencode-backend-current'."
-  (interactive)
-  (opencode--ensure-ready)
-  ;; Use current buffer's project so the picker is scoped correctly
-  ;; even when opencode-default-directory points to a different project.
-  (let* ((current-dir (or (when-let ((proj (project-current)))
+(defun opencode--open-chat-picker (&optional session-id backend directory)
+  "Select and open a chat for SESSION-ID using BACKEND in DIRECTORY.
+The caller must ensure the backend is ready.  When DIRECTORY is non-nil,
+it takes precedence over the current buffer's project and defaults."
+  (let* ((current-dir (or directory
+                          (when-let ((proj (project-current)))
                             (project-root proj))
                           opencode-default-directory
                           default-directory))
+         (current-dir (directory-file-name
+                       (expand-file-name current-dir)))
          (opencode-default-directory current-dir)
+         ;; Explicit picker scope must override a stale buffer-local backend
+         ;; directory when invoked from an existing chat in another project.
+         (opencode-backend-directory current-dir)
          (result (or (and session-id (cons session-id nil))
                      (opencode--read-session "Chat session: "))))
     (when result
       (if (eq result 'new)
-          (opencode-new-session nil backend)
-        (opencode-chat-open (car result) (or (cdr result)
-                                                current-dir)
+          (opencode--create-new-session nil backend current-dir)
+        (opencode-chat-open (car result) (if directory
+                                             current-dir
+                                           (or (cdr result) current-dir))
+                            nil
+                            (or backend opencode-backend-current))))))
+
+;;;###autoload
+(defun opencode-chat (&optional session-id backend directory)
+  "Open a chat buffer for SESSION-ID using BACKEND in DIRECTORY.
+If SESSION-ID is nil, prompts for a session.
+The completion list includes a \"\u2605 New session\" option at the top.
+Auto-connects to the server if `opencode-server-port' is set.
+When DIRECTORY is nil, the picker is scoped to the current buffer's
+project via `project-current', so switching projects shows the right
+sessions.  BACKEND defaults to `opencode-backend-current'."
+  (interactive)
+  (opencode--ensure-ready)
+  (opencode--open-chat-picker session-id backend directory))
+
+(defun opencode--create-new-session (&optional title backend directory)
+  "Create and open a session with optional TITLE using BACKEND in DIRECTORY.
+The caller must ensure the backend is ready."
+  (let* ((backend (or backend opencode-backend-current))
+         (title (if (and title (not (string-empty-p title))) title nil))
+         (session (opencode-session-create title nil backend)))
+    (when session
+      (opencode-chat-open (plist-get session :id)
+                          (or directory (plist-get session :directory))
                            nil
-                           (or backend opencode-backend-current))))))
+                           backend))))
 
 ;;;###autoload
 (defun opencode-new-session (&optional title backend)
@@ -310,14 +343,7 @@ BACKEND defaults to `opencode-backend-current'."
 BACKEND defaults to `opencode-backend-current'."
   (interactive "sSession title (empty for untitled): ")
   (opencode--ensure-ready)
-  (let* ((backend (or backend opencode-backend-current))
-         (title (if (and title (not (string-empty-p title))) title nil))
-         (session (opencode-session-create title nil backend)))
-    (when session
-      (opencode-chat-open (plist-get session :id)
-                          (plist-get session :directory)
-                          nil
-                          backend))))
+  (opencode--create-new-session title backend))
 
 ;;;###autoload
 (defun opencode-abort ()
@@ -346,9 +372,9 @@ BACKEND defaults to `opencode-backend-current'."
 
 ;;;###autoload
 (defun opencode-refresh ()
-  "Refresh all cached data from the server.
-Invalidates agent, config, and command caches, re-fetches everything,
-and schedules a refresh for all open chat and sidebar buffers.
+  "Refresh all cached OpenCode data from the server.
+Invalidates OpenCode agent, config, and command caches, re-fetches
+everything, and schedules a refresh for all open chat and sidebar buffers.
 Same behavior as `server.instance.disposed'."
   (interactive)
   (opencode--do-rebootstrap)
@@ -479,17 +505,6 @@ Wraps each call in `condition-case' to handle errors."
           (funcall handler event)
         (error (opencode--debug "dispatch: handler error in %s: %S" (buffer-name) err))))))
 
-(defun opencode--dispatch-to-sidebar-buffer (project-dir handler event)
-  "Call HANDLER with EVENT in the sidebar buffer registered for PROJECT-DIR.
-Does nothing if buffer not found or not live. Wraps handler in `condition-case'
- to handle errors during SSE storms."
-  (let ((buf (opencode--sidebar-buffer-for-project project-dir)))
-    (when buf
-      (with-current-buffer buf
-        (condition-case err
-            (funcall handler event)
-          (error (opencode--debug "dispatch: handler error in %s: %S" (buffer-name) err)))))))
-
 (defun opencode--dispatch-to-all-sidebar-buffers (handler event)
   "Call HANDLER with EVENT in every live sidebar buffer.
 Wraps each call in `condition-case' to handle errors."
@@ -518,6 +533,12 @@ Wraps each call in `condition-case' to handle errors."
 (opencode-event-route "message.part.updated"
                       'opencode-sse-message-part-updated-hook
                       #'opencode-chat--on-part-updated 'chat)
+;; Newer OpenCode servers split streaming chunks out of part updates.  This
+;; must be an explicit canonical route even though both native event types
+;; intentionally share the public SSE hook above.
+(opencode-event-route "message.part.delta"
+                      'opencode-sse-message-part-updated-hook
+                      #'opencode-chat--on-part-updated 'chat)
 (opencode-event-route "session.updated"
                       'opencode-sse-session-updated-hook
                       #'opencode-chat--on-session-updated 'chat)
@@ -542,9 +563,18 @@ Wraps each call in `condition-case' to handle errors."
 (opencode-event-route "server.instance.disposed"
                       'opencode-sse-server-instance-disposed-hook
                       #'opencode-chat--on-server-instance-disposed 'chat)
+(opencode-event-route "server.instance.disposed.global"
+                      'opencode-sse-server-instance-disposed-hook
+                      #'opencode--on-instance-disposed 'global)
+(opencode-event-route "global.disposed.global"
+                      'opencode-sse-global-disposed-hook
+                      #'opencode--on-global-disposed 'global)
 (opencode-event-route "installation.update-available"
                       'opencode-sse-installation-update-available-hook
                       #'opencode-chat--on-installation-update-available 'chat)
+(opencode-event-route "tui.toast.show.global"
+                      'opencode-sse-tui-toast-show-hook
+                      #'opencode--on-tui-toast 'global)
 (opencode-event-route "todo.updated"
                       'opencode-sse-todo-updated-hook
                       #'opencode-chat--on-todo-updated 'chat)
@@ -652,11 +682,10 @@ sequences coalesce into a single re-bootstrap."
               (msg (plist-get props :message)))
     (message "OpenCode: %s" msg)))
 
-(add-hook 'opencode-sse-server-instance-disposed-hook-global #'opencode--on-instance-disposed)
-(add-hook 'opencode-sse-global-disposed-hook-global #'opencode--on-global-disposed)
-
-;; Toast: show server-side toast messages in the minibuffer
-(add-hook 'opencode-sse-tui-toast-show-hook-global #'opencode--on-tui-toast)
+;; Rebootstrap/toast internal routing is declared above via
+;; `opencode-event-route', keeping canonical backend events as the sole
+;; internal dispatch seam.  Public native SSE hooks still run in
+;; `opencode-sse--run-hooks'.
 
 ;;; --- Cleanup ---
 

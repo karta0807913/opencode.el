@@ -28,6 +28,16 @@ reducing boilerplate for simple UI elements."
     (should (eq (plist-get section :type) 'separator))
     (should (null (plist-get section :id)))))
 
+(ert-deftest opencode-ui--growing-empty-section-can-collapse ()
+  "A bodyless section marked GROWS can record a collapsed choice."
+  (opencode-test-with-temp-buffer "*test-ui-growing-empty*"
+    (let ((ov (opencode-ui--with-section
+                  (opencode-ui--make-section 'test "t1" nil nil nil t)
+                (opencode-ui--insert-icon 'expanded)
+                (insert " Header\n"))))
+      (should (opencode-ui--collapse-section ov))
+      (should (overlay-get ov 'opencode-collapsed)))))
+
 ;;; --- Section insertion ---
 
 (ert-deftest opencode-ui--with-section-sets-properties ()
@@ -55,6 +65,18 @@ section boundaries independent of text modifications."
       (should (= (overlay-start result) 1))
       (should (= (overlay-end result) (point)))
       (should (overlay-get result 'opencode-section)))))
+
+(ert-deftest opencode-ui--with-section-honors-front-advance ()
+  "A front-advancing section excludes text inserted at its beginning."
+  (opencode-test-with-temp-buffer "*test-ui-front-advance*"
+    (let ((ov (opencode-ui--with-section
+                  (opencode-ui--make-section 'test "t1" nil nil t)
+                (insert "section"))))
+      (goto-char (overlay-start ov))
+      (insert "before")
+      (should (equal "section"
+                     (buffer-substring-no-properties
+                      (overlay-start ov) (overlay-end ov)))))))
 
 ;;; --- Section queries ---
 

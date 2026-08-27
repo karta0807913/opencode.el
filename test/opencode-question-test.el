@@ -10,6 +10,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'opencode-backend-opencode)
 (require 'opencode-question)
 (require 'opencode-chat)
 (require 'test-helper)
@@ -314,6 +315,36 @@ rejects a request without using the built-in popup state."
     (let ((req (opencode-test-last-request)))
       (should (equal (nth 1 req) "/question/question_selected/reject"))
       (should (equal (plist-get (nth 3 req) :message) "no")))))
+
+(ert-deftest opencode-question-popup-reply-uses-chat-backend ()
+  "Built-in popup replies use the backend stored in the chat buffer."
+  (opencode-test-with-temp-buffer "*opencode: question-backend*"
+    (opencode-chat-mode)
+    (opencode-chat--set-backend 'pi)
+    (setq opencode-question--current
+          '(:id "question_pi" :sessionID "ses_pi"))
+    (let ((captured nil))
+      (cl-letf (((symbol-function 'opencode-backend-reply-question)
+                 (lambda (id answers &optional backend)
+                   (setq captured (list id answers backend)))))
+        (opencode-question--reply :answers '(("A")))
+        (should
+         (equal captured '("question_pi" [["A"]] pi)))))))
+
+(ert-deftest opencode-question-popup-reject-uses-chat-backend ()
+  "Built-in popup rejects use the backend stored in the chat buffer."
+  (opencode-test-with-temp-buffer "*opencode: question-reject-backend*"
+    (opencode-chat-mode)
+    (opencode-chat--set-backend 'pi)
+    (setq opencode-question--current
+          '(:id "question_pi_reject" :sessionID "ses_pi"))
+    (let ((captured nil))
+      (cl-letf (((symbol-function 'opencode-backend-reject-question)
+                 (lambda (id message &optional backend)
+                   (setq captured (list id message backend))))
+                ((symbol-function 'opencode-question--cleanup) #'ignore))
+        (opencode-question--reject)
+        (should (equal captured '("question_pi_reject" nil pi)))))))
 
 
 ;;; --- Test: Reject ---

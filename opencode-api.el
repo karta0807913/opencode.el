@@ -20,16 +20,15 @@
 (require 'json)
 (require 'opencode-log)
 (require 'opencode-util)
+(require 'opencode-server)
 (require 'opencode-api-cache)
+(require 'opencode-prompt)
+
+(declare-function opencode-backend-opencode-intent-body
+                  "opencode-backend-opencode-prompt" (intent))
 
 ;; the var from url-http.el
 (defvar url-http-end-of-headers)
-
-(declare-function opencode-server-url "opencode-server" (&optional path))
-(declare-function opencode-server--url "opencode-server" (&optional path))
-(declare-function opencode-server-connected-p "opencode-server" ())
-(declare-function opencode-server--connected-p "opencode-server" ())
-(declare-function opencode-server-auth-headers "opencode-server" ())
 
 (defvar opencode-default-directory)
 (defgroup opencode-api nil
@@ -146,6 +145,8 @@ strings (e.g. file paths containing Unicode) freely."
                          (cell "Accept" "application/json"))))
       ;; Add directory header - ensure we use absolute path
       (when-let* ((dir (or opencode-api-directory
+                           (and (boundp 'opencode-backend-directory)
+                                opencode-backend-directory)
                            (and (boundp 'opencode-default-directory)
                                 opencode-default-directory)
                            default-directory))
@@ -195,9 +196,12 @@ plist instead of signaling."
       (goto-char url-http-end-of-headers)
       (let ((body-str (string-trim
                        (buffer-substring-no-properties (point) (point-max)))))
-        (condition-case nil
+        (condition-case err
             (setq body (opencode-api--json-parse body-str))
           (error
+           (opencode--debug
+            "opencode-api: response body is not JSON: %s"
+            (error-message-string err))
            ;; If JSON parse fails, keep raw string if non-empty
            (unless (string-empty-p body-str)
              (setq body body-str)))))
@@ -368,11 +372,6 @@ Returns the response body (parsed JSON)."
 Delegates to `opencode-api-cache-prewarm'."
   (opencode-api-cache-prewarm))
 
-(defun opencode-api--valid-agent-p (agent-name)
-  "Return non-nil if AGENT-NAME is a valid agent known to the server.
-Delegates to `opencode-api-cache-valid-agent-p'."
-  (opencode-api-cache-valid-agent-p agent-name))
-
 (defun opencode-api--prompt-body (text &optional agent model-id provider-id
                                        variant mentions images message-id context)
   "Build the POST body for /session/:id/prompt_async.
@@ -388,64 +387,15 @@ and :filename.  When non-nil, file parts with data: URLs are appended
 after text and mention parts.
 MESSAGE-ID is the optional parent message ID.
 CONTEXT is an optional plist with :filename and :selection.
-Returns a plist with :parts, :agent, :model, :variant, :messageID, :context."
-  (let* ((text-part (list :type "text" :text text :id (opencode-util--generate-id "prt")))
-         (mention-parts
-          (when mentions
-            (mapcar
-             (lambda (m)
-               (let ((mtype (plist-get m :type))
-                     (mname (plist-get m :name))
-                     (mpath (plist-get m :path))
-                     (mstart (plist-get m :start))
-                     (mend (plist-get m :end)))
-                 (pcase mtype
-                   ('file
-                    (list :type "file"
-                          :id (opencode-util--generate-id "prt")
-                          :mime "text/plain"
-                          :url (concat "file://" mpath)
-                          :filename mname
-                          :source (list :type "file"
-                                        :text (list :value (substring text mstart mend)
-                                                    :start mstart :end mend)
-                                        :path mpath)))
-                   ('agent
-                    (list :type "agent"
-                          :id (opencode-util--generate-id "prt")
-                          :name mname
-                          :source (list :value (substring text mstart mend)
-                                        :start mstart :end mend))))))
-             mentions)))
-         (image-parts (when images
-                        (mapcar
-                         (lambda (img)
-                           (list :type "file"
-                                 :id (opencode-util--generate-id "prt")
-                                 :mime (plist-get img :mime)
-                                 :url (plist-get img :data-url)
-                                 :filename (plist-get img :filename)))
-                         images)))
-         (all-parts (apply #'vector (cons text-part (append (or mention-parts nil) (or image-parts nil)))))
-         (body (list :parts all-parts)))
-    ;; Agent: caller must provide (via opencode-chat--effective-agent)
-    (when agent
-      (setq body (plist-put body :agent agent)))
-    ;; Model: caller must provide (via opencode-chat--effective-model)
-    (when (and model-id provider-id)
-      (setq body (plist-put body :model
-                             (list :modelID model-id
-                                   :providerID provider-id))))
-    ;; Include variant only if non-nil
-    (when variant
-      (setq body (plist-put body :variant variant)))
-    ;; Include messageID (parent) only if non-nil
-    (when message-id
-      (setq body (plist-put body :messageID message-id)))
-    ;; Include context only if non-nil
-    (when context
-      (setq body (plist-put body :context context)))
-    body))
+Returns a plist with :parts, :agent, :model, :variant, :messageID, :context.
+Compatibility wrapper; new callers should pass
+`opencode-prompt-intent' to `opencode-backend-send-prompt'."
+  (require 'opencode-backend-opencode-prompt)
+  (opencode-backend-opencode-intent-body
+   (opencode-prompt-intent-create
+    :text text :agent agent :model-id model-id :provider-id provider-id
+    :variant variant :mentions mentions :images images
+    :message-id message-id :context context)))
 
 (provide 'opencode-api)
 ;;; opencode-api.el ends here

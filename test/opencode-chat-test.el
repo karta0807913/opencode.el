@@ -8,6 +8,7 @@
 ;;; Code:
 
 (require 'test-helper nil t)
+(require 'opencode-backend-opencode)
 (require 'opencode-chat)
 (require 'opencode-chat-message)
 (require 'opencode-popup)
@@ -17,6 +18,78 @@
 (require 'seq)
 (require 'opencode-api)
 (require 'opencode-agent)
+
+;;; --- Source boundary assertions ---
+
+(defun opencode-chat-test--file-string (file)
+  "Return FILE contents as a string."
+  (with-temp-buffer
+    (insert-file-contents (expand-file-name file
+                                            (file-name-directory
+                                             (locate-library "opencode-chat"))))
+    (buffer-string)))
+
+(ert-deftest opencode-chat-boundary-input-does-not-own-busy-queued ()
+  "Input module must not mutate chat-owned busy/queued/pending lifecycle."
+  (let ((src (opencode-chat-test--file-string "opencode-chat-input.el")))
+    (should-not (string-match-p
+                 "opencode-chat--\\(?:set-busy\\|set-queued\\|add-pending\\|remove-pending\\|clear-pending\\)"
+                 src))))
+
+(ert-deftest opencode-chat-boundary-message-does-not-schedule-refresh ()
+  "Message module reports :needs-refresh instead of calling chat upward."
+  (let ((src (opencode-chat-test--file-string "opencode-chat-message.el")))
+    (should-not (string-match-p "declare-function opencode-chat--schedule-refresh" src))
+    (should-not (string-match-p "(opencode-chat--schedule-refresh" src))
+    (should (string-match-p ":needs-refresh" src))))
+
+(ert-deftest opencode-chat-boundary-controller-handles-needs-refresh ()
+  "Chat controller interprets message :needs-refresh statuses."
+  (let ((src (opencode-chat-test--file-string "opencode-chat.el")))
+    (should (string-match-p "opencode-chat--handle-message-status" src))
+    (should (string-match-p ":needs-refresh (opencode-chat--schedule-refresh)" src))))
+
+(ert-deftest opencode-chat-boundary-requires-backend-core-not-facade ()
+  "Generic chat must not require OpenCode transport or adapter modules."
+  (let ((src (opencode-chat-test--file-string "opencode-chat.el")))
+    (should (string-match-p "(require 'opencode-backend-core)" src))
+    (should-not (string-match-p "(require 'opencode-backend)" src))
+    (should-not
+     (string-match-p
+      "(require 'opencode-\\(?:api\\|api-cache\\|sse\\))"
+      src))))
+
+(ert-deftest opencode-chat-semantic-reset-apis-free-owned-state ()
+  "Semantic reset APIs free owned markers and overlays."
+  (opencode-test-with-temp-buffer "*test-semantic-reset*"
+    (opencode-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "messages")
+      (opencode-chat-message-init-messages-end (point))
+      (let ((messages-end (opencode-chat-message-messages-end)))
+        (should (marker-position messages-end))
+        (opencode-chat-message-reset)
+        (should-not (opencode-chat-message-messages-end))
+        (should-not (buffer-live-p (marker-buffer messages-end)))))
+    (let ((inhibit-read-only t))
+      (insert "part")
+      (opencode-chat--store-set-part
+       "msg" "part" "text"
+       (opencode-chat--part-range-overlay (point-min) (point) "part"))
+      (let ((range (opencode-chat--store-part-overlay "msg" "part")))
+        (opencode-chat-message-reset)
+        (should-not (overlay-buffer range))))
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (insert "> ")
+      (let ((input-marker (point-marker))
+            (ov (make-overlay (point-min) (point-min))))
+        (opencode-chat--set-input-start input-marker)
+        (opencode-chat--set-inline-todos-ov ov)
+        (opencode-chat-input-reset)
+        (should-not (opencode-chat--input-start))
+        (should-not (buffer-live-p (marker-buffer input-marker)))
+        (should-not (overlay-buffer ov))))))
 
 ;;; --- Test data ---
 
@@ -178,15 +251,14 @@ OVERRIDES is a plist merged on top of defaults."
   (should (commandp (keymap-lookup opencode-chat-mode-map "C-c C-a")))
   (should (commandp (keymap-lookup opencode-chat-mode-map "M-p")))
   (should (commandp (keymap-lookup opencode-chat-mode-map "M-n")))
-  ;; Single-letter keys (g, G, q) should NOT be in mode-map
-  ;; (they live in opencode-chat-message-map via text property)
+  ;; Single-letter keys should NOT be in mode-map.
   (should-not (keymap-lookup opencode-chat-mode-map "g"))
   (should-not (keymap-lookup opencode-chat-mode-map "G")))
 
 (ert-deftest opencode-chat-message-map-bindings ()
   "Message area keymap has navigation bindings."
   (should (keymapp opencode-chat-message-map))
-  (should (commandp (keymap-lookup opencode-chat-message-map "g")))
+  (should-not (keymap-lookup opencode-chat-message-map "g"))
   (should (commandp (keymap-lookup opencode-chat-message-map "G")))
   (should (commandp (keymap-lookup opencode-chat-message-map "q")))
   (should (commandp (keymap-lookup opencode-chat-message-map "TAB"))))
@@ -1018,6 +1090,40 @@ Guards against the capability check over-blocking the default backend."
         (opencode-chat--fetch-inline-todos)
         (should called)))))
 
+(ert-deftest opencode-chat-abort-uses-buffer-backend ()
+  "Abort targets the backend stored in the current chat buffer."
+  (opencode-test-with-temp-buffer "*test-chat-abort-backend*"
+    (opencode-chat-mode)
+    (opencode-chat--set-session-id "ses_pi_abort")
+    (opencode-chat--set-backend 'pi)
+    (let ((captured nil))
+      (cl-letf (((symbol-function 'opencode-session-abort)
+                 (lambda (session-id &optional backend)
+                   (setq captured (list session-id backend)))))
+        (opencode-chat-abort)
+        (should (equal captured '("ses_pi_abort" pi)))))))
+
+(ert-deftest opencode-command-rename-uses-buffer-backend ()
+  "The local rename command targets the current chat backend."
+  (opencode-test-with-temp-buffer "*test-command-rename-backend*"
+    (opencode-chat-mode)
+    (opencode-chat--set-session-id "ses_pi_rename")
+    (opencode-chat--set-backend 'pi)
+    (let* ((command
+            (seq-find
+             (lambda (item)
+               (equal (plist-get item :name) "rename"))
+             opencode-command--local-commands))
+           (captured nil))
+      (cl-letf (((symbol-function 'read-string)
+                 (lambda (&rest _) "New title"))
+                ((symbol-function 'opencode-session-rename)
+                 (lambda (session-id title &optional backend)
+                   (setq captured (list session-id title backend)))))
+        (funcall (plist-get command :callback))
+        (should
+         (equal captured '("ses_pi_rename" "New title" pi)))))))
+
 ;;; --- /btw side conversation (OpenCode) ---
 
 (ert-deftest opencode-chat-btw-forks-and-opens-child-frame ()
@@ -1031,8 +1137,8 @@ displayed as a subframe, not in the main window."
     (let ((forked-from nil)
           (opened nil))
       (cl-letf (((symbol-function 'opencode-session-fork)
-                 (lambda (sid &optional _mid)
-                   (setq forked-from sid)
+                 (lambda (sid &optional _mid backend)
+                   (setq forked-from (list sid backend))
                    (list :id "ses_fork" :directory "/proj")))
                 ((symbol-function 'opencode-chat-open)
                  (lambda (sid dir action backend)
@@ -1040,7 +1146,7 @@ displayed as a subframe, not in the main window."
                 ((symbol-function 'opencode-chat--find-buffer)
                  (lambda (&rest _) nil)))
         (opencode-chat--btw "")
-        (should (equal "ses_main" forked-from))
+        (should (equal '("ses_main" opencode) forked-from))
         (should (equal "ses_fork" (nth 0 opened)))
         (should (eq 'child-frame (nth 2 opened)))
         (should (eq 'opencode (nth 3 opened)))))))
@@ -1162,7 +1268,7 @@ This is the /btw aside path."
 ;;; --- Part tracking ---
 
 (ert-deftest opencode-chat-part-tracking ()
-  "Parts are tracked in the store after rendering."
+  "Every rendered part is tracked by a range overlay in the store."
   (opencode-test-with-temp-buffer "*test-chat-part-tracking*"
     (opencode-chat-mode)
     (opencode-chat--set-current-message-id "msg1")
@@ -1170,12 +1276,173 @@ This is the /btw aside path."
           (part (list :id "tracked_part" :type "text" :text "tracked")))
       (opencode-chat--render-part part 'user)
       (should (opencode-chat-message-has-parts-p "msg1"))
-      (should (markerp (opencode-chat--store-part-marker "msg1" "tracked_part"))))))
+      (let ((range (opencode-chat--store-part-overlay
+                    "msg1" "tracked_part")))
+        (should (overlayp range))
+        (should (equal "tracked\n"
+                       (buffer-substring-no-properties
+                        (overlay-start range) (overlay-end range))))))))
 
 ;;; --- SSE event handlers (global) ---
 
 
 ;;; --- Commands existence ---
+
+(ert-deftest opencode-chat-message-navigation-uses-outer-messages ()
+  "Message motions ignore nested sections and use current/next semantics."
+  (opencode-test-with-temp-buffer "*test-chat-message-navigation*"
+    (insert "before\n")
+    (let ((first (opencode-ui--with-section
+                     (opencode-ui--make-section 'message "msg_1")
+                   (insert "first header\n")
+                   (opencode-ui--with-section
+                       (opencode-ui--make-section 'tool-call "tool_1")
+                     (insert "tool body\n"))))
+          (second (opencode-ui--with-section
+                      (opencode-ui--make-section 'message "msg_2")
+                    (insert "second message\n")))
+          (third (opencode-ui--with-section
+                     (opencode-ui--make-section 'message "msg_3")
+                   (insert "third message\n")))
+          (fourth (opencode-ui--with-section
+                      (opencode-ui--make-section 'message "msg_4")
+                    (insert "fourth message\n"))))
+      (goto-char (1- (overlay-end first)))
+      (opencode-chat--prev-message)
+      (should (= (point) (overlay-start first)))
+      (goto-char (1+ (overlay-start first)))
+      (opencode-chat--next-message)
+      (should (= (point) (overlay-start second)))
+      (opencode-chat--next-message 2)
+      (should (= (point) (overlay-start fourth)))
+      (opencode-chat--prev-message 3)
+      (should (= (point) (overlay-start first)))
+      (should (< (overlay-start second) (overlay-start third))))))
+
+(defun opencode-chat-test--insert-heading (text face)
+  "Insert TEXT as a heading line fontified the way `opencode-markdown' leaves it.
+The `#' markers carry the marker face, so FACE starts partway into the
+line rather than at its beginning."
+  (let ((marker-start (point)))
+    (insert "# ")
+    (put-text-property marker-start (point) 'face 'opencode-md-marker)
+    (let ((body-start (point)))
+      (insert text "\n")
+      (put-text-property body-start (1- (point)) 'face face))))
+
+(ert-deftest opencode-chat-defun-navigation-visits-every-section-kind ()
+  "Messages, headings, tool calls and reasoning all begin a section."
+  (opencode-test-with-temp-buffer "*test-chat-defun-navigation*"
+    (opencode-chat-mode)
+    (let (first-start heading-start tool-start reasoning-start second-start)
+      (setq first-start
+            (overlay-start
+             (opencode-ui--with-section
+                 (opencode-ui--make-section 'message "msg_1")
+               (insert "First message\n")
+               (setq heading-start (point))
+               (opencode-chat-test--insert-heading "Heading A"
+                                                   'opencode-md-header-1)
+               (insert "body\n")
+               (setq tool-start (point))
+               (opencode-ui--with-section
+                   (opencode-ui--make-section 'tool-call "tool_1")
+                 (insert " read · 0s\noutput\n"))
+               (setq reasoning-start (point))
+               (opencode-ui--with-section
+                   (opencode-ui--make-section 'reasoning "reason_1")
+                 (insert " Thinking\nthought\n")))))
+      (setq second-start
+            (overlay-start
+             (opencode-ui--with-section
+                 (opencode-ui--make-section 'message "msg_2")
+               (insert "Second message\n"))))
+      ;; Forward through every boundary.
+      (goto-char first-start)
+      (should (beginning-of-defun -1))
+      (should (= (point) heading-start))
+      (should (beginning-of-defun -1))
+      (should (= (point) tool-start))
+      (should (beginning-of-defun -1))
+      (should (= (point) reasoning-start))
+      (should (beginning-of-defun -1))
+      (should (= (point) second-start))
+      ;; And backward again, in the same order.
+      (should (beginning-of-defun 1))
+      (should (= (point) reasoning-start))
+      (should (beginning-of-defun 2))
+      (should (= (point) heading-start))
+      (should (beginning-of-defun 1))
+      (should (= (point) first-start)))))
+
+(ert-deftest opencode-chat-defun-navigation-goes-to-enclosing-section-first ()
+  "Point inside a section moves to that section's beginning before leaving it."
+  (opencode-test-with-temp-buffer "*test-chat-defun-enclosing*"
+    (opencode-chat-mode)
+    (let ((first (opencode-ui--with-section
+                     (opencode-ui--make-section 'message "msg_1")
+                   (insert "First message\nbody\n")))
+          (second (opencode-ui--with-section
+                      (opencode-ui--make-section 'message "msg_2")
+                    (insert "Second message\n"))))
+      (goto-char (1- (overlay-end second)))
+      (should (beginning-of-defun 1))
+      (should (= (point) (overlay-start second)))
+      (should (beginning-of-defun 1))
+      (should (= (point) (overlay-start first))))))
+
+(ert-deftest opencode-chat-defun-end-stops-at-the-next-section ()
+  "A heading ends where the next section starts, not at its message's end."
+  (opencode-test-with-temp-buffer "*test-chat-defun-end*"
+    (opencode-chat-mode)
+    (let (heading-start tool-start message-end)
+      (setq message-end
+            (overlay-end
+             (opencode-ui--with-section
+                 (opencode-ui--make-section 'message "msg_1")
+               (insert "First message\n")
+               (setq heading-start (point))
+               (opencode-chat-test--insert-heading "Heading A"
+                                                   'opencode-md-header-1)
+               (insert "body\n")
+               (setq tool-start (point))
+               (opencode-ui--with-section
+                   (opencode-ui--make-section 'tool-call "tool_1")
+                 (insert " read · 0s\noutput\n")))))
+      ;; The heading has no overlay: it ends where the tool call begins.
+      (goto-char heading-start)
+      (end-of-defun)
+      (should (= (point) tool-start))
+      ;; The message does have one, and nothing starts before its end.
+      (goto-char tool-start)
+      (end-of-defun)
+      (should (= (point) message-end)))))
+
+(ert-deftest opencode-chat-defun-navigation-ignores-unfontified-heading ()
+  "A heading `jit-lock' has not reached yet is not a boundary.
+Markdown headings are recognized by the face `opencode-markdown' leaves
+behind, so transcript that has never been displayed has no heading to
+find.  The motion falls back to the enclosing section instead."
+  (opencode-test-with-temp-buffer "*test-chat-defun-unfontified*"
+    (opencode-chat-mode)
+    (let ((first (opencode-ui--with-section
+                     (opencode-ui--make-section 'message "msg_1")
+                   (insert "First message\n# Not fontified yet\nbody\n")))
+          (second (opencode-ui--with-section
+                      (opencode-ui--make-section 'message "msg_2")
+                    (insert "Second message\n"))))
+      (goto-char (overlay-start first))
+      (should (beginning-of-defun -1))
+      (should (= (point) (overlay-start second))))))
+
+(ert-deftest opencode-chat-mode-installs-defun-navigation ()
+  "Chat mode exposes section navigation through the Emacs defun API."
+  (opencode-test-with-temp-buffer "*test-chat-defun-functions*"
+    (opencode-chat-mode)
+    (should (eq beginning-of-defun-function
+                #'opencode-chat--beginning-of-defun))
+    (should (eq end-of-defun-function
+                #'opencode-chat--end-of-defun))))
 
 (ert-deftest opencode-chat-commands-defined ()
   "All interactive chat commands are defined."
@@ -1199,6 +1466,23 @@ This is the /btw aside path."
 ;;; --- session.status handler ---
 
 ;;; --- message.updated handler ---
+
+(ert-deftest opencode-chat-message-updated-restores-variant ()
+  "Assistant message updates restore the effective variant."
+  (opencode-test-with-temp-buffer "*test-message-updated-variant*"
+    (opencode-chat-mode)
+    (opencode-chat--on-message-updated
+     '(:type "message.updated"
+       :properties
+       (:info (:id "msg_variant"
+               :sessionID "ses_variant"
+               :role "assistant"
+               :agent "build"
+               :modelID "gpt-5.6-sol"
+               :providerID "TraeSol"
+               :variant "high"
+               :time (:created 1 :completed 2)))))
+    (should (equal (opencode-chat--effective-variant) "high"))))
 
 
 
@@ -1273,24 +1557,21 @@ This handles the first arrival of a tool/step part during streaming."
                    (lambda (_p) (insert "BOOTSTRAPPED TOOL\n"))))
           (opencode-chat--update-part-inline part))
         (should (opencode-test-buffer-contains-p "BOOTSTRAPPED TOOL"))
-        (should (opencode-chat--store-part-marker msg-id part-id))
+        (should (overlayp (opencode-chat--store-part-overlay msg-id part-id)))
         (should (opencode-test-buffer-contains-p "=== input area ==="))))))
 
 (ert-deftest opencode-chat-update-part-inline-fallback-schedule-refresh ()
   "Case 3: When neither overlay nor messages-end exists, update-part-inline
-falls back to schedule-refresh.  This is the safety net for edge cases
+returns :needs-refresh.  This is the safety net for edge cases
 where the buffer has not been fully rendered yet."
   (opencode-test-with-temp-buffer "*test-inline-fallback*"
     (opencode-chat-mode)
     (opencode-chat--set-store (make-hash-table :test 'equal))
     (opencode-chat--set-messages-end nil)
-    (let ((refresh-called nil))
-      (cl-letf (((symbol-function 'opencode-chat--schedule-refresh)
-                 (lambda () (setq refresh-called t))))
-        (let ((part (list :id "prt_fallback" :type "tool" :tool "bash"
-                         :state (list :status "pending"))))
-          (opencode-chat--update-part-inline part)
-          (should refresh-called))))))
+    (let ((part (list :id "prt_fallback" :type "tool" :tool "bash"
+                      :state (list :status "pending"))))
+      (should (eq :needs-refresh
+                  (opencode-chat--update-part-inline part))))))
 
 (ert-deftest opencode-chat-update-part-inline-step-start-at-messages-end ()
   "step-start parts bootstrap at messages-end when no overlay exists.
@@ -1309,7 +1590,7 @@ Verifies the pcase dispatch handles step-start correctly."
                    (lambda (_p) (insert "STEP-START\n"))))
           (opencode-chat--update-part-inline part))
         (should (opencode-test-buffer-contains-p "STEP-START"))
-        (should (opencode-chat--store-part-marker msg-id part-id))))))
+        (should (overlayp (opencode-chat--store-part-overlay msg-id part-id)))))))
 
 (ert-deftest opencode-chat-update-part-inline-step-finish-at-messages-end ()
   "step-finish parts bootstrap at messages-end when no overlay exists.
@@ -1328,7 +1609,53 @@ Verifies the pcase dispatch handles step-finish correctly."
                    (lambda (_p) (insert "STEP-FINISH\n"))))
           (opencode-chat--update-part-inline part))
         (should (opencode-test-buffer-contains-p "STEP-FINISH"))
-        (should (opencode-chat--store-part-marker msg-id part-id))))))
+        (should (overlayp (opencode-chat--store-part-overlay msg-id part-id)))))))
+
+(ert-deftest opencode-chat-update-part-inline-does-not-scan-buffer ()
+  "Updating an existing part uses its stored range, never `overlays-in'."
+  (opencode-test-with-temp-buffer "*test-inline-no-overlay-scan*"
+    (opencode-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "messages")
+      (opencode-chat--set-messages-end (copy-marker (point) t))
+      (insert "\ninput")
+      (let ((part (list :id "prt_direct" :messageID "msg_direct"
+                        :type "step-start")))
+        (cl-letf (((symbol-function 'opencode-chat--render-step-start)
+                   (lambda (_part) (insert "FIRST\n"))))
+          (should (eq :upserted (opencode-chat--update-part-inline part))))
+        (cl-letf (((symbol-function 'overlays-in)
+                   (lambda (&rest _)
+                     (error "inline update must not scan all overlays")))
+                  ((symbol-function 'opencode-chat--render-step-start)
+                   (lambda (_part) (insert "SECOND\n"))))
+          (should (eq :upserted (opencode-chat--update-part-inline part))))
+        (should-not (opencode-test-buffer-contains-p "FIRST"))
+        (should (opencode-test-buffer-contains-p "SECOND"))))))
+
+(ert-deftest opencode-chat-update-part-inline-step-replaces-range ()
+  "A repeated step update replaces its stored range instead of duplicating it."
+  (opencode-test-with-temp-buffer "*test-inline-step-replace*"
+    (opencode-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "messages")
+      (opencode-chat--set-messages-end (copy-marker (point) t))
+      (insert "\ninput")
+      (let ((part (list :id "prt_repeat" :messageID "msg_repeat"
+                        :type "step-finish" :cost 1)))
+        (cl-letf (((symbol-function 'opencode-chat--render-step-finish)
+                   (lambda (_part) (insert "OLD STEP\n"))))
+          (opencode-chat--update-part-inline part))
+        (cl-letf (((symbol-function 'opencode-chat--render-step-finish)
+                   (lambda (_part) (insert "NEW STEP\n"))))
+          (opencode-chat--update-part-inline part))
+        (let ((range (opencode-chat--store-part-overlay
+                      "msg_repeat" "prt_repeat")))
+          (should (overlayp range))
+          (should (equal "NEW STEP\n"
+                         (buffer-substring-no-properties
+                          (overlay-start range) (overlay-end range)))))
+        (should-not (opencode-test-buffer-contains-p "OLD STEP"))))))
 
 (ert-deftest opencode-chat-update-part-inline-applies-read-only ()
   "update-part-inline applies read-only text property to newly rendered content.
@@ -1396,6 +1723,42 @@ Without this, users could accidentally edit rendered tool output."
 
 ;;; --- prompt_async send flow ---
 
+(ert-deftest opencode-chat-send-prompt-passes-intent ()
+  "Chat prompt sending constructs a backend-neutral prompt intent.
+It must not build an OpenCode HTTP body before crossing the backend
+boundary, so Pi and other backends can translate directly."
+  (opencode-test-with-temp-buffer "*test-chat-send-intent*"
+    (opencode-chat-mode)
+    (opencode-chat--set-session-id "ses_chat")
+    (opencode-chat--set-agent "build")
+    (opencode-chat--set-model-id "model-x")
+    (opencode-chat--set-provider-id "provider-y")
+    (opencode-chat--set-variant "v1")
+    (opencode-chat--set-backend 'pi)
+    (let (sent)
+      (cl-letf (((symbol-function 'opencode-api--prompt-body)
+                 (lambda (&rest _)
+                   (error "chat must not build OpenCode prompt bodies")))
+                ((symbol-function 'opencode-backend-send-prompt)
+                 (lambda (session-id intent callback &optional backend busy)
+                   (setq sent (list session-id intent backend busy))
+                   (when callback (funcall callback (list :status 204))))))
+        (opencode-chat--send-prompt
+         "hello" "ses_chat" "msg_chat"
+         (list (list :type 'agent :name "review" :start 0 :end 5))
+         nil))
+      (pcase-let ((`(,session-id ,intent ,backend ,busy) sent))
+        (should (equal session-id "ses_chat"))
+        (should (opencode-prompt-intent-p intent))
+        (should (equal (opencode-prompt-intent-text intent) "hello"))
+        (should (equal (opencode-prompt-intent-agent intent) "build"))
+        (should (equal (opencode-prompt-intent-model-id intent) "model-x"))
+        (should (equal (opencode-prompt-intent-provider-id intent) "provider-y"))
+        (should (equal (opencode-prompt-intent-variant intent) "v1"))
+        (should (equal (opencode-prompt-intent-message-id intent) "msg_chat"))
+        (should (eq backend 'pi))
+        (should-not busy)))))
+
 ;;; --- Header line: align-to display property ---
 
 (ert-deftest opencode-chat-prose-starts-at-column-zero ()
@@ -1423,12 +1786,12 @@ start of a line, and neither could markdown's own regexes."
 
 (ert-deftest opencode-chat-hard-reset-requires-chat-buffer ()
   "Verify `opencode-chat-hard-reset' refuses to run outside a chat buffer.
-It clears the store and streaming state, which would strand markers if
-run against an unrelated buffer."
+It clears the message store, which would strand markers if run against
+an unrelated buffer."
   (with-temp-buffer
     (should-error (opencode-chat-hard-reset) :type 'user-error)))
 
-(ert-deftest opencode-chat-hard-reset-drops-store-and-streaming-state ()
+(ert-deftest opencode-chat-hard-reset-drops-store ()
   "Verify `opencode-chat-hard-reset' clears cached render state before redrawing.
 An ordinary refresh reuses the store, so a section whose overlay the
 store has lost stays wrong across refreshes; the reset must start from
@@ -1440,15 +1803,11 @@ nothing but the server's messages."
              (list :msg (list :id "msg_r" :role "assistant")
                    :parts (make-hash-table :test 'equal))
              (opencode-chat--store))
-    (opencode-chat--set-streaming-msg-id "msg_r")
-    (opencode-chat--set-streaming-part-id "p_r")
     (should (> (hash-table-count (opencode-chat--store)) 0))
     ;; The server call fails in the test environment; the state teardown that
     ;; precedes it is what this covers.
     (ignore-errors (opencode-chat-hard-reset))
-    (should (= 0 (hash-table-count (opencode-chat--store))))
-    (should-not (opencode-chat--streaming-msg-id))
-    (should-not (opencode-chat--streaming-part-id))))
+    (should (= 0 (hash-table-count (opencode-chat--store))))))
 
 (ert-deftest opencode-chat-delete-section-leaves-input-alone ()
   "Verify deleting a section cannot reach into the input area.
@@ -1786,12 +2145,10 @@ body becomes invisible on first TAB, visible again on second, and a
 via streaming deltas, not just the header line.
 
 Why this matters — the reasoning section overlay is created when the
-part first arrives with empty text; the streaming marker sits at the
-overlay's end.  With `rear-advance=nil' on the overlay, streamed
-deltas (inserted at overlay-end) land OUTSIDE the overlay, so
-`--toggle-section' finds a tiny overlay covering just the header and
-has no body region to hide.  Pins the `rear-advance' fix in
-`make-section' / `with-section'."
+part first arrives with empty text; the part range ends at the
+overlay's end.  Streamed deltas must explicitly extend the section as
+well as the data range; otherwise `--toggle-section' finds a tiny
+overlay covering just the header and has no body region to hide."
   (opencode-test-with-temp-buffer "*test-reason-stream-collapse*"
     (opencode-chat-mode)
     (opencode-chat--set-messages-end (copy-marker (point) t))
@@ -1839,7 +2196,7 @@ first response word glues onto the last reasoning word (e.g.
 
 Why this matters — LLM deltas often end without a trailing newline;
 `message.part.updated' for a new part does not include a delta, so the
-part's marker is placed at `message-insert-pos' (which sits at the
+part's zero-width range is placed at `message-insert-pos' (which sits at the
 unfinished reasoning's tail).  The first delta for the new part then
 appends at that position, producing the concatenation bug."
   (opencode-test-with-temp-buffer "*test-stream-part-boundary*"
@@ -1873,11 +2230,510 @@ appends at that position, producing the concatenation bug."
     (should-not (opencode-test-buffer-contains-p
                  "without newline response"))))
 
-;;; --- session.idle clears streaming state ---
+(ert-deftest opencode-chat-part-ranges-isolate-late-deltas ()
+  "A late delta extends only its own part, before the following tool.
+Part ranges and part-level UI sections share a boundary.  Both must
+advance at the front so inserting at the previous part's end shifts the
+following part instead of absorbing the delta into it."
+  (opencode-test-with-temp-buffer "*test-part-range-boundary*"
+    (opencode-chat-mode)
+    (opencode-chat--set-messages-end (copy-marker (point) t))
+    (opencode-chat-message-upsert
+     "msg_ranges"
+     (list :role "assistant" :id "msg_ranges"
+           :time (list :created 1000)))
+    (opencode-chat-message-update-part
+     "msg_ranges" "prt_text" "text" nil "alpha")
+    (opencode-chat-message-update-part
+     "msg_ranges" "prt_tool" "tool"
+     (list :id "prt_tool" :messageID "msg_ranges" :type "tool" :tool "bash"
+           :state (list :status "running"
+                        :input (list :command "true")
+                        :output ""))
+     nil)
+    (let ((text-range (opencode-chat--store-part-overlay
+                       "msg_ranges" "prt_text"))
+          (tool-range (opencode-chat--store-part-overlay
+                       "msg_ranges" "prt_tool"))
+          (tool-section (opencode-chat--store-find-overlay "prt_tool")))
+      (should (overlayp text-range))
+      (should (overlayp tool-range))
+      (should (overlayp tool-section))
+      (opencode-chat-message-update-part
+       "msg_ranges" "prt_text" "text" nil " late")
+      (should (equal "alpha late"
+                     (buffer-substring-no-properties
+                      (overlay-start text-range) (overlay-end text-range))))
+      ;; `insert-section' owns the separator newline between parts; it is
+      ;; deliberately outside both data ranges.
+      (should (< (overlay-end text-range) (overlay-start tool-range)))
+      (should (= (overlay-start tool-range) (overlay-start tool-section)))
+      (should-not
+       (string-match-p
+        "late"
+        (buffer-substring-no-properties
+         (overlay-start tool-range) (overlay-end tool-range)))))))
+
+(ert-deftest opencode-chat-reasoning-range-does-not-absorb-next-part ()
+  "A reasoning UI section ends before the following text part.
+Reasoning grows by explicit resize, not rear advancement, so announcing
+the next part at the same boundary cannot make it collapsible with the
+reasoning that preceded it."
+  (opencode-test-with-temp-buffer "*test-reasoning-range-boundary*"
+    (opencode-chat-mode)
+    (opencode-chat--set-messages-end (copy-marker (point) t))
+    (opencode-chat-message-upsert
+     "msg_reason_range"
+     (list :role "assistant" :id "msg_reason_range"
+           :time (list :created 1000)))
+    (opencode-chat-message-update-part
+     "msg_reason_range" "prt_reason" "reasoning"
+     (list :id "prt_reason" :messageID "msg_reason_range"
+           :type "reasoning" :text "" :time (list :start 1100))
+     nil)
+    (opencode-chat-message-update-part
+     "msg_reason_range" "prt_reason" "reasoning" nil "thinking")
+    (opencode-chat-message-update-part
+     "msg_reason_range" "prt_answer" "text"
+     (list :id "prt_answer" :messageID "msg_reason_range"
+           :type "text" :text "" :time (list :start 1200))
+     nil)
+    (opencode-chat-message-update-part
+     "msg_reason_range" "prt_answer" "text" nil "answer")
+    (let ((reason-range (opencode-chat--store-part-overlay
+                         "msg_reason_range" "prt_reason"))
+          (answer-range (opencode-chat--store-part-overlay
+                         "msg_reason_range" "prt_answer"))
+          (reason-section (opencode-chat--store-find-overlay "prt_reason")))
+      (should (= (overlay-end reason-range) (overlay-end reason-section)))
+      (should (< (overlay-end reason-section) (overlay-start answer-range)))
+      (should-not
+       (string-match-p
+        "answer"
+        (buffer-substring-no-properties
+         (overlay-start reason-section) (overlay-end reason-section)))))))
+
+;;; --- Collapse state during streaming ---
+
+(defun opencode-test--visible-string ()
+  "Return the buffer text with `opencode-section'-hidden runs removed."
+  (let ((acc nil)
+        (pos (point-min)))
+    (while (< pos (point-max))
+      (let ((next (or (next-single-property-change pos 'invisible) (point-max))))
+        (unless (eq (get-text-property pos 'invisible) 'opencode-section)
+          (push (buffer-substring-no-properties pos next) acc))
+        (setq pos next)))
+    (apply #'concat (nreverse acc))))
+
+(defun opencode-test--complete-assistant (msg-id)
+  "Send MSG-ID the `message.updated' that finishes an assistant turn."
+  (opencode-chat-message-upsert
+   msg-id
+   (list :id msg-id :role "assistant" :agent "build" :modelID "m"
+         :time (list :created 1000 :completed 9000)
+         :tokens (list :input 2329 :output 69))))
+
+(ert-deftest opencode-chat-footer-stays-inside-message-section ()
+  "The footer re-rendered on completion must stay inside the message overlay.
+
+Why this exists — the old footer ran to the overlay's end, so deleting
+it shrank the overlay to the footer's start, and the overlay does not
+advance on insertion, so the replacement landed outside.  What breaks:
+collapsing the message leaves the token line visible, and because
+`--message-insert-pos' then returns the overlay's end, every part
+rendered afterwards lands outside the message too."
+  (opencode-test-with-temp-buffer "*test-footer-in-section*"
+    (opencode-chat-mode)
+    (opencode-chat--set-messages-end (copy-marker (point) t))
+    (opencode-chat-message-upsert
+     "msg_f"
+     (list :info (list :id "msg_f" :role "assistant" :agent "build" :modelID "m"
+                       :time (list :created 1000))
+           :parts (vector (list :id "prt_f" :type "text" :text "body"))))
+    (opencode-test--complete-assistant "msg_f")
+    (let ((ov (opencode-chat--store-find-overlay "msg_f")))
+      (should (= (overlay-end ov) (point-max)))
+      ;; Collapsing must hide the token line, not leave it dangling on
+      ;; the header's line.
+      (goto-char (overlay-start ov))
+      (opencode-ui--toggle-section)
+      (should-not (string-match-p "⬆2,329" (opencode-test--visible-string))))))
+
+(defun opencode-test--count-collapsed-indicators ()
+  "Return how many `[collapsed]' indicators the buffer carries."
+  (let ((hits 0)
+        (pos (point-min)))
+    (while (setq pos (text-property-any pos (point-max)
+                                        'opencode-collapsed-indicator t))
+      (setq hits (1+ hits)
+            pos (or (next-single-property-change
+                     pos 'opencode-collapsed-indicator)
+                    (point-max))))
+    hits))
+
+(ert-deftest opencode-chat-collapsed-header-survives-message-update ()
+  "A collapsed message must still look collapsed after its header is redrawn.
+
+Why this exists — `--update-message-inline' replaces the header line,
+which carries both the ▶ icon and the `[collapsed]' indicator, while the
+overlay stays collapsed.  What breaks: the header claims the section is
+open while its body is hidden, so the next TAB expands when the user
+meant to collapse."
+  (opencode-test-with-temp-buffer "*test-collapsed-header-survives*"
+    (opencode-chat-mode)
+    (opencode-chat--set-messages-end (copy-marker (point) t))
+    (opencode-chat-message-upsert
+     "msg_h"
+     (list :info (list :id "msg_h" :role "assistant" :agent "build" :modelID "m"
+                       :time (list :created 1000))
+           :parts (vector (list :id "prt_h" :type "text" :text "body text"))))
+    (goto-char (overlay-start (opencode-chat--store-find-overlay "msg_h")))
+    (opencode-ui--toggle-section)
+    (opencode-test--complete-assistant "msg_h")
+    (let ((visible (opencode-test--visible-string)))
+      (should (string-match-p "▶" visible))
+      (should (string-match-p "\\[collapsed\\]" visible))
+      (should-not (string-match-p "body text" visible)))
+    ;; Exactly one indicator — re-collapsing must not stack a second.
+    (should (= 1 (opencode-test--count-collapsed-indicators)))))
+
+(ert-deftest opencode-chat-streaming-delta-stays-hidden-when-collapsed ()
+  "Deltas appended to a collapsed section must not become visible.
+
+Why this exists — `insert' does not inherit the `invisible' property, so
+each delta arriving after the user collapsed a message reappeared inside
+the section that was supposedly hidden."
+  (opencode-test-with-temp-buffer "*test-delta-hidden*"
+    (opencode-chat-mode)
+    (opencode-chat--set-messages-end (copy-marker (point) t))
+    (opencode-chat-message-upsert
+     "msg_d"
+     (list :info (list :id "msg_d" :role "assistant" :agent "build" :modelID "m"
+                       :time (list :created 1000))
+           :parts (vector (list :id "prt_d" :type "text" :text "first"
+                                :time (list :start 1000)))))
+    (goto-char (overlay-start (opencode-chat--store-find-overlay "msg_d")))
+    (opencode-ui--toggle-section)
+    (opencode-chat-message-update-part "msg_d" "prt_d" "text" nil " LATE-DELTA")
+    (should (opencode-test-buffer-contains-p "LATE-DELTA"))
+    (should-not (string-match-p "LATE-DELTA" (opencode-test--visible-string)))))
+
+(ert-deftest opencode-chat-tool-collapse-choice-survives-redraw ()
+  "Expanding a tool with TAB must survive the tool's next status update.
+
+Why this exists — a tool section is discarded and re-rendered on every
+status change, and the renderer's `:collapsed-p' default was the only
+input to the new section's state.  What breaks: output the user opened
+snaps shut the moment the tool finishes."
+  (opencode-test-with-temp-buffer "*test-tool-collapse-sticky*"
+    (opencode-chat-mode)
+    (opencode-chat--set-messages-end (copy-marker (point) t))
+    (opencode-chat-message-upsert
+     "msg_t"
+     (list :info (list :id "msg_t" :role "assistant" :agent "build" :modelID "m"
+                       :time (list :created 1000))
+           :parts (vector (list :id "prt_bash" :type "tool" :tool "bash"
+                                :messageID "msg_t"
+                                :state (list :status "running"
+                                             :input (list :command "ls")
+                                             :output "")))))
+    ;; `bash' defaults to collapsed; the user opens it.
+    (should (overlay-get (opencode-chat--store-find-overlay "prt_bash")
+                         'opencode-collapsed))
+    (goto-char (overlay-start (opencode-chat--store-find-overlay "prt_bash")))
+    (opencode-ui--toggle-section)
+    ;; The tool completes and its section is redrawn.
+    (opencode-chat-message-update-part
+     "msg_t" "prt_bash" "tool"
+     (list :id "prt_bash" :messageID "msg_t" :type "tool" :tool "bash"
+           :state (list :status "completed"
+                        :input (list :command "ls")
+                        :output "one\ntwo\n"))
+     nil)
+    (should-not (overlay-get (opencode-chat--store-find-overlay "prt_bash")
+                             'opencode-collapsed))
+    (should (string-match-p "one" (opencode-test--visible-string)))))
+
+(ert-deftest opencode-chat-message-collapse-choice-survives-full-render ()
+  "A collapsed message must come back collapsed after a full re-render.
+
+Why this exists — `render-all' rebuilds every section overlay from
+scratch, so a refresh (which `session.idle' always triggers) silently
+reopened every message the user had folded away."
+  (opencode-test-with-temp-buffer "*test-msg-collapse-sticky*"
+    (opencode-chat-mode)
+    (opencode-chat--set-messages-end (copy-marker (point) t))
+    (let ((msg (list :info (list :id "msg_p" :role "assistant" :agent "build"
+                                 :modelID "m" :time (list :created 1000))
+                     :parts (vector (list :id "prt_p" :type "text"
+                                          :text "folded away")))))
+      (opencode-chat-message-upsert "msg_p" msg)
+      (goto-char (overlay-start (opencode-chat--store-find-overlay "msg_p")))
+      (opencode-ui--toggle-section)
+      ;; Full re-render, as a refresh does.
+      (let ((inhibit-read-only t))
+        (erase-buffer))
+      (opencode-chat-message-reset)
+      (opencode-chat-message-init-messages-end (point-min))
+      (opencode-chat-message-render-all (vector msg)))
+    (should (overlay-get (opencode-chat--store-find-overlay "msg_p")
+                         'opencode-collapsed))
+    (should-not (string-match-p "folded away" (opencode-test--visible-string)))))
+
+(ert-deftest opencode-chat-empty-reasoning-collapses-before-first-delta ()
+  "Folding a reasoning section away before it streams must hold.
+
+Why this exists — the section exists from the moment the part is
+announced, when it is a header and nothing else, and collapsing refused
+to record a state for a section with no body.  What breaks: the user
+folds `Thinking...' away, and every delta that follows appears anyway."
+  (opencode-test-with-temp-buffer "*test-empty-reasoning-collapse*"
+    (opencode-chat-mode)
+    (opencode-chat--set-messages-end (copy-marker (point) t))
+    (opencode-chat-message-upsert
+     "msg_e" (list :role "assistant" :id "msg_e" :time (list :created 1000)))
+    ;; The part is announced with no text yet.
+    (opencode-chat-message-update-part
+     "msg_e" "prt_e" "reasoning"
+     (list :id "prt_e" :messageID "msg_e" :type "reasoning"
+           :text "" :time (list :start 2000))
+     nil)
+    (goto-char (overlay-start (opencode-chat--store-find-overlay "prt_e")))
+    (opencode-ui--toggle-section)
+    (should (overlay-get (opencode-chat--store-find-overlay "prt_e")
+                         'opencode-collapsed))
+    ;; Thinking then streams in.
+    (opencode-chat-message-update-part
+     "msg_e" "prt_e" "reasoning" nil "HIDDEN THINKING")
+    (should (opencode-test-buffer-contains-p "HIDDEN THINKING"))
+    (should-not (string-match-p "HIDDEN THINKING"
+                                (opencode-test--visible-string)))))
+
+(ert-deftest opencode-chat-nested-tool-stays-collapsed-through-parent-toggle ()
+  "Opening the parent message must not reopen a tool folded inside it.
+
+Why this exists — expanding a section used to force every section nested
+in it open, without telling the store, so the overlay and the recorded
+choice disagreed.  What breaks: the tool looks open until its next
+status update, then snaps shut on its own."
+  (opencode-test-with-temp-buffer "*test-nested-tool-collapse*"
+    (opencode-chat-mode)
+    (opencode-chat--set-messages-end (copy-marker (point) t))
+    (opencode-chat-message-upsert
+     "msg_n"
+     (list :info (list :id "msg_n" :role "assistant" :agent "build"
+                       :modelID "m" :time (list :created 1000))
+           :parts (vector (list :id "prt_n" :type "tool" :tool "bash"
+                                :messageID "msg_n"
+                                :state (list :status "completed"
+                                             :input (list :command "ls")
+                                             :output "one\ntwo\n")))))
+    ;; `bash' renders collapsed; the user opens it, then folds it back.
+    (goto-char (overlay-start (opencode-chat--store-find-overlay "prt_n")))
+    (opencode-ui--toggle-section)
+    (goto-char (overlay-start (opencode-chat--store-find-overlay "prt_n")))
+    (opencode-ui--toggle-section)
+    ;; Collapse and re-expand the message around it.
+    (goto-char (overlay-start (opencode-chat--store-find-overlay "msg_n")))
+    (opencode-ui--toggle-section)
+    (goto-char (overlay-start (opencode-chat--store-find-overlay "msg_n")))
+    (opencode-ui--toggle-section)
+    (should (overlay-get (opencode-chat--store-find-overlay "prt_n")
+                         'opencode-collapsed))
+    (should-not (string-match-p "one" (opencode-test--visible-string)))
+    ;; And it must not flip when the tool is redrawn.
+    (opencode-chat-message-update-part
+     "msg_n" "prt_n" "tool"
+     (list :id "prt_n" :messageID "msg_n" :type "tool" :tool "bash"
+           :state (list :status "completed"
+                        :input (list :command "ls")
+                        :output "updated\n"))
+     nil)
+    (should (overlay-get (opencode-chat--store-find-overlay "prt_n")
+                         'opencode-collapsed))
+    (should-not (string-match-p "updated" (opencode-test--visible-string)))))
+
+;;; --- Undo across transcript redraws ---
+(ert-deftest opencode-chat-shift-undo-entry-covers-every-shape ()
+  "Each undo entry shape must move by the same amount, or be rejected.
+
+Why this exists — `--shift-undo-list' rewrites positions in entries
+whose shapes it has to recognise by hand.  An unrecognised shape left
+unshifted would point at the wrong text, which is why the fallback is a
+throw rather than returning the entry untouched."
+  (should (equal (opencode-chat--shift-undo-entry '(10 . 20) 5) '(15 . 25)))
+  (should (equal (opencode-chat--shift-undo-entry '("txt" . 10) 5) '("txt" . 15)))
+  ;; A negative position records point at the end of the deletion; the
+  ;; sign has to survive the shift.
+  (should (equal (opencode-chat--shift-undo-entry '("txt" . -10) 5) '("txt" . -15)))
+  (should (equal (opencode-chat--shift-undo-entry 10 5) 15))
+  (should (equal (opencode-chat--shift-undo-entry '(nil face bold 10 . 20) 5)
+                 '(nil face bold 15 . 25)))
+  (should (equal (opencode-chat--shift-undo-entry nil 5) nil))
+  (should (equal (opencode-chat--shift-undo-entry '(t . 123) 5) '(t . 123)))
+  (should (eq 'discard
+              (catch 'opencode-chat--undo-unshiftable
+                (opencode-chat--shift-undo-entry '(apply foo 1 2) 5)))))
+
+(ert-deftest opencode-chat-shift-undo-list-discards-unshiftable-history ()
+  "An unsupported entry discards undo history without leaking its throw tag."
+  (with-temp-buffer
+    (setq buffer-undo-list '((apply foo 1 2)))
+    (opencode-chat--shift-undo-list 5)
+    (should-not buffer-undo-list)))
+
+(ert-deftest opencode-chat-shift-undo-list-validates-before-mutation ()
+  "A later unsupported entry must not leave earlier entries half-shifted."
+  (with-temp-buffer
+    (let* ((shiftable (cons 10 20))
+           (buffer-undo-list (list shiftable '(apply foo 1 2))))
+      (opencode-chat--shift-undo-list 5)
+      (should-not buffer-undo-list)
+      (should (equal shiftable '(10 . 20))))))
+
+(ert-deftest opencode-chat-undo-survives-transcript-growth ()
+  "Undo must still reverse the user's own edit after the transcript grows.
+
+Why this exists — transcript redraws are excluded from the undo list,
+but the entries already recorded hold absolute positions that Emacs does
+not adjust.  What breaks: after a single streamed delta, `undo' deletes
+a run of transcript text instead of the characters the user typed."
+  (opencode-test-with-temp-buffer "*test-undo-shift*"
+    (buffer-enable-undo)
+    (insert "TRANSCRIPT\n")
+    (setq buffer-undo-list nil)
+    (goto-char (point-max))
+    (insert "typed")
+    (let ((expected (buffer-string)))
+      ;; A delta lands above what the user typed.
+      (opencode-chat--in-transcript
+        (goto-char (point-min))
+        (insert "STREAMED-DELTA\n"))
+      (should (string= (buffer-string) (concat "STREAMED-DELTA\n" expected)))
+      (undo-start)
+      (undo-more 1)
+      (should (string= (buffer-string) "STREAMED-DELTA\nTRANSCRIPT\n")))))
+
+(ert-deftest opencode-chat-undo-shift-runs-once-when-nested ()
+  "Nested transcript mutations must repair the undo list exactly once.
+
+Why this exists — `--in-transcript' nests (a section replacement runs
+inside a part update), and each level measuring its own size delta would
+shift the same edit twice, moving recorded positions past the text they
+name."
+  (opencode-test-with-temp-buffer "*test-undo-shift-nested*"
+    (buffer-enable-undo)
+    (insert "TRANSCRIPT\n")
+    (setq buffer-undo-list nil)
+    (goto-char (point-max))
+    (insert "typed")
+    (opencode-chat--in-transcript
+      (opencode-chat--in-transcript
+        (goto-char (point-min))
+        (insert "AB\n")))
+    (undo-start)
+    (undo-more 1)
+    (should (string= (buffer-string) "AB\nTRANSCRIPT\n"))))
+
+(ert-deftest opencode-chat-undo-shift-runs-when-a-redraw-signals ()
+  "A redraw that mutates and then errors must still repair the undo list.
+
+Why this exists — the repair used to be a trailing form, which a
+non-local exit skips.  What breaks: a renderer that signals partway
+through leaves the transcript longer and the recorded positions
+untouched, so the next `undo' cuts a run out of the transcript --- the
+exact corruption the shift exists to prevent."
+  (opencode-test-with-temp-buffer "*test-undo-shift-on-error*"
+    (buffer-enable-undo)
+    (insert "TRANSCRIPT\n")
+    (setq buffer-undo-list nil)
+    (goto-char (point-max))
+    (insert "typed")
+    (should-error
+     (opencode-chat--in-transcript
+       (goto-char (point-min))
+       (insert "ERR\n")
+       (error "renderer blew up")))
+    (undo-start)
+    (undo-more 1)
+    (should (string= (buffer-string) "ERR\nTRANSCRIPT\n"))))
+
+(ert-deftest opencode-chat-undo-shift-keeps-an-undo-chain-usable ()
+  "An undo already in progress must keep working across a redraw.
+
+Why this exists — `pending-undo-list' is a tail of `buffer-undo-list',
+so rebuilding that list instead of rewriting it in place strands the
+chain on the old, unshifted cells.  What breaks: the second \\[undo] of
+a run edits the transcript at a stale position."
+  (opencode-test-with-temp-buffer "*test-undo-shift-chain*"
+    (buffer-enable-undo)
+    (insert "TRANSCRIPT\n")
+    (setq buffer-undo-list nil)
+    (goto-char (point-max))
+    (insert "first")
+    (undo-boundary)
+    (insert "second")
+    (undo-start)
+    (undo-more 1)
+    (should (string= (buffer-string) "TRANSCRIPT\nfirst"))
+    ;; A delta lands above the input while the chain is mid-run.
+    (opencode-chat--in-transcript
+      (goto-char (point-min))
+      (insert "DELTA\n"))
+    ;; The chain continues on the repaired cells.
+    (undo-more 1)
+    (should (string= (buffer-string) "DELTA\nTRANSCRIPT\n"))))
+
+(ert-deftest opencode-chat-undo-shift-preserves-redo ()
+  "Redo must survive a redraw that lands between the undo and the redo.
+
+Why this exists — `undo-equiv-table' is keyed by the identity of undo
+list tails, so replacing the list makes every redo record unreachable.
+What breaks: the user undoes their typing, a delta arrives, and the text
+they undid can no longer be recovered."
+  (opencode-test-with-temp-buffer "*test-undo-shift-redo*"
+    (buffer-enable-undo)
+    (insert "TRANSCRIPT\n")
+    (setq buffer-undo-list nil)
+    (goto-char (point-max))
+    (insert "typed")
+    (undo-boundary)
+    (let ((last-command nil))
+      (undo))
+    (should (string= (buffer-string) "TRANSCRIPT\n"))
+    (opencode-chat--in-transcript
+      (goto-char (point-min))
+      (insert "DELTA\n"))
+    (undo-redo)
+    (should (string= (buffer-string) "DELTA\nTRANSCRIPT\ntyped"))))
+
+(ert-deftest opencode-chat-undo-shift-leaves-global-state-alone ()
+  "Repairing the undo list must not disturb the command loop.
+
+Why this exists — `last-command' and `pending-undo-list' are global, not
+buffer-local, and this runs from an SSE process filter while the user is
+usually editing somewhere else entirely.  What breaks: every streamed
+delta silently cancels whatever command sequence --- a kill-ring append,
+a repeated undo --- the user had going in another buffer."
+  (let ((chat (generate-new-buffer " *test-undo-global-chat*")))
+    (unwind-protect
+        (let ((last-command 'kill-region)
+              (pending-undo-list '(sentinel)))
+          (with-current-buffer chat
+            (buffer-enable-undo)
+            (insert "TRANSCRIPT\n")
+            (setq buffer-undo-list nil)
+            (goto-char (point-max))
+            (insert "typed")
+            (opencode-chat--in-transcript
+              (goto-char (point-min))
+              (insert "DELTA\n")))
+          (should (eq last-command 'kill-region))
+          (should (equal pending-undo-list '(sentinel))))
+      (kill-buffer chat))))
 
 ;;; --- messages-end marker set after render ---
-
-;;; --- render-messages clears stale streaming state ---
 
 ;;; --- Optimistic user message ---
 
@@ -3529,11 +4385,13 @@ After render-messages, render-tool-part output also gets read-only and keymap in
 When an overlay already exists for a tool part, update-part-inline deletes and
 re-renders it.  The result should match a fresh render-tool-part call."
   (let* ((part-v1 (list :id "prt_tool2"
+                        :messageID "msg_tool2"
                         :type "tool"
                         :tool "read"
                         :state (list :status "running"
                                      :input (list :filePath "src/main.ts"))))
          (part-v2 (list :id "prt_tool2"
+                        :messageID "msg_tool2"
                         :type "tool"
                         :tool "read"
                         :state (list :status "completed"
@@ -3973,7 +4831,7 @@ at point — the same lookup Emacs performs on a keystroke."
     ;; when the user presses the key
     (let ((cmd (key-binding (kbd "TAB"))))
       ;; BUG: currently resolves to cycle-agent instead of toggle-section
-      (should (eq cmd #'opencode-ui--toggle-section)))))
+      (should (eq cmd #'opencode-chat--toggle-section)))))
 
 (ert-deftest opencode-chat-tab-in-input-area-should-cycle-agent ()
   "Pressing TAB in the input area should cycle agent.
@@ -4041,7 +4899,7 @@ Why this matters — users expect RET on edit diffs to open the edited file."
     (should (eq (key-binding (kbd "RET"))
                 #'opencode-chat-message-open-file-at-point))
     (should (eq (key-binding (kbd "TAB"))
-                #'opencode-ui--toggle-section))))
+                #'opencode-chat--toggle-section))))
 
 (ert-deftest opencode-chat-apply-patch-renders-clickable-multifile-diff ()
   "Apply-patch colors diff lines and assigns each section its own file."
@@ -4083,7 +4941,7 @@ Why this matters — users expect RET on edit diffs to open the edited file."
       (should (eq (key-binding (kbd "RET"))
                   #'opencode-chat-message-open-file-at-point))
       (should (eq (key-binding (kbd "TAB"))
-                  #'opencode-ui--toggle-section)))
+                  #'opencode-chat--toggle-section)))
     (should-not (string-match-p "\\[collapsed\\]" (buffer-string)))))
 
 (ert-deftest opencode-chat-apply-patch-ret-opens-section-file ()

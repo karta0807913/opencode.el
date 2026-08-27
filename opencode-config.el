@@ -11,7 +11,7 @@
 
 ;;; Code:
 
-(require 'opencode-api)
+(require 'opencode-backend-core)
 (require 'opencode-log)
 
 ;;; --- Config cache (delegated to opencode-api--server-config micro-cache) ---
@@ -21,22 +21,22 @@
   :type 'integer
   :group 'opencode)
 
-(defun opencode-config--get ()
+(defun opencode-config--get (&optional backend)
   "Return cached server config (possibly nil if not yet fetched).
 Uses cache-only mode — never triggers HTTP."
-  (opencode-api--server-config :cache t))
+  (opencode-backend-cached-config backend))
 
 ;;; --- Provider cache (delegated to opencode-api--providers micro-cache) ---
 
-(defun opencode-config--ensure-providers-cache ()
+(defun opencode-config--ensure-providers-cache (&optional backend)
   "Ensure provider cache is populated.
 Delegates to `opencode-api--providers'."
-  (opencode-api--providers))
+  (opencode-backend-ensure-providers backend))
 
-(defun opencode-config--providers ()
+(defun opencode-config--providers (&optional backend)
   "Return cached provider data (possibly nil if not yet fetched).
 Uses cache-only mode — never triggers HTTP."
-  (opencode-api--providers :cache t))
+  (opencode-backend-cached-providers backend))
 
 ;;; --- Commands cache (GET /command) ---
 
@@ -54,13 +54,13 @@ Uses cache-only mode — never triggers HTTP."
 Does nothing if a refresh is already in flight."
   (unless opencode-config--commands-refreshing
     (setq opencode-config--commands-refreshing t)
-    (opencode-api-get
-     "/command"
+    (opencode-backend-list-commands
      (lambda (response)
        (setq opencode-config--commands-refreshing nil)
        (when-let* ((body (plist-get response :body)))
          (setq opencode-config--commands-cache body
-                 opencode-config--commands-cache-time (float-time)))))))
+                 opencode-config--commands-cache-time (float-time)))))
+     opencode-backend-current))
 (defun opencode-config--ensure-commands-cache ()
   "Ensure commands cache is being populated, never blocks.
 If the cache is nil or expired and no refresh is in flight,
@@ -101,19 +101,19 @@ NAME is the command name string without leading slash."
 
 ;;; --- Accessors ---
 
-(defun opencode-config--connected-providers ()
+(defun opencode-config--connected-providers (&optional backend)
   "Return the list of connected provider IDs.
 Fetches from GET /provider/ and returns the :connected field."
-  (let ((data (opencode-config--providers)))
+  (let ((data (opencode-config--providers backend)))
     (when data
       (plist-get data :connected))))
 
-(defun opencode-config--current-model ()
+(defun opencode-config--current-model (&optional backend)
   "Extract current model from config as a plist.
 Returns (:providerID PROVIDER :modelID MODEL).
 Handles both string format (\"provider/model-id\") and
 plist format (:providerID ... :modelID ...)."
-  (let ((model (plist-get (opencode-config--get) :model)))
+  (let ((model (plist-get (opencode-config--get backend) :model)))
     (cond
      ;; String format: "anthropic/claude-opus-4-6"
      ((and (stringp model)
@@ -125,17 +125,17 @@ plist format (:providerID ... :modelID ...)."
       model)
      (t nil))))
 
-(defun opencode-config--current-agent ()
+(defun opencode-config--current-agent (&optional backend)
   "Return the default agent name from config.
 Returns the :default_agent field."
-  (plist-get (opencode-config--get) :default_agent))
+  (plist-get (opencode-config--get backend) :default_agent))
 
-(defun opencode-config--model-info (provider-id model-id)
+(defun opencode-config--model-info (provider-id model-id &optional backend)
   "Look up model info for PROVIDER-ID and MODEL-ID.
 Searches the provider cache's :all list for the matching provider
 \(using `downcase' for comparison), then finds the model in its
 :models map.  Returns the model info plist, or nil if not found."
-  (let* ((data (opencode-config--providers))
+  (let* ((data (opencode-config--providers backend))
          (all (when data (plist-get data :all)))
          (provider nil)
          (model-info nil))
@@ -154,26 +154,37 @@ Searches the provider cache's :all list for the matching provider
             (setq model-info (plist-get models key))))))
     model-info))
 
-(defun opencode-config--model-variants (provider-id model-id)
+(defun opencode-config--model-variants (provider-id model-id &optional backend)
   "Look up model variants for PROVIDER-ID and MODEL-ID.
 Searches the provider cache's :all list for the matching provider
 \(using `downcase' for comparison), then finds the model in its
 :models map.  Returns the :variants plist, or nil if not found."
-  (plist-get (opencode-config--model-info provider-id model-id) :variants))
+  (plist-get
+   (if backend
+       (opencode-config--model-info provider-id model-id backend)
+     (opencode-config--model-info provider-id model-id))
+   :variants))
 
-(defun opencode-config--model-context-limit (provider-id model-id)
+(defun opencode-config--model-context-limit (provider-id model-id &optional backend)
   "Return the context window size for PROVIDER-ID and MODEL-ID.
 Looks up the :limit :context field from the provider cache.
 Returns an integer (number of tokens), or nil if not available."
-  (when-let* ((info (opencode-config--model-info provider-id model-id))
+  (when-let* ((info
+               (if backend
+                   (opencode-config--model-info provider-id model-id backend)
+                 (opencode-config--model-info provider-id model-id)))
               (limit (plist-get info :limit)))
     (plist-get limit :context)))
 
-(defun opencode-config--variant-keys (provider-id model-id)
+(defun opencode-config--variant-keys (provider-id model-id &optional backend)
   "Return list of variant key strings for PROVIDER-ID and MODEL-ID.
 Calls `opencode-config--model-variants' and extracts just the keys.
 Returns nil if no variants found."
-  (when-let* ((variants (opencode-config--model-variants provider-id model-id)))
+  (when-let* ((variants
+               (if backend
+                   (opencode-config--model-variants
+                    provider-id model-id backend)
+                 (opencode-config--model-variants provider-id model-id))))
       ;; variants is a plist: (:low (...) :medium (...) ...)
        ;; Extract keys (every other element starting from 0)
        (let ((keys nil)
@@ -185,12 +196,12 @@ Returns nil if no variants found."
 
 ;;; --- Model enumeration ---
 
-(defun opencode-config--all-models ()
+(defun opencode-config--all-models (&optional backend)
   "Return a list of all models from connected providers.
 Each element is a plist with :provider-id, :model-id, :name, :label.
 Only models from connected providers are included.
 Returns nil if provider data is not available."
-  (let* ((data (opencode-config--providers))
+  (let* ((data (opencode-config--providers backend))
          (all (when data (plist-get data :all)))
          (connected (when data (plist-get data :connected)))
          (result nil))
@@ -218,7 +229,8 @@ Returns nil if provider data is not available."
 
 ;;; --- Command execution ---
 
-(defun opencode-config-execute-command (session-id command &optional arguments agent model variant)
+(defun opencode-config-execute-command
+    (session-id command &optional arguments agent model variant backend busy)
   "Execute slash COMMAND in SESSION-ID.
 Sends POST /session/:id/command with body.
 ARGUMENTS is the command arguments string (empty string if none).
@@ -233,23 +245,23 @@ Calls callback on response (async)."
     (when model (setq body (plist-put body :model model)))
     (when variant (setq body (plist-put body :variant variant)))
     (opencode--debug "opencode-config: executing command /%s body=%S" command body)
-    (opencode-api-post
-     (format "/session/%s/command" session-id)
-     body
+    (opencode-backend-execute-command
+     session-id command arguments agent model variant
      (lambda (response)
        (let ((status (plist-get response :status)))
          (if (and status (>= status 400))
              (message "opencode-config: command /%s failed with status %d"
                       command status)
-           (opencode--debug "opencode-config: command /%s executed" command)))))))
+           (opencode--debug "opencode-config: command /%s executed" command))))
+     (or backend opencode-backend-current)
+     busy)))
 
 ;;; --- Cache management ---
 
 (defun opencode-config-invalidate ()
   "Invalidate all config, provider, and command caches.
 Forces fresh data on next access."
-  (opencode-api--server-config-invalidate)
-  (opencode-api--providers-invalidate)
+  (opencode-backend-invalidate-config)
   (setq opencode-config--commands-cache nil
         opencode-config--commands-cache-time 0
         opencode-config--commands-refreshing nil))

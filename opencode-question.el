@@ -5,7 +5,9 @@
 
 ;;; Commentary:
 
-;; SSE-driven question popup.  When the agent asks a question,
+;; Backend-driven question popup.  OpenCode supplies questions via SSE events;
+;; Pi supplies them via RPC extension UI requests.  The UI receives normalized
+;; OpenCode-shaped events either way.  When the agent asks a question,
 ;; the input area of the chat buffer is replaced with a numbered
 ;; option list.  Press 1-9 to select, RET to submit, r to reject, m to add more.
 ;; After answering, the original input text is restored.
@@ -15,13 +17,13 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'opencode-api)
-(require 'opencode-backend)
+(require 'opencode-backend-core)
 (require 'opencode-faces)
 (require 'opencode-popup)
 (require 'opencode-log)
 
 ;; Cross-module reference for input-start marker
+(declare-function opencode-chat--backend "opencode-chat-state" (&optional state))
 
 ;;; --- Hook declaration ---
 
@@ -33,7 +35,7 @@
 
 (defvar-local opencode-question--pending nil
   "FIFO list of pending question request plists.
-Buffer-local in each chat buffer; SSE events dispatch to the correct
+Buffer-local in each chat buffer; backend events dispatch to the correct
 buffer via `opencode-event--dispatch-chat'.")
 
 (defvar-local opencode-question--current nil
@@ -96,10 +98,10 @@ buffer via `opencode-event--dispatch-chat'.")
   (setq truncate-lines t)
   (buffer-disable-undo))
 
-;;; --- SSE handler ---
+;;; --- Backend event handler ---
 
 (defun opencode-question--on-asked (event)
-  "Handle a `question.asked' SSE EVENT.
+  "Handle a `question.asked' OpenCode-shaped EVENT.
 Extracts the question request and queues it for display.
 Runs in the chat buffer context (dispatched by session-id)."
   (when-let* ((props (plist-get event :properties)))
@@ -139,15 +141,17 @@ Returns nil if the buffer has no valid input area (child session / loading)."
               (opencode-question--render-inline)
               t)
           (error
-           ;; Render failed -- restore state so future popups aren't blocked
-           (opencode--debug "opencode-question: render error: %S" err)
-           (setq opencode-question--current nil)
-           (when (overlayp opencode-popup--overlay)
-             (delete-overlay opencode-popup--overlay))
-           (setq opencode-popup--inline-p nil
-                 opencode-popup--saved-input nil
-                 opencode-popup--overlay nil)
-           nil))))
+            ;; Render failed -- restore the input tail before unblocking
+            ;; future popups.  Rendering deletes everything after
+            ;; messages-end, including child-session navigation.
+            (opencode--debug "opencode-question: render error: %S" err)
+            (setq opencode-question--current nil)
+            (when-let* ((recovery-error
+                         (opencode-popup--recover-render-error)))
+              (opencode--debug
+               "opencode-question: render recovery error: %S"
+               recovery-error))
+            nil))))
      ;; Busy, no input area, or no match -- push back to queue
      (t nil))))
 
@@ -474,8 +478,9 @@ selection state.  Does nothing on the first question."
           (id (plist-get opencode-question--current :id)))
       (opencode--debug "opencode-question: rejecting id=%s" id)
       (condition-case err
-          (opencode-question-reject :id id)
-        (opencode-api-error
+          (opencode-question-reject
+           :id id :backend (opencode-chat--backend))
+        (error
          (message "opencode-question: reject failed: %s" (error-message-string err))))
       ;; Clean up — but only if on-rejected didn't already handle it.
       ;; The sync HTTP call above can trigger accept-process-output,
@@ -494,28 +499,31 @@ selection state.  Does nothing on the first question."
               (id (plist-get opencode-question--current :id)))
           (opencode--debug "opencode-question: rejecting with message id=%s" id)
           (condition-case err
-              (opencode-question-reject :id id :message msg)
-            (opencode-api-error
+              (opencode-question-reject
+               :id id :message msg :backend (opencode-chat--backend))
+            (error
              (message "opencode-question: reject failed: %s" (error-message-string err))))
           ;; Clean up — but only if on-rejected didn't already handle it.
           (when (eq opencode-question--current saved-current)
             (opencode-question--cleanup)))))))
 
-(cl-defun opencode-question-reply (&key id answers)
+(cl-defun opencode-question-reply (&key id answers backend)
   "Reply to question request ID with ANSWERS.
-ANSWERS is a list of answer lists or a vector of answer vectors.  This is
-the public API for users handling question requests from SSE hooks."
+ANSWERS is a list of answer lists or a vector of answer vectors.  BACKEND
+identifies the request backend and defaults to `opencode-backend-current'.
+This is the public API for users handling questions from backend hooks."
   (when (listp answers)
     (setq answers (vconcat
                    (mapcar (lambda (ans) (if (vectorp ans) ans (vconcat ans)))
                            answers))))
-  (opencode-backend-reply-question id answers))
+  (opencode-backend-reply-question id answers backend))
 
-(cl-defun opencode-question-reject (&key id message)
+(cl-defun opencode-question-reject (&key id message backend)
   "Reject question request ID.
-MESSAGE is an optional rejection reason.  This is the public API for
-users handling question requests from SSE hooks."
-  (opencode-backend-reject-question id message))
+MESSAGE is an optional rejection reason.  BACKEND identifies the request
+backend and defaults to `opencode-backend-current'.  This is the public API
+for users handling questions from backend hooks."
+  (opencode-backend-reject-question id message backend))
 
 (cl-defun opencode-question--reply (&key answers request id)
   "Send ANSWERS to the server for the current question.
@@ -528,8 +536,10 @@ Converts to vectors for JSON serialization: [[\"a\"]] → array of arrays."
                                 answers))))
     (opencode--debug "opencode-question: replying id=%s answers=%S" question-id vec-answers)
     (condition-case err
-        (opencode-question-reply :id question-id :answers vec-answers)
-      (opencode-api-error
+        (opencode-question-reply
+         :id question-id :answers vec-answers
+         :backend (opencode-chat--backend))
+      (error
        (message "opencode-question: reply failed: %s" (error-message-string err))))))
 
 ;;; --- Cleanup ---
@@ -545,7 +555,7 @@ Converts to vectors for JSON serialization: [[\"a\"]] → array of arrays."
                              "*opencode: question*"
                              #'opencode-question--show-next)))
 
-;;; --- SSE replied/rejected handlers ---
+;;; --- Backend replied/rejected handlers ---
 
 (defun opencode-question--dismiss-if-matching (request-id)
   "Dismiss question popup if its request ID matches REQUEST-ID.
@@ -563,7 +573,7 @@ buffers).  Idempotent — safe to call even if no popup is displayed."
      (opencode-question--cleanup))))
 
 (defun opencode-question--on-replied (event)
-  "Handle a `question.replied' SSE EVENT.
+  "Handle a `question.replied' OpenCode-shaped EVENT.
 Dismiss the question popup if it matches the replied request.
 This handles the case where the question was answered elsewhere
 (e.g., in the TUI or another Emacs instance)."
@@ -572,7 +582,7 @@ This handles the case where the question was answered elsewhere
     (opencode-question--dismiss-if-matching request-id)))
 
 (defun opencode-question--on-rejected (event)
-  "Handle a `question.rejected' SSE EVENT.
+  "Handle a `question.rejected' OpenCode-shaped EVENT.
 Dismiss the question popup if it matches the rejected request.
 This handles the case where the question was rejected elsewhere
 (e.g., in the TUI or another Emacs instance)."

@@ -27,8 +27,6 @@
 
 (declare-function opencode-api-get "opencode-api" (path callback &optional query-params))
 (declare-function opencode-api-get-sync "opencode-api" (path &optional query-params))
-(declare-function opencode-agent--find-by-name "opencode-agent" (name))
-(declare-function opencode-agent--default-name "opencode-agent" ())
 
 ;;; --- Customization ---
 
@@ -170,6 +168,10 @@ The cache is invalidated by `%s'." doc-noun invalidate-fn)
 
 ;;; --- Cache invalidation ---
 
+(defvar opencode-api-cache--project-sessions (make-hash-table :test 'equal)
+  "Hash table: project-dir (string) → plist (:sessions :refreshing :callbacks).
+Single source of truth for per-project session lists.")
+
 (defun opencode-api-invalidate-all-caches ()
   "Invalidate all micro-caches.  Next access re-fetches from server.
 Called on server connect to ensure fresh data.
@@ -301,10 +303,6 @@ Called when session data is received from SSE events to keep cache fresh."
 ;; :refreshing — non-nil when an async fetch is in-flight
 ;; :callbacks  — list of pending callback functions queued during in-flight fetch
 
-(defvar opencode-api-cache--project-sessions (make-hash-table :test 'equal)
-  "Hash table: project-dir (string) → plist (:sessions :refreshing :callbacks).
-Single source of truth for per-project session lists.")
-
 (defun opencode-api-cache--ps-entry (project-dir)
   "Return or create the cache entry plist for PROJECT-DIR."
   (or (gethash project-dir opencode-api-cache--project-sessions)
@@ -377,18 +375,6 @@ Default      — return cache if available, kick off async refresh if empty."
 (defun opencode-api-cache-project-sessions-refreshing-p (project-dir)
   "Return non-nil if PROJECT-DIR session list fetch is in-flight."
   (plist-get (opencode-api-cache--ps-entry project-dir) :refreshing))
-
-;;; --- Agent validation (convenience) ---
-
-(defun opencode-api-cache-valid-agent-p (agent-name)
-  "Return non-nil if AGENT-NAME is a valid agent known to the server.
-Checks against the agent cache.  When the cache has not been populated
-yet (nil), returns non-nil — we cannot validate so we trust the name."
-  (let ((agents (opencode-api--agents :cache t)))
-    (or (null agents)                   ; cache not yet populated
-        (and (vectorp agents)
-             (seq-find (lambda (a) (string= (plist-get a :name) agent-name))
-                       agents)))))
 
 (provide 'opencode-api-cache)
 ;;; opencode-api-cache.el ends here

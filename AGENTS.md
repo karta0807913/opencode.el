@@ -57,9 +57,12 @@ emacs -Q -batch -L . -L test -l test/test-helper.el \
 ```
 opencode.el          Entry point, requires all modules, keymaps, defgroup
 opencode-server.el   Server subprocess lifecycle, health check, port parsing
-opencode-api.el      HTTP client (url.el), JSON parse/serialize, prompt body builder
+opencode-api.el      HTTP client (url.el), JSON parse/serialize, legacy request wrappers
 opencode-api-cache.el  Cache facade: micro-cache (agents/config/providers), session stale-on-timeout, startup-safe load/retry
-opencode-backend.el  Backend abstraction: registry, capability declarations, normalized session/message/part/event shapes
+opencode-prompt.el   Backend-neutral prompt intent and attachment decoding
+opencode-backend-core.el  Backend registry, capabilities, normalized shapes, metadata/session/command ports
+opencode-backend-opencode.el  OpenCode HTTP/cache adapter and request/event translation
+opencode-backend.el  Compatibility facade loading backend core + OpenCode adapter
 opencode-pi-rpc.el   Pi backend transport: `pi --mode rpc` subprocess, LF-only JSONL framing, request/response correlation, extension-UI replies
 opencode-pi.el       Pi backend adapter: message/event normalizers, RPC command mapping, conn registry, extension-UI->popup bridge, runtime event router, on-disk session enumeration, `opencode-pi` entry point
 opencode-pi-widget.el  Pi extension widget surface: keyed setWidget/setStatus replace-on-update model, GUI child frame / terminal bottom side-window (drives `/btw` output)
@@ -80,6 +83,18 @@ opencode-faces.el    All face definitions (inherit from standard Emacs faces)
 opencode-ui.el       Section system, navigation, read-only regions
 opencode-window.el   display-buffer rules (side, float, split, full)
 opencode-sidebar.el  Per-project session sidebar (treemacs-based, SSE-driven refresh)
+opencode-pipeline-store.el  Pipeline execution/session ownership registries
+opencode-pipeline-port.el  Pipeline-to-session/chat/backend integration boundary
+opencode-pipeline-runtime.el  Pipeline graph instantiation and transition engine
+opencode-pipeline-output.el  Lifecycle correlation and output fetch/retry
+opencode-pipeline-commands.el  Public start/stop/reset commands
+opencode-pipeline-view.el  Immutable pipeline presenter/view model
+opencode-pipeline-ui.el  Pipeline describe buffer/controller and text renderer
+opencode-pipeline-svg.el  Lazy-loaded SVG renderer
+opencode-workflow.el  Dynamic workflow submit flow, lint, defaults, artifacts, rerun
+opencode-workflow-rpc.el  JSON-string RPC facade for submit/status/stop
+opencode-workflow-bridge.el  Emacs bridge discovery file and heartbeat
+opencode-workflow-store.el  Workflow run source and metadata artifacts
 opencode-util.el     Shared helpers (time-ago, file-status-char, diff-stats, right-align, json-parse)
 opencode-log.el      Debug logging to *opencode: debug* buffer (leaf module, zero dependencies)
 ```
@@ -91,13 +106,13 @@ opencode-log.el      Debug logging to *opencode: debug* buffer (leaf module, zer
 │  opencode-api.el (HTTP Client)                              │
 │                                                             │
 │  Owns: HTTP request/response, JSON parse/serialize,         │
-│        URL construction, headers, error handling,           │
-│        prompt body builder                                  │
+│        URL construction, headers, error handling            │
 │                                                             │
 │  Requires opencode-api-cache.el (delegates all caching)     │
 │                                                             │
 │  Must NOT own: cache state, micro-cache definitions,        │
-│                cache invalidation, session cache             │
+│                cache invalidation, session cache,            │
+│                backend request translation                   │
 │                                                             │
 ├─────────────────────────────────────────────────────────────┤
 │  opencode-api-cache.el (Cache Facade)                       │
@@ -118,7 +133,6 @@ opencode-log.el      Debug logging to *opencode: debug* buffer (leaf module, zer
 │    opencode-api-cache-get-session (session-id callback)     │
 │    opencode-api-cache-put-session (session-id session)      │
 │    opencode-api-cache-invalidate-session (session-id)       │
-│    opencode-api-cache-valid-agent-p (agent-name)            │
 │    opencode-api--agents (&key block cache callback)         │
 │    opencode-api--server-config (&key block cache callback)  │
 │    opencode-api--providers (&key block cache callback)      │
@@ -146,7 +160,9 @@ and `opencode-chat-state.el` form a four-layer architecture:
 │  Must NOT own: any logic, SSE handling, UI rendering,       │
 │                or lifecycle decisions                        │
 │                                                             │
-│  Requires: opencode-api, opencode-agent, opencode-config    │
+│  Requires: opencode-agent, opencode-chat-resolve,           │
+│            opencode-domain; backend metadata is accessed     │
+│            through backend-core ports                        │
 │  Required by: chat.el, chat-input.el, chat-message.el       │
 └─────────────────────────────────────────────────────────────┘
 
@@ -203,30 +219,32 @@ and `opencode-chat-state.el` form a four-layer architecture:
 ├─────────────────────────────────────────────────────────────┤
 │  opencode-chat-message.el (Message Store + Renderer)        │
 │                                                             │
-│  Owns: parts, messages-end, streaming-msg-id,               │
-│        streaming-fontify-timer, streaming-region-start,      │
-│        diff-cache, diff-shown, section-overlay-map,          │
+│  Owns: parts, messages-end, diff-cache, diff-shown,          │
+│        section-overlay-map,                                  │
 │        current-message-id, child-parent-cache,               │
 │        tool-renderers                                        │
 │                                                             │
 │  Public API:                                                 │
-│    opencode-chat-message-insert (msg)                        │
-│    opencode-chat-message-append-delta (msg-id part-id delta) │
-│    opencode-chat-message-upsert-part (msg-id part)           │
-│    opencode-chat-message-clear-all ()                        │
-│    opencode-chat-message-clear-streaming ()                  │
+│    opencode-chat-message-upsert (msg-id data)                │
+│      → :inserted | :updated | :needs-refresh                 │
+│    opencode-chat-message-update-part (...)                   │
+│      → :streamed | :upserted | :rendered | :need-msg |       │
+│        :needs-refresh | nil                                  │
+│    opencode-chat-message-reset ()                            │
+│    opencode-chat-message-clear-all ()        (compat)        │
 │    opencode-chat-message-messages-end ()                     │
 │    opencode-chat-message-init-messages-end (pos)             │
 │    opencode-chat-message-invalidate-diffs ()                 │
 │    opencode-chat-message-prefetch-diffs (session-id)         │
-│    opencode-chat-message-child-parent-get (child-session-id) │
 │    opencode-chat-message-render-all (messages)               │
 │    opencode-chat-register-tool-renderer (tool-name fn)       │
 │                                                             │
 │  Internal: all opencode-chat--render-*, streaming,           │
 │            tool body renderers, format helpers                │
 │                                                             │
-│  Must NOT own: queued overlay, session state, SSE knowledge  │
+│  Must NOT own: queued overlay, session state, SSE knowledge, │
+│                or refresh scheduling.  Return                │
+│                `:needs-refresh' and let chat.el schedule.    │
 │  Does NOT require opencode-chat (no circular dependency)     │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -287,7 +305,7 @@ Position  Content                                    Markers & Overlays
 ────────  ─────────────────────────────────────────  ──────────────────────────
 1         \n                                         ← render-message leading \n
 2         ▼ You  14:30:25                            ┐ section overlay (type:message, id:msg_user1)
-          │ help me commit                           │ part marker (prt_user_text) → end of text
+          │ help me commit                           │ part range overlay (prt_user_text)
           │ _                                        │
           │                                          ┘
           ··········································  ← separator (dotted)
@@ -295,10 +313,10 @@ Position  Content                                    Markers & Overlays
           \n                                         ← render-message leading \n
           ▼ Assistant Agent claude-opus-4-6 14:30:28 ┐ section overlay (type:message, id:msg_asst1)
           │  ▶ bash ($ git status)  ⏳               │ ┐ section overlay (type:tool, id:prt_tool1)
-          │  [collapsed]                             │ ┘ part marker (prt_tool1) → end of tool
+          │  [collapsed]                             │ ┘ part range overlay (prt_tool1)
           │  _                                       │
           │                                          │
-          │  I'll help you commit. Let me check...   │ part marker (prt_text1) → end of text
+          │  I'll help you commit. Let me check...   │ part range overlay (prt_text1)
           │  ⬆3 ⬇12 · 1.2s                          │ ← footer (opencode-message-footer-line)
           │                                          ┘
 
@@ -329,17 +347,31 @@ Position  Content                                    Markers & Overlays
 
 | Marker | Insertion Type | Purpose |
 |--------|---------------|---------|
-| `messages-end` | `t` (temporarily `nil` during `message-insert`) | Boundary between messages and input area. `nil` during insert prevents collision with part markers |
+| `messages-end` | `t` (temporarily `nil` during `message-insert`) | Boundary between messages and input area. `nil` during insert keeps it at the old transcript end until rendering finishes |
 | `input-start` | default | Start of editable input region |
-| `parts[part-id]` | `t` | End of each part's rendered content; streaming deltas insert here and marker advances |
-| `streaming-region-start` | `nil` | Start of current streaming region (for deferred markdown fontification) |
+
+**Part range overlays:**
+- Every rendered part has a data range overlay stored as `:range-overlay`.
+- Range overlays use `front-advance=t`, `rear-advance=nil`, so adjacent
+  insertions do not silently change part ownership.
+- A streaming delta inserts at `overlay-end`; only that part's range is
+  then explicitly extended with `move-overlay`.
+- Tool/reasoning/subtask `opencode-section` overlays remain separate UI
+  overlays for collapse/navigation.
+- Reasoning sections use `front-advance=t`, `rear-advance=nil`, and are
+  explicitly extended with their range; `:grows` allows collapsing the
+  initially bodyless section without using rear advancement.
+- Non-text inline updates locate `(msg-id, part-id)` directly in the store
+  and replace the stored range.  The hot path must not call `overlays-in`
+  or scan/delete alleged duplicate sections; a dead stored range logs the
+  desync and returns `:needs-refresh`.
 
 **Section overlays** (`opencode-section` property):
 - Cover entire message or tool/part region
 - Used for collapse/expand (TAB) and O(1) lookup via `opencode-chat--section-overlay-map`
 - Nested: message overlay contains tool overlays
 
-**CRITICAL: `message-insert` marker dance** — When inserting a new message at `messages-end`, the function temporarily switches `messages-end` to `nil` insertion type. Without this, `messages-end` (type `t`) advances into the message body during rendering and collides with part markers (also type `t`). After rendering, `messages-end` is explicitly moved to `(point)` and restored to type `t`. This prevents streaming text from appearing below the input area.
+**CRITICAL: `message-insert` marker dance** — When inserting a new message at `messages-end`, the function temporarily switches `messages-end` to `nil` insertion type so it stays at the old transcript boundary while the message is drawn. After rendering, `messages-end` is explicitly moved to `(point)` and restored to type `t`. This prevents streaming text from appearing below the input area.
 
 ## Naming Convention
 
@@ -607,10 +639,13 @@ opencode-sse--process-line
 opencode-sse--dispatch-event (event-type, data-string)
     |  1. JSON parse data-string
     |  2. Unwrap global format: {directory, payload: {type, properties}} → {type, properties, directory}
-    |  3. run-hook-with-args 'opencode-sse-event-hook (catch-all)
-    |  4. Map type → specific hook via opencode-sse--hook-for-type
+    |  3. run-hook-with-args 'opencode-sse-event-hook-global (catch-all)
+    |  4. Map type → specific -global hook via opencode-sse--global-hook-for-type
+    |  5. opencode-event-dispatch routes handlers AND forwards the un-suffixed
+    |     opencode-sse-<type>-hook into the matching chat buffer as a
+    |     buffer-local hook (opencode-event--run-local-sse-hook)
     v
-opencode-sse-<type>-hook (GLOBAL hooks, e.g. opencode-sse-session-idle-hook)
+opencode-sse-<type>-hook-global (process context, e.g. opencode-sse-session-idle-hook-global)
     |
     |  Chat events:                    Permission/Question events:
     |  12 dispatch wrappers            Direct handlers (no buffer context needed)
@@ -626,7 +661,7 @@ opencode-chat--on-<type> (runs IN the chat buffer)
     |  buffer-local vars now accessible:
     |    opencode-chat--session-id  (filters: is this event for me?)  [chat.el]
     |    opencode-chat--busy        (busy/idle state)                 [chat.el]
-    |    opencode-chat--parts       (streaming marker hash table)     [chat-message.el]
+    |    opencode-chat--store       (message + part range overlays)   [chat-message.el]
     |    opencode-chat--messages-end (insertion point marker)         [chat-message.el]
     v
   Actions:
@@ -638,13 +673,13 @@ opencode-chat--on-<type> (runs IN the chat buffer)
     - on-session-updated → update session metadata, update session cache
     - on-session-diff    → schedule-refresh
     - on-session-error   → clear queued + pending-msg-ids, clear busy (unless MessageAbortedError)
-    - on-session-compacted → clear streaming state, immediate refresh (history rewrite)
+    - on-session-compacted → invalidate rendered state, immediate refresh (history rewrite)
     - on-server-instance-disposed → clear queued + pending-msg-ids; if busy: mark stale; if idle+visible: debounced 2s refresh; if hidden: mark stale
 ```
 
 **Key invariants:**
 - SSE uses curl subprocess, NOT url.el (url.el buffers the entire response)
-- ALL SSE hooks are GLOBAL (curl filter has no buffer context)
+- SSE hooks are two-tier: `opencode-sse-*-hook-global` run in process context for every event; the un-suffixed `opencode-sse-*-hook` names double as **chat-buffer-local hooks** — `opencode-event--run-local-sse-hook` forwards each event into the matching chat buffer (registry lookup by session-id) and runs listeners added with `add-hook ... nil t` there, exactly once
 - Chat handlers use O(1) registry lookup via `opencode--dispatch-to-chat-buffer`
 - Each chat handler filters by `opencode-chat--session-id` internally
 - `opencode--on-connected` (not `opencode-start`) triggers SSE connect
@@ -676,11 +711,11 @@ opencode-chat--on-<type> (runs IN the chat buffer)
        │   v
        │   STREAMING DELTA ROUTING (on-part-updated with delta field):
        │   │
-       │   ├─ Case 1: messages-end marker valid + part in hash table
-       │   │           → insert delta text at streaming marker (real-time)
+       │   ├─ Case 1: messages-end marker valid + part range exists
+       │   │           → insert at range end, then extend that overlay
        │   │
-       │   ├─ Case 2: messages-end marker valid + part NOT in hash table
-       │   │           → create new marker, insert, add to parts hash table
+       │   ├─ Case 2: messages-end marker valid + no part range
+       │   │           → create zero-width range, insert, extend it
        │   │
        │   └─ Case 3: messages-end marker nil (refresh in progress)
        │               → schedule-refresh (deferred, safe)
@@ -751,7 +786,7 @@ opencode-chat--on-<type> (runs IN the chat buffer)
   └──────────────────────────────────────────────────────┘
 
   SPECIAL EVENTS:
-  ├─ session.compacted   → clear streaming state, immediate refresh (history rewrite)
+  ├─ session.compacted   → invalidate rendered state, immediate refresh (history rewrite)
   ├─ session.deleted     → show deletion msg, disable input, refresh sidebar
   ├─ session.error       → show error in chat buffer (skip MessageAbortedError)
   ├─ server.instance.disposed → broadcast: clear ALL state, immediate refresh
@@ -787,6 +822,11 @@ opencode-chat--on-<type> (runs IN the chat buffer)
   │                           │ opencode-chat-message--max-session-depth │
   │                           │ hops; cycles are detected and broken.    │
   │ --section-overlay-map     │ part-id → overlay for O(1) lookup  (msg) │
+  │ --collapse-overrides      │ section-id → the user's TAB choice, (st.)│
+  │                           │ so a redraw does not revert it.  Written │
+  │                           │ from opencode-ui-section-toggled-        │
+  │                           │ functions; read by every renderer that   │
+  │                           │ creates a section.                       │
   └───────────────────────────┴──────────────────────────────────────────┘
 ```
 
@@ -974,7 +1014,6 @@ SSE dispatch uses two hash-table registries for O(1) buffer lookup:
 **Dispatch functions:**
 - `opencode--dispatch-to-chat-buffer (session-id handler event)` — O(1) lookup, single buffer
 - `opencode--dispatch-to-all-chat-buffers (handler event)` — iterates registered chat buffers only
-- `opencode--dispatch-to-sidebar-buffer (project-dir handler event)` — O(1) lookup, single buffer
 - `opencode--dispatch-to-all-sidebar-buffers (handler event)` — iterates registered sidebar buffers only
 
 **Fallback**: Dispatch wrappers in `opencode-chat.el` and `opencode-sidebar.el` include inline `(buffer-list)` fallback paths for graceful degradation when registry functions are not yet loaded.
@@ -1379,7 +1418,6 @@ Each child session has a `:parentID` field linking it to its parent.
 (opencode-chat--child-session-p)          ; Non-nil if buffer-local session has :parentID
 (opencode-chat--parent-session-id)        ; Returns :parentID from buffer-local session
 (opencode-chat--child-sessions session-id) ; Returns child sessions of SESSION-ID from server
-(opencode-chat--session-parent-id sid)    ; Fetches :parentID for SID via opencode-session-get
 ```
 
 ### Child Session Buffer
@@ -1470,8 +1508,7 @@ When a popup is answered, the buffer that owns the answer MUST purge duplicates 
 (defun opencode-popup--find-chat-buffer (request)
   ;; 1. Try exact match by :sessionID
   ;; 2. If not found, check opencode-chat-message-child-parent-get (in-memory cache)
-  ;; 3. Fall back to opencode-chat--session-parent-id (sync HTTP)
-  ;; 4. Return parent buffer if found
+  ;; 3. Return parent buffer if found
   ...)
 
 ;; opencode-chat--drain-popup-queue also matches child requests:
@@ -1488,7 +1525,6 @@ v Session: "Parent Task" (ses_abc...)
 > Session: "Other Task" (ses_def...)
 ```
 
-- `opencode-sidebar-session-limit` defcustom (default 100) controls max sessions: fetched
 - Root session list filters out child sessions (`seq-remove` by `:parentID`)
 - Child nodes expand to show their own file diffs
 
@@ -1498,7 +1534,7 @@ v Session: "Parent Task" (ses_abc...)
 
 23. **Child sessions are fully editable and support message sending** — Child sessions render the same input area as normal sessions and users can send messages to the sub-agent. They have an additional indicator line "Sub-agent session [Parent]" below the input, rendered by `opencode-chat--render-child-indicator`. The indicator uses text-property `read-only` to protect itself; the buffer itself is NOT `buffer-read-only`.
 24. **`opencode-chat-open` display-action is opt-in** — Callers that don't pass `display-action` (sidebar, session list) get the default `(pop-to-buffer buf)` behavior. Only navigation callers (task tool button, `[Parent]` button, `q` via `goto-parent`) pass `'replace`. Never change the default behavior.
-25. **`opencode-popup--find-chat-buffer` needs `declare-function`** — The popup module calls `opencode-chat--session-parent-id` (defined in `opencode-chat.el`) without requiring it. Add `(declare-function opencode-chat--session-parent-id "opencode-chat")` to `opencode-popup.el` to avoid byte-compile warnings without creating a circular require.
+25. **Popup routing must not perform synchronous HTTP** — Resolve child sessions through the in-memory child→parent cache.  On a cache miss, leave the request queued until asynchronous dispatch has enough routing information.
 
 26. **`opencode-chat--messages-end` must be nil during `render-messages` re-render** — The `render-edit-body` function calls `opencode-diff--fetch` → `opencode-api-get-sync` → `url-retrieve-synchronously`, which internally loops on `accept-process-output`. This allows the SSE curl process filter to fire DURING `render-messages`, causing `apply-streaming-delta` to run with a stale `messages-end` marker (pointing to position 1 after `erase-buffer`). Result: streaming text inserts after the input area. Fix: set `opencode-chat--messages-end` to nil immediately after `erase-buffer` in `render-messages`, BEFORE the rendering loop. This forces any re-entrant SSE delta to hit Case 3 (no marker → `schedule-refresh`) instead of inserting at a garbage position. The marker is properly re-created later at the correct position.
 
@@ -1510,11 +1546,11 @@ v Session: "Parent Task" (ses_abc...)
 
 30. **Async refresh needs a state machine, not three independent flags** — `opencode-chat--refresh` fires two chained async HTTP requests (messages → session → render). Without coordination, rapid SSE events (e.g. multiple `schedule-refresh` timers firing, `session.idle` + `session.compacted` arriving simultaneously) cause N overlapping request chains (2N HTTP requests racing), potentially rendering stale data over fresh data. Fix: a single buffer-local variable `opencode-chat--refresh-state` is a four-value state machine (`nil`, `'stale`, `'in-flight`, `'in-flight-pending`). All transitions go through `opencode-chat--mark-stale`, `opencode-chat--refresh-begin`, `opencode-chat--refresh-end`, and `opencode-chat--force-clear-refresh-guard` — **never** setq the var directly. `--refresh-begin` returns non-nil only when a new fetch should actually fire; `--refresh-end` returns non-nil when the pending flag requires a retry (at which point the caller re-invokes `--refresh`, which transitions `nil → in-flight`). At most two HTTP request chains can overlap (current + one retry). The state is hard-reset by `--force-clear-refresh-guard` in `on-session-idle`, `on-session-error`, `on-session-compacted`, and `on-server-instance-disposed` so a lost callback can never permanently lock out refreshes. The `schedule-refresh` debounce timer is the first line of defense (coalesces rapid events into one call); the state machine is the second (prevents overlapping HTTP chains when debounce isn't enough).
 
-31. **Agent cache is fetch-once, invalidate-on-SSE-only** — `opencode-agent.el` uses a manual cache (`opencode-agent--cache`) with NO TTL and NO periodic timer. The cache is populated on first access (`opencode-agent--ensure-cache`) and invalidated only by SSE rebootstrap (`opencode-agent-invalidate` called from `opencode-sse--do-rebootstrap` / `opencode-refresh`). All consumers (`opencode-api--fetch-agent-info`, `opencode-api--valid-agent-p`, `opencode-chat--cycle-agent`, agent color/list functions) read from cache — never HTTP. The removed `opencode-api--valid-agent-names` variable was a redundant parallel cache; all validation now goes through `opencode-agent--find-by-name`. Data flow: first connect → `ensure-cache` → `GET /agent` → cache populated. SSE rebootstrap → `invalidate` (sets cache nil) → next access re-fetches. All other access → cache hit (zero HTTP).
+31. **Agent cache is fetch-once, invalidate-on-SSE-only** — `opencode-agent.el` uses a manual cache (`opencode-agent--cache`) with NO TTL and NO periodic timer. The cache is populated on first access (`opencode-agent--ensure-cache`) and invalidated only by SSE rebootstrap (`opencode-agent-invalidate` called from `opencode-sse--do-rebootstrap` / `opencode-refresh`). Consumers such as `opencode-api--fetch-agent-info`, `opencode-chat--cycle-agent`, and agent color/list functions read from cache — never HTTP. The removed `opencode-api--valid-agent-names` variable was a redundant parallel cache; validation goes through `opencode-agent-valid-p` / `opencode-agent--find-by-name`. Data flow: first connect → `ensure-cache` → `GET /agent` → cache populated. SSE rebootstrap → `invalidate` (sets cache nil) → next access re-fetches. All other access → cache hit (zero HTTP).
 
 32. **Refresh must skip during busy state** — `opencode-chat--refresh` fetches `GET /session/:id/message` which is slow when the server is actively streaming (it waits for the current tool to finish). Calling refresh during busy state freezes Emacs for seconds. Fix: `opencode-chat--refresh` checks `opencode-chat--busy` first. If busy, it calls `(opencode-chat--mark-stale)` which sets `opencode-chat--refresh-state` to `'stale` and returns immediately. The deferred refresh happens on `session.idle` (via `--force-clear-refresh-guard` + a normal refresh call). This busy guard also protects against `server.instance.disposed` events that arrive mid-streaming — the disposed handler preserves the busy flag so the subsequent rebootstrap refresh hits the guard.
 
-33. **Popup `find-chat-buffer` must use child-parent cache, not sync HTTP** — When a permission/question arrives for a child session that has no open buffer, `opencode-popup--find-chat-buffer` needs the parent session ID. Uses `opencode-chat-message-child-parent-get` (in-memory cache lookup via `opencode-chat-message.el`, populated by task tool rendering) first. Only falls back to `opencode-chat--session-parent-id` (synchronous HTTP) on cache miss. The cache is buffer-local on the parent chat buffer, owned by the message module.
+33. **Popup `find-chat-buffer` must use child-parent cache, not sync HTTP** — When a permission/question arrives for a child session that has no open buffer, `opencode-popup--find-chat-buffer` resolves the root through `opencode-domain-find-root-session`.  On a cache miss it returns nil so the popup remains queued until asynchronous dispatch provides routing data.
 
 34. **SSE rebootstrap must not issue sync HTTP** — `opencode-sse--do-rebootstrap` originally called `opencode-agent-fetch` (sync `GET /agent`) during SSE event handling. Since the SSE process filter runs inside `accept-process-output`, a sync HTTP call blocks Emacs until completion. Fix: call `opencode-agent-invalidate` (sets cache to nil, zero cost) instead. Lazy re-fetch happens on next access via `opencode-agent--ensure-cache`. Also call `opencode-chat--refresh` directly (which has the busy guard) instead of `schedule-refresh` (debounced timer that bypasses the guard).
 
@@ -1524,7 +1560,7 @@ v Session: "Parent Task" (ses_abc...)
 
 37. **Tests MUST NOT make real HTTP/network calls** — Any test that calls functions which internally perform HTTP requests (e.g. `opencode-server--stop` sends `POST /global/dispose`) MUST stub the network layer with `cl-letf`. A test that sets `opencode-server--port` to 4096 and calls `opencode-server--stop` without stubbing `url-retrieve-synchronously` will send a real `POST http://127.0.0.1:4096/global/dispose` — **killing any running OpenCode server**. The 5-second test duration is the HTTP timeout, not slow logic. Fix: wrap with `(cl-letf (((symbol-function 'url-retrieve-synchronously) (lambda (&rest _) nil))) ...)`. Audit checklist for new tests: grep for `url-retrieve`, `url-retrieve-synchronously`, `make-network-process`, `open-network-stream`, and any function that internally calls these (like `opencode-server--stop`, `opencode-api--request`). If found without a stub, the test is dangerous.
 
-38. **Message-level state lives in `opencode-chat-message.el`, not `opencode-chat.el`** — After the extraction refactor, all message rendering state (`--store`, `--messages-end`, `--diff-cache`, `--diff-shown`, `--section-overlay-map`, `--current-message-id`, `--streaming-msg-id`, `--streaming-fontify-timer`, `--streaming-region-start`, `--child-parent-cache`, `--tool-renderers`) is defined in `opencode-chat-message.el`. Chat.el accesses these through the public API (`opencode-chat-message-*` functions). Do NOT add `defvar-local` for these vars back into chat.el — they are available via `(require 'opencode-chat-message)`. The only streaming var that stays in chat.el is `--streaming-assistant-info` (SSE routing state, not message state). Similarly, all input-related state (`--input-start`, `--input-history`, `--input-history-index`, `--input-history-saved`, `--mention-cache`) lives in `opencode-chat-input.el`. **The `--store` hash table is the single source of truth for a message** — each entry is a plist `(:msg MSG :overlay OV :parts PARTS-HASH :diff DIFF)`, and `opencode-chat-message-info' / `opencode-chat-message-sorted-ids' traverse it for cold-start operations like `opencode-chat--recompute-cached-tokens-from-store' (O(N) in messages — use the `-from-event' variant for per-SSE updates).
+38. **Message-level state lives in `opencode-chat-message.el`, not `opencode-chat.el`** — After the extraction refactor, all message rendering state (`--store`, `--messages-end`, `--diff-cache`, `--diff-shown`, `--section-overlay-map`, `--current-message-id`, `--child-parent-cache`, `--tool-renderers`) is defined in `opencode-chat-message.el`. Chat.el accesses these through the public API (`opencode-chat-message-*` functions). Do NOT add `defvar-local` for these vars back into chat.el — they are available via `(require 'opencode-chat-message)`. Every part stores a `:range-overlay`; streaming inserts at its end and explicitly extends only that range. The old message/part IDs and region-start marker used by deferred fontification were removed after `jit-lock` made them dead state. The only streaming var that stays in chat.el is `--streaming-assistant-info` (SSE routing state, not message state). Similarly, all input-related state (`--input-start`, `--input-history`, `--input-history-index`, `--input-history-saved`, `--mention-cache`) lives in `opencode-chat-input.el`. **The `--store` hash table is the single source of truth for a message** — each entry is a plist `(:msg MSG :overlay OV :parts PARTS-HASH :diff DIFF)`, with each part entry holding `:type`, `:range-overlay`, and optional collapsible UI `:overlay`. `opencode-chat-message-info' / `opencode-chat-message-sorted-ids' traverse the message entries for cold-start operations like `opencode-chat--recompute-cached-tokens-from-store' (O(N) in messages — use the `-from-event' variant for per-SSE updates).
 
 39. **@-mention `search-backward "@"` must skip existing chip overlays** — Both `mention-capf` and `mention-exit` search backward for the `@` character that triggered the current completion. If an earlier `@mention` chip exists in the input area (e.g. `@test/`), a naive `(search-backward "@")` finds the `@` inside the chip instead of the one the user just typed. This causes the second chip to cover the wrong region, produce incorrect text (e.g. `test/fixtures/` instead of `@test/fixtures/`), or fail entirely. Fix: use `opencode-chat--search-backward-at-sign` which loops `search-backward "@"` and skips positions covered by an `opencode-mention` overlay. The helper is used in both `mention-capf` (to find the CAPF trigger point) and `mention-exit` (to find where to create the chip). Scenario test: `opencode-scenario-mention-sequential-folder-chips` verifies two sequential folder mentions each produce their own chip with correct text.
 
@@ -1541,6 +1577,16 @@ v Session: "Parent Task" (ses_abc...)
 45. **`opencode-popup--find-chat-buffer` must prefer `current-buffer`** — When `--show` is called from `--show-next` or `--drain-queue`, the current buffer IS the target (popup events are dispatched per-buffer, pending queues are buffer-local).  Re-looking-up by `:sessionID` in the request finds the CHILD session's buffer — even when the popup was dispatched to the PARENT buffer — causing the popup to render in the wrong place or silently fail.  Fix: `find-chat-buffer` checks if `current-buffer` is a chat buffer first (via `opencode-chat--state` being non-nil) and returns it directly; only falls back to session-id lookup when called outside a chat buffer context (standalone show, tests, etc.).
 
 46. **`url-request-data` and every `url-request-extra-headers` value MUST be unibyte (Bug#23750)** — `url-http-create-request' builds the outgoing request by `concat'ing the header block with `url-http-data' and then asserts `(= (string-bytes request) (length request))'.  The assertion is a proxy for "this string is unibyte".  If ANY piece — a header value, the body, a user-agent fragment — is multibyte, `concat' promotes the whole request to multibyte, the byte/length counts disagree, and url.el signals `"Multibyte text in HTTP request"'.  A previous workaround escaped every non-ASCII char in the JSON body as `\\uXXXX` via `opencode-api--json-escape-non-ascii', which bloated CJK payloads ~10× and left multibyte header values (e.g. `X-OpenCode-Directory: /Users/项目`) still broken.  The canonical fix lives in `opencode-api.el`: a single `opencode-api--to-unibyte' helper runs `encode-coding-string ... 'utf-8 t' iff the input is multibyte (unibyte inputs pass through untouched).  `opencode-api--build-headers' coerces EVERY header value through it; `opencode-api--request' coerces the serialized body (which is already unibyte from `json-serialize', but the belt-and-braces call costs nothing).  `json-serialize' itself is documented to return a unibyte UTF-8 byte sequence — do NOT add another escape layer.  Guarded by `opencode-api-to-unibyte-idempotent', `opencode-api-json-serialize-returns-unibyte-utf8', `opencode-api-headers-values-are-unibyte', and the end-to-end `opencode-api-request-survives-url-http-create-request' which feeds a multibyte directory header through the real `url-http-create-request'.
+
+47. **Collapse state must be keyed by section id, not held on the overlay** — A section overlay dies with the text it covers, and the transcript is redrawn constantly: a tool section is discarded and re-rendered on every status change (`--replace-section`), and `render-all` rebuilds every overlay on each refresh.  Anything remembered only on the overlay is therefore lost, which made the user's TAB choice revert to the renderer's `:collapsed-p` default seconds after they made it.  `opencode-ui--toggle-section` runs `opencode-ui-section-toggled-functions` with the section plist and the new state; `opencode-chat--record-collapse-override` stores it in the buffer-local `collapse-overrides` table (state slot) keyed by section id.  Every renderer that creates a section resolves its initial state through `opencode-chat--section-collapsed-p (ID DEFAULT)` — do this BEFORE drawing the header, since the header's ▶/▼ icon has to match.  Two corollaries: a section with no body yet still collapses when it is one that grows into itself (`:rear-advance`, i.e. a reasoning section the user folds away before its first delta) but NOT when it is simply bodyless and complete (a subtask with no prompt, which would then advertise a `[collapsed]` body that can never appear); and expanding a section must leave sections nested inside it alone (`opencode-ui--recollapse-nested`) — force-opening them desyncs the overlay from the recorded choice, so the inner section looks open until its next redraw snaps it shut.
+
+48. **A collapsed section must be re-collapsed after any in-place redraw of its header or body** — `--update-message-inline` replaces the header line, which carries both the ▶ icon and the `[collapsed]` indicator, and the footer line, which sits inside the hidden body.  The overlay stays collapsed while the header claims otherwise, so the next TAB expands when the user meant to collapse.  `opencode-ui--collapse-section` is idempotent (it skips the indicator when one is already present) precisely so a caller can re-run it after such a redraw.
+
+49. **Streamed deltas do not inherit `invisible`** — `insert` (as opposed to `insert-and-inherit`) copies no text properties from its neighbours, so a delta appended into a section the user collapsed mid-stream reappears one chunk at a time inside a section that is supposedly hidden.  `--insert-streaming-delta` checks `opencode-ui--in-collapsed-section-p` at the insertion point and re-applies `invisible 'opencode-section` over the new text.
+
+50. **Replacing text at a section overlay's tail moves it OUT of the overlay** — Section overlays are created with `rear-advance` nil, so an insertion at `overlay-end` lands outside.  `--update-message-inline` deleted the footer through to `(overlay-end ov)`, which shrank the overlay to the footer's start, and the replacement footer then landed outside the message.  Two things break: collapsing the message leaves the token line visible (and, because every newline between them is hidden, glued to the header line), and `--message-insert-pos` now returns the overlay's end, so every part rendered afterwards lands outside the message too.  After any tail replacement, re-extend explicitly: `(when (< (overlay-end ov) (point)) (move-overlay ov (overlay-start ov) (point)))`.
+
+51. **Excluding an edit from `buffer-undo-list` invalidates the entries already in it** — Emacs keeps undo positions consistent only because normally *every* edit is recorded; it adjusts markers on insertion, never undo entries.  Transcript redraws bind `buffer-undo-list` to t (they are not user edits), so each one leaves every recorded input-area position N characters too early — and the next `undo` rewrites whatever transcript now occupies those positions.  A single streamed delta is enough; the symptom is `undo` gouging a run of characters out of the middle of a message.  `opencode-chat--in-transcript` measures the size change and repairs the list through `opencode-chat--shift-undo-list`.  The shift is exact (every transcript edit is before `input-start`, every recorded edit after it), it is an **unwind** form so a renderer that mutates and then signals cannot skip it, nesting is guarded by `opencode-chat--transcript-depth` so the outermost mutation shifts once, and an entry shape that cannot be rewritten discards the whole history (validated in a first pass, so a rejected entry cannot leave the list half-shifted).  The list is rewritten **through its existing cons cells**: `pending-undo-list` is a tail of it and `undo-equiv-table` is keyed by tails, so rebuilding it with `mapcar` strands an undo in progress and drops every redo record.  Mutating in place is also what makes it unnecessary to clear `last-command` / `pending-undo-list` — those are global command-loop state, and this runs from a process filter while the user is usually editing another buffer entirely.  Any new code that mutates the transcript MUST go through `--in-transcript` rather than hand-binding `inhibit-read-only` + `buffer-undo-list`.
 
 ## Debug Logging
 All debug tracing goes to a dedicated `*opencode: debug*` buffer, NOT `*Messages*`.
@@ -1689,7 +1735,7 @@ M-x opencode-scenario-replay-file    ;; with :wait pauses
 **What gets stubbed** (via `opencode-scenario--with-stubs` macro):
 `opencode-chat--refresh`, `opencode-chat--schedule-refresh`,
 `opencode-chat--render-footer-info`, `opencode-chat--header-line`,
-`opencode-chat--drain-popup-queue`, `opencode-chat--schedule-streaming-fontify`,
+`opencode-chat--drain-popup-queue`,
 `opencode--register-chat-buffer`, `opencode--deregister-chat-buffer`,
 `opencode-agent--default-name`, `opencode-api-get`, `opencode-api-post`.
 
@@ -1796,16 +1842,14 @@ chat.el registers:       (add-hook 'opencode-chat-on-message-sent-hook
 The hook is buffer-local (`nil t`), registered in `opencode-chat-mode`.
 This pattern lets input fire events without knowing who handles them.
 
-### Declare-function (leaf → parent)
+### Leaf modules report semantic status upward
 
-When a leaf module needs to call a parent function without requiring it:
-
-```elisp
-;; In opencode-chat-message.el (leaf):
-(declare-function opencode-chat--schedule-refresh "opencode-chat" ())
-;; Can now call (opencode-chat--schedule-refresh) — no require needed.
-;; Byte-compiler won't warn. Runtime resolves via autoload or prior require.
-```
+Leaf modules must not call parent controller functions just to trigger a
+state transition.  In particular, `opencode-chat-message.el` does not declare
+or call `opencode-chat--schedule-refresh`; message upsert/update APIs return
+`:needs-refresh`, and `opencode-chat.el` interprets that status.  Async tool
+rendering uses the buffer-local `opencode-tool-render-refresh-callback`, which
+chat.el binds to its scheduler.
 
 ### Require chain (parent → child)
 
@@ -2044,7 +2088,7 @@ Query params are stripped before matching.
 
 3. **JSON `false` → `:false`, not `nil`** — `(not :false)` is nil (truthy!). Use `(eq val :false)` or `(eq val t)`.
 
-4. **`render-messages` must clear streaming state** — After `erase-buffer`, call `(opencode-chat-message-clear-all)` which nils messages-end, clears the parts hash table, cancels streaming timers, and resets section overlay map. Old markers are invalid. The message module owns all cleanup; chat.el just calls the single API function.
+4. **`render-messages` must clear rendered message state** — After transcript deletion, call `(opencode-chat-message-reset)` which nils messages-end, deletes stored message/part overlays, and clears the store. The message module owns all cleanup; chat.el just calls the semantic reset API.
 
 5. **`messages-end` marker must survive input area rendering** — Create with `nil` insertion type, render input area, THEN switch to `t`. Otherwise the marker advances past the input area and streaming/optimistic inserts go to the wrong place.
 
@@ -2064,7 +2108,7 @@ Query params are stripped before matching.
 
 13. **SSE connect must happen on EVERY server connection, not just `opencode-start`** — Users can connect via `opencode-server-port` (connect mode) without calling `opencode-start`. SSE connect lives in `opencode--on-connected` (fired by `opencode-server-connected-hook`), NOT as a one-shot hook added in `opencode-start`. If SSE only connects in `opencode-start`, connect-mode users get no streaming.
 
-14. **SSE hooks must be GLOBAL, not buffer-local** — The curl SSE process filter runs outside any buffer context. Buffer-local hooks (`add-hook ... nil t`) will NEVER fire from SSE dispatch. Use global hooks with registry-based dispatch (`opencode--dispatch-to-chat-buffer` for O(1) lookup by session-id, with inline buffer-list fallback). Each chat handler filters by `opencode-chat--session-id` internally.
+14. **SSE hooks are two-tier: `-global` variants run in process context; un-suffixed names are chat-buffer-local** — Every hook in the table above has a `-global` twin (e.g. `opencode-sse-permission-asked-hook-global`). The `-global` hooks fire in the curl process filter context for every event — add with plain `add-hook`, filter by session yourself. The un-suffixed hooks (`opencode-sse-permission-asked-hook`) are the **buffer-local bridge**: after global dispatch, `opencode-event--run-local-sse-hook` looks up the chat buffer registered for the event's session-id and runs that buffer's local listeners (`add-hook ... nil t`) inside it, exactly once (no double-run when dispatch happens with the chat buffer current). This is the supported idiom for session-scoped listeners such as auto-approval handlers installed from a stage's `:on-create`. Internal chat handlers still use `opencode--dispatch-to-chat-buffer` (O(1) registry lookup) and filter by `opencode-chat--session-id`. Pinned by `opencode-sse-after-dispatch-runs-chat-local-specific-hook`, `opencode-sse-process-dispatch-forwards-chat-local-hook`, and `opencode-sse-process-dispatch-in-chat-runs-local-hook-once`.
 
 15. **`opencode-chat-mode` must NOT derive from `special-mode`** — `special-mode` binds all printable keys to suppress `self-insert-command`. Even with `buffer-read-only nil`, users cannot type in the input area because `special-mode-map` intercepts every letter. Derive from `nil` (fundamental) and manage read-only via text properties.
 
@@ -2098,7 +2142,7 @@ Query params are stripped before matching.
 | `session.idle` | (deprecated, handled same as status.idle) | Clear busy, schedule refresh | ✅ Correct (kept for compat) |
 | `session.error` | Show toast (skip MessageAbortedError) | Show error in chat buffer | ✅ Implemented |
 | `session.diff` | Update diff store | Schedule refresh (diff rendering) | ✅ Correct |
-| `session.compacted` | Refresh messages for session | Clear streaming state, immediate refresh (history rewrite) | ✅ Implemented |
+| `session.compacted` | Refresh messages for session | Invalidate rendered state, immediate refresh (history rewrite) | ✅ Implemented |
 | `message.updated` | Update message in store | Schedule refresh | ✅ Correct |
 | `message.part.updated` | Update part, handle streaming delta | Insert streaming text (delta); finalized text/reasoning are no-ops; tool/step parts schedule refresh | ✅ Correct |
 | `message.removed` | Remove message from store | Schedule refresh | ✅ Implemented |

@@ -11,6 +11,7 @@
 
 (require 'ert)
 (require 'test-helper)
+(require 'opencode-backend-opencode)
 (require 'opencode-diff)
 
 (defvar opencode-default-directory)

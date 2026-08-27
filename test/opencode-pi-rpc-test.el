@@ -50,7 +50,13 @@ so tests can feed bytes and simulate exit.  Cleans up CONN-VAR after BODY."
              (progn ,@body)
            (when (opencode-pi-conn-work-buffer ,conn-var)
              (when (buffer-live-p (opencode-pi-conn-work-buffer ,conn-var))
-               (kill-buffer (opencode-pi-conn-work-buffer ,conn-var)))))))))
+                (kill-buffer (opencode-pi-conn-work-buffer ,conn-var)))))))))
+
+(ert-deftest opencode-pi-rpc-connection-freezes-cwd ()
+  "The connection records the subprocess working directory."
+  (let ((expected (file-name-as-directory (expand-file-name default-directory))))
+    (opencode-pi-rpc-test--with-conn conn
+      (should (equal expected (opencode-pi-conn-cwd conn))))))
 
 (defun opencode-pi-rpc-test--feed (conn &rest chunks)
   "Feed CHUNKS (raw strings) to CONN's captured filter in order."

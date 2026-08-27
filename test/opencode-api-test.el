@@ -405,7 +405,12 @@ Callers must pass explicit model — there is no global fallback."
     (should (= (length parts) 2))
     (should (string= (plist-get (aref parts 0) :type) "text"))
     (should (string= (plist-get (aref parts 1) :type) "file"))
-    (should (string= (plist-get (aref parts 1) :mime) "image/png"))))
+    (should (string= (plist-get (aref parts 1) :mime) "image/png"))
+    (should (string= (plist-get (aref parts 1) :url) "data:image/png;base64,abc"))
+    ;; The server's FilePartSource union only accepts file/symbol/resource
+    ;; sources; a `data' source is rejected with HTTP 400.  Image parts must
+    ;; carry the payload in the data URL and omit :source entirely.
+    (should-not (plist-member (aref parts 1) :source))))
 
 (ert-deftest opencode-api-prompt-body-messageid-included ()
   "Verify :messageID is included in prompt body when message-id is provided."
@@ -446,6 +451,72 @@ Callers must pass explicit model — there is no global fallback."
   (let* ((msg-id (opencode-util--generate-id "msg"))
          (body (opencode-api--prompt-body "hello" nil nil nil nil nil nil msg-id)))
     (should (string-prefix-p "msg_" (plist-get body :messageID)))))
+
+(ert-deftest opencode-prompt-intent-opencode-body-parity ()
+  "Prompt intents translate to the same OpenCode body as the legacy wrapper.
+This keeps `opencode-api--prompt-body' as compatibility only while new
+senders pass intents to backends."
+  (let* ((mentions (list (list :type 'file
+                               :name "foo.el"
+                               :path "/tmp/foo.el"
+                               :start 0 :end 7)))
+         (images (list (list :data-url "data:image/png;base64,abc"
+                             :mime "image/png"
+                             :filename "test.png")))
+         (msg-id "msg_cb28a34c5000breYcI8NbRJr6p")
+         (context (list :filename "/tmp/foo.el"))
+         (legacy (cl-letf (((symbol-function 'opencode-util--generate-id)
+                            (lambda (_prefix) "prt_same")))
+                   (opencode-api--prompt-body
+                    "@foo hi" "build" "m" "p" "variant"
+                    mentions images msg-id context)))
+         (intent (opencode-prompt-intent-create
+                  :text "@foo hi"
+                  :agent "build"
+                  :model-id "m"
+                  :provider-id "p"
+                  :variant "variant"
+                  :mentions mentions
+                  :images images
+                  :message-id msg-id
+                  :context context))
+          (translated (cl-letf (((symbol-function 'opencode-util--generate-id)
+                                 (lambda (_prefix) "prt_same")))
+                        (opencode-backend-opencode-intent-body intent))))
+    (should (equal translated legacy))))
+
+(ert-deftest opencode-prompt-domain-has-no-wire-translators ()
+  "Prompt domain owns intent data, not backend wire schemas."
+  (let ((source (with-temp-buffer
+                  (insert-file-contents "opencode-prompt.el")
+                  (buffer-string))))
+    (should-not (string-match-p "opencode-body" source))
+    (should-not (string-match-p "pi-message" source))
+    (should-not
+     (string-match-p "mimeType\\|mediaType\\|messageID" source))))
+
+(ert-deftest opencode-api-prompt-compat-does-not-require-adapter ()
+  "The legacy prompt wrapper depends on shaping, not the full adapter."
+  (let ((source (with-temp-buffer
+                  (insert-file-contents "opencode-api.el")
+                  (buffer-string))))
+    (should
+     (string-match-p
+      "(require 'opencode-backend-opencode-prompt)" source))
+    (should-not
+     (string-match-p
+      "(require 'opencode-backend-opencode)" source))))
+
+(ert-deftest opencode-prompt-shaping-leaf-has-no-http-dependency ()
+  "OpenCode prompt shaping must remain independent of HTTP and adapters."
+  (let ((source (with-temp-buffer
+                  (insert-file-contents
+                   "opencode-backend-opencode-prompt.el")
+                  (buffer-string))))
+    (should-not (string-match-p "(require 'opencode-api)" source))
+    (should-not
+     (string-match-p
+      "(require 'opencode-backend-opencode)" source))))
 
 ;;; --- Response buffer edge cases ---
 

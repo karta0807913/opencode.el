@@ -13,8 +13,7 @@
 
 (require 'diff-mode)
 (require 'seq)
-(require 'opencode-api)
-(require 'opencode-backend)
+(require 'opencode-backend-core)
 (require 'opencode-ui)
 (require 'opencode-faces)
 (require 'opencode-log)
@@ -40,6 +39,9 @@ When non-nil, diffs are scoped to this message.")
 
 (defvar-local opencode-diff--diffs nil
   "Vector of diff plists for the current buffer.")
+
+(defvar-local opencode-diff--backend 'opencode
+  "Backend owning the current diff session.")
 
 ;;; --- Keymap ---
 
@@ -75,7 +77,8 @@ to preserve custom face names in text properties.
   "Fetch file diffs for SESSION-ID, optionally scoped to MESSAGE-ID.
 Returns a vector of diff plists, or nil on error."
   (condition-case err
-      (opencode-backend-get-diff-sync session-id message-id)
+      (opencode-backend-get-diff-sync
+       session-id message-id opencode-diff--backend)
     (error
      (message "Failed to fetch diffs: %s" (error-message-string err))
      nil)))
@@ -184,20 +187,6 @@ FILE-PATH is stored as a text property on each line."
       (opencode-diff--render))
     (display-buffer buf)))
 
-(defun opencode-diff--open-for-message (session-id message-id)
-  "Open a diff buffer for SESSION-ID scoped to MESSAGE-ID."
-  (let ((buf (get-buffer-create "*opencode: diff*"))
-        (project-root opencode-default-directory))
-    (with-current-buffer buf
-      (opencode-diff-mode)
-      (when project-root
-        (setq default-directory (file-name-as-directory project-root)))
-      (setq opencode-diff--session-id session-id)
-      (setq opencode-diff--message-id message-id)
-      (setq opencode-diff--diffs (opencode-diff--fetch session-id message-id))
-      (opencode-diff--render))
-    (display-buffer buf)))
-
 ;;; --- Interactive commands ---
 
 (defun opencode-diff--revert ()
@@ -213,9 +202,9 @@ Requires a message ID to be set."
         (let ((revert-body (list :messageID opencode-diff--message-id :partID "")))
           (opencode--debug "opencode-diff: reverting sid=%s body=%S"
                    opencode-diff--session-id revert-body)
-          (opencode-api-post-sync
-           (format "/session/%s/revert" opencode-diff--session-id)
-           revert-body)
+          (opencode-backend-revert-session
+           opencode-diff--session-id opencode-diff--message-id
+           opencode-diff--backend)
           (opencode--debug "opencode-diff: revert succeeded")
           (opencode-diff--refresh))
       (error

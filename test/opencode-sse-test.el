@@ -185,6 +185,31 @@ Integration — validates the full parse→dispatch→hook pipeline works."
       (remove-hook 'opencode-sse-message-part-updated-hook-global
                    (lambda (event) (setq received event))))))
 
+(ert-deftest opencode-sse-runs-public-hooks-and-canonical-router-once ()
+  "Native SSE hooks keep original event shape while canonical routing runs once."
+  (let ((opencode-sse--current-event nil)
+        (opencode-sse--last-event-time nil)
+        public-event
+        routed)
+    (cl-letf (((symbol-function 'opencode-event-dispatch)
+               (lambda (backend-event legacy-event)
+                 (push (list backend-event legacy-event) routed))))
+      (add-hook 'opencode-sse-session-status-hook-global
+                (lambda (event) (setq public-event event)))
+      (unwind-protect
+          (progn
+            (opencode-sse--process-line "event: session.status")
+            (opencode-sse--process-line
+             "data: {\"type\":\"session.status\",\"properties\":{\"sessionID\":\"ses_1\",\"status\":{\"type\":\"busy\"}}}")
+            (opencode-sse--process-line "")
+            (should public-event)
+            (should (plist-get public-event :backend-event))
+            (should (= 1 (length routed)))
+            (should (eq public-event (cadar routed)))
+            (should (equal "session.status" (plist-get (caar routed) :type))))
+        (remove-hook 'opencode-sse-session-status-hook-global
+                     (lambda (event) (setq public-event event)))))))
+
 ;;; --- Process filter: partial data ---
 
 (ert-deftest opencode-sse-filter-handles-complete-chunk ()

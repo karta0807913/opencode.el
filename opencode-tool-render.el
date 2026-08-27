@@ -35,7 +35,7 @@
 (require 'seq)
 (require 'json)
 (require 'opencode-domain)
-(require 'opencode-backend)
+(require 'opencode-backend-core)
 (require 'opencode-faces)
 (require 'opencode-diff)
 (require 'opencode-todo)
@@ -48,7 +48,10 @@
 (declare-function opencode-chat--diff-cache "opencode-chat-state" ())
 (declare-function opencode-chat--diff-shown "opencode-chat-state" ())
 (declare-function opencode-chat--current-message-id "opencode-chat-state" ())
-(declare-function opencode-chat--schedule-refresh "opencode-chat" ())
+(defvar-local opencode-tool-render-refresh-callback nil
+  "Function called when an async tool render update needs a chat refresh.
+The chat controller binds this buffer-locally.  Tool rendering must not
+call upward into `opencode-chat--schedule-refresh' directly.")
 (declare-function opencode-chat--backend "opencode-chat-state" ())
 
 (defvar opencode-chat-message-file-map)
@@ -157,10 +160,6 @@ accepting (INPUT OUTPUT METADATA)."
 (defun opencode-chat--default-tool-entry (tool-name)
   "Return the default renderer entry for TOOL-NAME."
   (assoc tool-name opencode-chat-tool-renderers))
-
-(defun opencode-chat--builtin-tool-p (tool-name)
-  "Return non-nil if TOOL-NAME has a built-in default renderer."
-  (and (opencode-chat--default-tool-entry tool-name) t))
 
 (defun opencode-chat--tool-status-phase (status)
   "Map tool STATUS string to a renderer phase symbol."
@@ -356,7 +355,7 @@ Returns a concise human-readable string, or nil."
 (defun opencode-chat--tool-arg-summary (args-json)
   "Extract a short summary from ARGS-JSON string."
   (when (and args-json (stringp args-json) (not (string-empty-p args-json)))
-    (condition-case nil
+    (condition-case err
         (let ((args (json-parse-string args-json :object-type 'plist)))
           (or (plist-get args :filePath)
               (plist-get args :file_path)
@@ -364,7 +363,11 @@ Returns a concise human-readable string, or nil."
               (plist-get args :path)
               (plist-get args :query)
               (truncate-string-to-width args-json 40)))
-      (error (truncate-string-to-width args-json 40)))))
+      ;; Tool arguments may be incomplete while streaming; raw text is the
+      ;; useful fallback, and logging every partial JSON parse would be noisy.
+      (error
+       (ignore err)
+       (truncate-string-to-width args-json 40)))))
 
 ;;; --- Shared output rendering ---
 
@@ -628,8 +631,9 @@ asynchronously if cache is missing, avoiding main-thread blocking."
              (remhash "__fetching__" (opencode-chat--diff-cache))
              (when-let* ((body (plist-get response :body)))
                (when (vectorp body)
-                 (puthash "__session__" body (opencode-chat--diff-cache))
-                  (opencode-chat--schedule-refresh))))))
+                  (puthash "__session__" body (opencode-chat--diff-cache))
+                  (when opencode-tool-render-refresh-callback
+                    (funcall opencode-tool-render-refresh-callback)))))))
        nil
        (when (fboundp 'opencode-chat--backend) (opencode-chat--backend))))
     (let ((file-diff (when (and path diffs (length> diffs 0))

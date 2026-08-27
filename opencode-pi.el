@@ -36,11 +36,14 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'seq)
 (require 'subr-x)
 (require 'opencode-util)
-(require 'opencode-backend)
+(require 'opencode-backend-core)
+(require 'opencode-event)
 (require 'opencode-pi-rpc)
 (require 'opencode-pi-widget)
+(require 'opencode-prompt)
 
 (defcustom opencode-pi-session-dir
   (expand-file-name "~/.pi/agent/sessions/")
@@ -119,20 +122,24 @@ Returns PARTS (mutated in place).  Matches by `toolCallId' == part :callID."
 
 (defun opencode-pi--message-id (message index)
   "Return a stable id for Pi MESSAGE at position INDEX.
-Pi messages have no server id; synthesize a deterministic one from role,
-timestamp, and INDEX so re-renders are stable."
-  (format "pimsg-%d-%s-%s"
-          index
-          (or (plist-get message :role) "x")
-          (or (plist-get message :timestamp) 0)))
+Pi messages have no server id.  Prefer role and timestamp so runtime
+message lifecycle events and later history fetches derive the same ID;
+INDEX is the fallback for messages without timestamps."
+  (if-let ((timestamp (plist-get message :timestamp)))
+      (format "pimsg-%s-%s"
+              (or (plist-get message :role) "x") timestamp)
+    (format "pimsg-%d-%s"
+            index (or (plist-get message :role) "x"))))
 
-(defun opencode-pi--message (message index)
+(defun opencode-pi--message (message index &optional correlations)
   "Convert a single Pi MESSAGE (AgentMessage) to an OpenCode-shaped message.
 INDEX is the message's position in the conversation.  Returns a plist
 {:info ... :parts [...]} suitable for the renderer, or nil for a
-toolResult message (folded into the preceding assistant message instead)."
+toolResult message (folded into the preceding assistant message instead).
+CORRELATIONS maps stable assistant IDs to their user message IDs."
   (let* ((role (plist-get message :role))
          (msg-id (opencode-pi--message-id message index))
+         (user-message-id (and correlations (gethash msg-id correlations)))
          (ts (plist-get message :timestamp)))
     (pcase role
       ("toolResult" nil)
@@ -152,7 +159,8 @@ toolResult message (folded into the preceding assistant message instead)."
                              for i from 0
                              for part = (opencode-pi--block->part block msg-id i)
                              when part collect part)))
-         (list :info (list :id msg-id :role "assistant"
+          (list :info (list :id msg-id :role "assistant"
+                            :parentID user-message-id
                            :modelID (plist-get message :model)
                            :providerID (plist-get message :provider)
                            :tokens (opencode-pi--usage->tokens usage)
@@ -179,10 +187,11 @@ toolResult message (folded into the preceding assistant message instead)."
   "Return the total cost from a Pi USAGE plist, or 0."
   (or (plist-get (plist-get usage :cost) :total) 0))
 
-(defun opencode-pi--messages (messages)
+(defun opencode-pi--messages (messages &optional correlations)
   "Convert a Pi MESSAGES vector/list to OpenCode-shaped messages.
 ToolResult messages are folded into the preceding assistant message's
-matching tool part; user/assistant messages become {:info :parts} plists."
+matching tool part; user/assistant messages become {:info :parts} plists.
+CORRELATIONS maps stable assistant IDs to their user message IDs."
   (let* ((seq (if (vectorp messages) (append messages nil) messages))
          (out nil)
          (index 0))
@@ -193,7 +202,9 @@ matching tool part; user/assistant messages become {:info :parts} plists."
                    (parts (append (plist-get last :parts) nil)))
               (opencode-pi--apply-tool-result parts m)
               (plist-put last :parts (vconcat parts))))
-        (when-let* ((norm (opencode-pi--message m index)))
+        (when-let* ((norm
+                     (opencode-pi--message
+                      m index correlations)))
           (push norm out)))
       (setq index (1+ index)))
     (vconcat (nreverse out))))
@@ -208,57 +219,119 @@ matching tool part; user/assistant messages become {:info :parts} plists."
     ((or "toolcall_start" "toolcall_delta" "toolcall_end") "tool")
     (_ "text")))
 
-(defun opencode-pi--event (raw)
-  "Convert a Pi RPC event RAW (plist) into a canonical `opencode-backend-event'.
-Maps Pi's agent/message/tool lifecycle to OpenCode-equivalent `:type'
-strings so the existing chat handlers can consume the canonical event.
-
-Returns nil for events that have no UI effect."
+(defun opencode-pi--event (raw &optional session-id)
+  "Convert Pi RPC event RAW into one canonical backend event.
+SESSION-ID identifies the connection and enables turn correlation.
+Return nil for modern `agent_end' events, whose authoritative terminal
+boundary is the later `agent_settled' event."
   (let ((type (plist-get raw :type)))
     (pcase type
       ("agent_start"
-       (opencode-backend-event :type "session.status"
-                               :status (list :type "busy")
-                               :raw raw))
+       (opencode-backend-event
+        :type "session.status" :backend 'pi :session-id session-id
+        :status (list :type "busy") :raw raw))
       ("agent_end"
-       (opencode-backend-event :type "session.idle" :raw raw))
+       (unless (plist-member raw :willRetry)
+         (opencode-backend-event
+          :type "session.idle" :backend 'pi :session-id session-id :raw raw)))
+      ("agent_settled"
+       (opencode-backend-event
+        :type "session.idle" :backend 'pi :session-id session-id :raw raw))
       ("message_update"
-       (let* ((ae (plist-get raw :assistantMessageEvent))
-              (delta (plist-get ae :delta)))
+       (let* ((assistant-event (plist-get raw :assistantMessageEvent))
+              (part-type
+               (opencode-pi--assistant-event-part-type assistant-event))
+              (message-id
+               (and session-id
+                    (opencode-pi--active-assistant-message-id session-id)))
+              (part-id
+               (and message-id
+                    (format "%s/stream-%s" message-id part-type))))
          (opencode-backend-event
           :type "message.part.updated"
-          :delta delta
-          :part (list :type (opencode-pi--assistant-event-part-type ae)
-                      :text (plist-get (plist-get ae :partial) :text))
+          :backend 'pi
+          :session-id session-id
+          :message-id message-id
+          :part-id part-id
+          :delta (plist-get assistant-event :delta)
+          :part
+          (list :id part-id
+                :message-id message-id
+                :session-id session-id
+                :type part-type
+                :text (plist-get (plist-get assistant-event :partial) :text)
+                :time (list :start 0))
           :raw raw)))
-      ("message_start"
-       (opencode-backend-event :type "message.updated"
-                               :message (plist-get raw :message)
-                               :raw raw))
-      ("message_end"
-       (opencode-backend-event :type "message.updated"
-                               :message (plist-get raw :message)
-                               :raw raw))
-      ((or "tool_execution_start" "tool_execution_update" "tool_execution_end")
+      ((or "message_start" "message_end")
+       (let* ((completed (equal type "message_end"))
+              (info (opencode-pi--message-info session-id raw completed)))
+         (opencode-backend-event
+          :type "message.updated"
+          :backend 'pi
+          :session-id session-id
+          :message-id (plist-get info :id)
+          :message
+          (list :id (plist-get info :id)
+                :session-id session-id
+                :parent-id (plist-get info :parentID)
+                :role (plist-get info :role)
+                :created-at (plist-get (plist-get info :time) :created)
+                :completed-at (plist-get (plist-get info :time) :completed)
+                :raw info)
+          :raw raw)))
+      ((or "tool_execution_start" "tool_execution_update"
+           "tool_execution_end")
+       (let* ((message-id
+               (and session-id
+                    (opencode-pi--active-assistant-message-id session-id)))
+              (part-id (plist-get raw :toolCallId))
+              (status
+               (pcase type
+                 ((or "tool_execution_start" "tool_execution_update")
+                  "running")
+                 ("tool_execution_end"
+                  (if (eq t (plist-get raw :isError))
+                      "error"
+                    "completed")))))
+         (opencode-backend-event
+          :type "message.part.updated"
+          :backend 'pi
+          :session-id session-id
+          :message-id message-id
+          :part-id part-id
+          :status status
+          :part
+          (list :id part-id
+                :message-id message-id
+                :session-id session-id
+                :type "tool"
+                :tool (plist-get raw :toolName)
+                :tool-call-id part-id
+                :state (list :status status))
+          :raw raw)))
+      ("turn_end"
        (opencode-backend-event
-        :type "message.part.updated"
-        :part-id (plist-get raw :toolCallId)
-        :part (list :type "tool"
-                    :tool (plist-get raw :toolName)
-                    :callID (plist-get raw :toolCallId))
-        :status (pcase type
-                  ("tool_execution_start" "running")
-                  ("tool_execution_update" "running")
-                  ("tool_execution_end"
-                   (if (eq t (plist-get raw :isError)) "error" "completed")))
+        :type "message.updated"
+        :backend 'pi
+        :session-id session-id
+        :message (list :session-id session-id)
         :raw raw))
       ((or "compaction_start" "compaction_end")
-       (opencode-backend-event :type "session.compacted" :raw raw))
+       (opencode-backend-event
+        :type "session.compacted"
+        :backend 'pi
+        :session-id session-id
+        :raw raw))
       ("extension_error"
-       (opencode-backend-event :type "session.error"
-                               :error (plist-get raw :error)
-                               :raw raw))
-      (_ (opencode-backend-event :type type :raw raw)))))
+       (opencode-backend-event
+        :type "session.error"
+        :backend 'pi
+        :session-id session-id
+        :error (list :message (or (plist-get raw :error) "extension error"))
+        :raw raw))
+      (_
+       (opencode-backend-event
+        :type type :backend 'pi :session-id session-id :raw raw)))))
 
 ;;; --- Connection registry ---
 ;;
@@ -269,6 +342,84 @@ Returns nil for events that have no UI effect."
 
 (defvar opencode-pi--conns (make-hash-table :test 'equal)
   "Map of Pi session-id -> `opencode-pi-conn'.")
+
+(defun opencode-pi--enqueue-prompt (conn message-id busy)
+  "Record MESSAGE-ID as turn-scoped correlation state on CONN.
+When BUSY is non-nil in steer mode, the prompt modifies the active turn and
+must not steal its correlation.  Follow-up prompts queue for a later turn."
+  (when message-id
+    (cond
+     ((and busy (eq opencode-pi-steering-mode 'steer))
+      nil)
+     ((and busy (eq opencode-pi-steering-mode 'follow-up))
+      (setf (opencode-pi-conn-pending-prompt-message-ids conn)
+            (append (opencode-pi-conn-pending-prompt-message-ids conn)
+                    (list message-id))))
+     (t
+      (setf (opencode-pi-conn-pending-prompt-message-ids conn)
+            (append (opencode-pi-conn-pending-prompt-message-ids conn)
+                    (list message-id)))))))
+
+(defun opencode-pi--activate-prompt (conn)
+  "Promote CONN's next pending prompt to the active Pi turn."
+  (unless (opencode-pi-conn-active-prompt-message-id conn)
+    (let ((pending (opencode-pi-conn-pending-prompt-message-ids conn)))
+      (when pending
+        (setf (opencode-pi-conn-active-prompt-message-id conn) (car pending)
+              (opencode-pi-conn-pending-prompt-message-ids conn)
+              (cdr pending)))))
+  (opencode-pi-conn-active-prompt-message-id conn))
+
+(defun opencode-pi--assistant-message-id (session-id message)
+  "Return a stable assistant ID for SESSION-ID and Pi MESSAGE."
+  (ignore session-id)
+  (opencode-pi--message-id message 0))
+
+(defun opencode-pi--message-info (session-id raw completed)
+  "Return OpenCode-shaped info for Pi message event RAW.
+SESSION-ID locates turn state.  COMPLETED marks message_end events."
+  (let* ((conn (opencode-pi-conn-for session-id))
+         (message (or (plist-get raw :message) '()))
+         (role (plist-get message :role))
+         (user-message-id
+          (and conn
+               (equal role "assistant")
+               (or (opencode-pi-conn-active-prompt-message-id conn)
+                   (opencode-pi--activate-prompt conn))))
+         (message-id
+          (if (equal role "assistant")
+              (or (and conn
+                       (opencode-pi-conn-active-assistant-message-id conn))
+                  (opencode-pi--assistant-message-id session-id message))
+            (opencode-pi--assistant-message-id session-id message)))
+         (timestamp (or (plist-get message :timestamp)
+                        (floor (* (float-time) 1000)))))
+    (when (and conn (equal role "assistant"))
+      (setf (opencode-pi-conn-active-assistant-message-id conn) message-id)
+      (when (and completed user-message-id)
+        (puthash message-id user-message-id
+                 (opencode-pi-conn-assistant-correlations conn))))
+    (list :id message-id
+          :sessionID session-id
+          :role role
+          :parentID user-message-id
+          :time (append (list :created timestamp)
+                        (when completed (list :completed timestamp))))))
+
+(defun opencode-pi--finish-turn (session-id)
+  "Clear active turn state for Pi SESSION-ID after idle."
+  (when-let ((conn (opencode-pi-conn-for session-id)))
+    (setf (opencode-pi-conn-active-prompt-message-id conn) nil
+          (opencode-pi-conn-active-assistant-message-id conn) nil)))
+
+(defun opencode-pi--finish-assistant-message (session-id)
+  "Clear SESSION-ID's active assistant after one finalized message.
+One Pi agent run can contain several assistant messages separated by tool
+results.  The prompt remains active for the whole run, but each assistant
+must retain its own stable ID so a final-output consumer can correlate the
+last assistant rather than an earlier tool-call message."
+  (when-let ((conn (opencode-pi-conn-for session-id)))
+    (setf (opencode-pi-conn-active-assistant-message-id conn) nil)))
 
 (defun opencode-pi-bind-conn (session-id conn)
   "Register CONN under SESSION-ID for later facade-op resolution."
@@ -294,55 +445,60 @@ Dead connections are auto-unbound."
   (or (opencode-pi-conn-for session-id)
       (user-error "No live Pi session for %s" session-id)))
 
-;;; --- Prompt body translation ---
-
-(defun opencode-pi--body->message (body)
-  "Extract the prompt text from an OpenCode-shaped prompt BODY plist.
-BODY has :parts, a vector of {:type \"text\" :text ...}.  Returns the
-concatenated text of the text parts."
-  (let ((parts (append (plist-get body :parts) nil)))
-    (mapconcat (lambda (p) (or (plist-get p :text) ""))
-               (seq-filter (lambda (p) (equal (plist-get p :type) "text")) parts)
-               "")))
-
-(defun opencode-pi--body->images (body)
-  "Extract Pi image blocks from an OpenCode-shaped prompt BODY, or nil.
-OpenCode image parts carry :source {:data ...}; Pi wants
-{type:image,data,mimeType}."
-  (let ((parts (append (plist-get body :parts) nil))
-        images)
-    (dolist (p parts)
-      (when (equal (plist-get p :type) "image")
-        (let ((src (plist-get p :source)))
-          (push (list :type "image"
-                      :data (plist-get src :data)
-                      :mimeType (or (plist-get src :mediaType)
-                                    (plist-get p :mime)))
-                images))))
-    (when images (vconcat (nreverse images)))))
-
 ;;; --- Adapter command functions ---
 
-(defun opencode-pi-send-prompt (session-id body callback &optional busy)
-  "Send prompt BODY to the Pi session SESSION-ID.
+(defun opencode-pi--intent-images (intent)
+  "Translate canonical prompt INTENT images into Pi image blocks."
+  (let (images)
+    (dolist (image (opencode-prompt-intent-images intent))
+      (when-let* ((decoded (opencode-prompt-image-data image)))
+        (push (list :type "image"
+                    :data (plist-get decoded :data)
+                    :mimeType (or (plist-get decoded :mime-type)
+                                  (plist-get image :mime)))
+              images)))
+    (when images
+      (vconcat (nreverse images)))))
+
+(defun opencode-pi-send-prompt (session-id intent callback &optional busy)
+  "Send prompt INTENT to the Pi session SESSION-ID.
 When BUSY is non-nil the message is queued per `opencode-pi-steering-mode'
 \(steer or follow_up); otherwise it is a fresh prompt.  CALLBACK receives
-the RPC response plist."
+  the RPC response plist."
   (let* ((conn (opencode-pi--require-conn session-id))
-         (message (opencode-pi--body->message body))
-         (images (opencode-pi--body->images body))
+         (message (opencode-prompt-intent-text intent))
+         (images (opencode-pi--intent-images intent))
          (cmd (cond
-               ((not busy)
-                (append (list :type "prompt" :message message)
+                ((not busy)
+                 (append (list :type "prompt" :message message)
                         (when images (list :images images))))
                ((eq opencode-pi-steering-mode 'follow-up)
                 (append (list :type "follow_up" :message message)
                         (when images (list :images images))))
                (t
-                (append (list :type "prompt" :message message
-                              :streamingBehavior "steer")
-                        (when images (list :images images)))))))
+                 (append (list :type "prompt" :message message
+                               :streamingBehavior "steer")
+                         (when images (list :images images)))))))
+    (opencode-pi--enqueue-prompt
+     conn (opencode-prompt-intent-message-id intent) busy)
     (opencode-pi-rpc-send conn cmd callback)))
+
+(defun opencode-pi-execute-command
+    (session-id command arguments agent model variant callback &optional busy)
+  "Execute slash COMMAND in Pi SESSION-ID as a canonical prompt.
+ARGUMENTS is appended after the command name.  AGENT, MODEL, and VARIANT are
+accepted for backend interface parity; Pi manages those values on its live
+connection."
+  (ignore agent model variant)
+  (opencode-pi-send-prompt
+   session-id
+   (opencode-prompt-intent-create
+    :text (concat "/" command
+                  (if (and arguments
+                           (not (string-empty-p arguments)))
+                      (concat " " arguments)
+                    "")))
+   callback busy))
 
 (defun opencode-pi-abort (session-id &optional callback)
   "Abort the current Pi operation for SESSION-ID."
@@ -355,22 +511,26 @@ the RPC response plist."
     (opencode-pi-rpc-send
      conn (list :type "get_messages")
      (lambda (resp)
-       (funcall callback
-                (opencode-pi--messages
-                 (plist-get (plist-get resp :data) :messages)))))))
+        (funcall callback
+                 (opencode-pi--messages
+                  (plist-get (plist-get resp :data) :messages)
+                  (opencode-pi-conn-assistant-correlations conn)))))))
 
 (defun opencode-pi-get-messages-sync (session-id &optional _query-params)
   "Return normalized messages for Pi SESSION-ID synchronously."
   (let* ((conn (opencode-pi--require-conn session-id))
          (resp (opencode-pi-rpc-request-sync conn (list :type "get_messages"))))
-    (opencode-pi--messages (plist-get (plist-get resp :data) :messages))))
+    (opencode-pi--messages
+     (plist-get (plist-get resp :data) :messages)
+     (opencode-pi-conn-assistant-correlations conn))))
 
-(defun opencode-pi--state->session (session-id state)
-  "Synthesize a canonical session plist for SESSION-ID from RPC STATE."
+(defun opencode-pi--state->session (session-id state conn)
+  "Synthesize a canonical session plist for SESSION-ID from RPC STATE and CONN."
   (opencode-backend-session
    :id session-id
    :title (or (plist-get state :sessionName) session-id)
-   :directory default-directory
+   :directory (or (opencode-pi-conn-cwd conn)
+                  (plist-get state :cwd))
    :raw state))
 
 (defun opencode-pi-get-session (session-id callback &optional _backend)
@@ -380,14 +540,14 @@ the RPC response plist."
      conn (list :type "get_state")
      (lambda (resp)
        (funcall callback
-                (opencode-pi--state->session
-                 session-id (plist-get resp :data)))))))
+                 (opencode-pi--state->session
+                  session-id (plist-get resp :data) conn))))))
 
 (defun opencode-pi-get-session-sync (session-id &optional _backend)
   "Return a canonical session for Pi SESSION-ID synchronously."
   (let* ((conn (opencode-pi--require-conn session-id))
          (resp (opencode-pi-rpc-request-sync conn (list :type "get_state"))))
-    (opencode-pi--state->session session-id (plist-get resp :data))))
+    (opencode-pi--state->session session-id (plist-get resp :data) conn)))
 
 (defun opencode-pi-rename-session (session-id title &optional _backend)
   "Set the display name of Pi SESSION-ID to TITLE."
@@ -442,10 +602,6 @@ Resolves against any live conn (model lists are process-global in Pi)."
 (defvar opencode-pi--ui-requests (make-hash-table :test 'equal)
   "Map of extension-UI request id -> `opencode-pi-conn' awaiting a reply.")
 
-(declare-function opencode-permission--on-asked "opencode-permission" (event))
-(declare-function opencode-question--on-asked "opencode-question" (event))
-(declare-function opencode--dispatch-to-chat-buffer "opencode" (session-id handler event))
-
 (defun opencode-pi-handle-ui-request (conn session-id req)
   "Route a Pi extension UI REQ from CONN for SESSION-ID.
 CONFIRM maps to the permission popup; SELECT/INPUT/EDITOR map to the
@@ -458,25 +614,37 @@ only for the reply-bearing methods so the reply can reach CONN."
     (pcase method
       ("confirm"
        (puthash id conn opencode-pi--ui-requests)
-       (opencode-pi--dispatch-popup
-        session-id #'opencode-permission--on-asked
-        (list :id id :sessionID session-id
-              :permission (or (plist-get req :title) "confirm")
-              :patterns (when (plist-get req :message)
-                          (vector (plist-get req :message))))))
+       (opencode-event-dispatch
+         (opencode-backend-event
+          :type "permission.asked"
+          :backend 'pi
+          :session-id session-id
+          :request-id id
+          :request
+          (list :id id :sessionID session-id
+                :permission (or (plist-get req :title) "confirm")
+                :patterns (when (plist-get req :message)
+                            (vector (plist-get req :message))))
+          :raw req)))
       ((or "select" "input" "editor")
        (puthash id conn opencode-pi--ui-requests)
-       (opencode-pi--dispatch-popup
-        session-id #'opencode-question--on-asked
-        (list :id id :sessionID session-id
-              :questions
-              (vector
-               (list :header (or (plist-get req :title) "Input")
-                     :question (or (plist-get req :title)
-                                   (plist-get req :placeholder) "")
-                     :options (when (equal method "select")
-                                (plist-get req :options))
-                     :custom (not (equal method "select")))))))
+       (opencode-event-dispatch
+         (opencode-backend-event
+          :type "question.asked"
+          :backend 'pi
+          :session-id session-id
+          :request-id id
+          :request
+          (list :id id :sessionID session-id
+                :questions
+                (vector
+                 (list :header (or (plist-get req :title) "Input")
+                       :question (or (plist-get req :title)
+                                     (plist-get req :placeholder) "")
+                       :options (when (equal method "select")
+                                  (plist-get req :options))
+                       :custom (not (equal method "select")))))
+          :raw req)))
       ;; --- Fire-and-forget widget surface (no reply) ---
       ("setWidget"
        (opencode-pi-widget-set session-id
@@ -492,14 +660,6 @@ only for the reply-bearing methods so the reply can reach CONN."
        (message "%s" (or (plist-get req :message) "")))
       ("set_editor_text" nil)
       (_ nil))))
-
-(defun opencode-pi--dispatch-popup (session-id handler event)
-  "Dispatch EVENT to HANDLER in the chat buffer for SESSION-ID.
-Wraps the synthesized request as {:properties EVENT} like the SSE path."
-  (let ((wrapped (list :type "popup" :properties event)))
-    (if (fboundp 'opencode--dispatch-to-chat-buffer)
-        (opencode--dispatch-to-chat-buffer session-id handler wrapped)
-      (funcall handler wrapped))))
 
 (defun opencode-pi-reply-permission (id choice _message &optional _backend)
   "Answer a Pi confirm UI request ID from a permission popup CHOICE.
@@ -534,79 +694,35 @@ ANSWERS is the popup's answer vector; the first answer becomes the
     (remhash id opencode-pi--ui-requests)
     (opencode-pi-rpc-ui-reply-cancel conn id)))
 
-;;; --- Runtime event router (Pi event -> chat SSE handlers) ---
+;;; --- Runtime event router (Pi event -> canonical router) ---
 ;;
-;; The chat buffer handlers consume OpenCode-shaped SSE events
-;; ({:type ... :properties {:sessionID ... :status/:part/:info ...}}).  This
-;; router converts each raw Pi event into that shape and dispatches it to the
-;; owning chat buffer's per-type handler by session id.  (`opencode-pi--event'
-;; remains the pure CANONICAL adapter used by the backend `event-adapter'
-;; slot; this router is the runtime UI glue.)
+;; Runtime Pi events are adapted to canonical backend events and handed to the
+;; central event router.  The router performs canonical→legacy conversion for
+;; existing chat/popup/sidebar handlers.
 
-(declare-function opencode-chat--on-session-status "opencode-chat" (event))
-(declare-function opencode-chat--on-session-idle "opencode-chat" (event))
-(declare-function opencode-chat--on-message-updated "opencode-chat" (event))
-(declare-function opencode-chat--on-part-updated "opencode-chat" (event))
-(declare-function opencode-chat--on-session-compacted "opencode-chat" (event))
-(declare-function opencode-chat--on-session-error "opencode-chat" (event))
+(defun opencode-pi--active-assistant-message-id (session-id)
+  "Return SESSION-ID's active assistant message id, or the bootstrap fallback."
+  (or (when-let ((conn (opencode-pi-conn-for session-id)))
+        (opencode-pi-conn-active-assistant-message-id conn))
+      (format "%s/asst" session-id)))
 
 (defun opencode-pi--route-event (session-id raw)
-  "Route a raw Pi event RAW for SESSION-ID into the chat buffer handlers.
-Builds OpenCode-shaped SSE events and dispatches them by session id."
+  "Route a raw Pi event RAW for SESSION-ID through canonical dispatch."
   (let ((type (plist-get raw :type)))
+    (when (equal type "agent_start")
+      (when-let ((conn (opencode-pi-conn-for session-id)))
+        (opencode-pi--activate-prompt conn)))
+    (when-let ((event (opencode-pi--event raw session-id)))
+      (opencode-event-dispatch event))
     (pcase type
-      ("agent_start"
-       (opencode-pi--emit session-id #'opencode-chat--on-session-status
-                          (list :sessionID session-id
-                                :status (list :type "busy")))
-       ;; Bootstrap an assistant message so streaming parts have an owner.
-       (opencode-pi--emit session-id #'opencode-chat--on-message-updated
-                          (list :info (list :id (format "%s/asst" session-id)
-                                            :sessionID session-id
-                                            :role "assistant"
-                                            :time (list :created
-                                                        (floor (* (float-time) 1000)))))))
       ("agent_end"
-       (opencode-pi--emit session-id #'opencode-chat--on-session-idle
-                          (list :sessionID session-id)))
-      ("message_update"
-       (let* ((ae (plist-get raw :assistantMessageEvent))
-              (delta (plist-get ae :delta))
-              (ptype (opencode-pi--assistant-event-part-type ae))
-              (partial (plist-get ae :partial))
-              (msg-id (format "%s/asst" session-id)))
-         (opencode-pi--emit
-          session-id #'opencode-chat--on-part-updated
-          (append
-           (list :part (list :sessionID session-id
-                             :messageID msg-id
-                             :id (format "%s/stream-%s" session-id ptype)
-                             :type ptype
-                             :text (plist-get partial :text)
-                             :time (list :start 0)))
-           (when delta (list :delta delta))))))
-      ((or "message_start" "message_end" "turn_end")
-       ;; Full-message events: trigger a refresh via a synthetic status idle
-       ;; bounce is wrong; instead schedule a refresh through message.updated.
-       (opencode-pi--emit session-id #'opencode-chat--on-message-updated
-                          (list :info (list :sessionID session-id))))
-      ((or "compaction_start" "compaction_end")
-       (opencode-pi--emit session-id #'opencode-chat--on-session-compacted
-                          (list :sessionID session-id)))
-      ("extension_error"
-       (opencode-pi--emit session-id #'opencode-chat--on-session-error
-                          (list :sessionID session-id
-                                :error (list :message
-                                             (or (plist-get raw :error)
-                                                 "extension error")))))
-      (_ nil))))
-
-(defun opencode-pi--emit (session-id handler props)
-  "Dispatch a synthetic SSE event with PROPS to HANDLER for SESSION-ID."
-  (let ((event (list :type "pi" :properties props)))
-    (if (fboundp 'opencode--dispatch-to-chat-buffer)
-        (opencode--dispatch-to-chat-buffer session-id handler event)
-      (funcall handler event))))
+       (unless (plist-member raw :willRetry)
+         (opencode-pi--finish-turn session-id)))
+      ("agent_settled"
+       (opencode-pi--finish-turn session-id))
+      ("message_end"
+       (when (equal (plist-get (plist-get raw :message) :role) "assistant")
+         (opencode-pi--finish-assistant-message session-id))))))
 
 ;;; --- Session lifecycle / entry point ---
 
@@ -637,9 +753,12 @@ Returns a list of plists, oldest first.  Ignores unparseable lines."
           (let ((line (buffer-substring-no-properties
                        (line-beginning-position) (line-end-position))))
             (unless (string-empty-p (string-trim line))
-              (condition-case nil
+              (condition-case err
                   (push (opencode--json-parse line) objs)
-                (error nil))
+                (error
+                 (opencode--debug
+                  "opencode-pi: skipping malformed JSONL line in %s: %s"
+                  file (error-message-string err))))
               (setq n (1+ n))))
           (forward-line 1))))
     (nreverse objs)))
@@ -694,13 +813,15 @@ file when applicable), learns the Pi session id, wires event and UI
 handlers, then opens the chat buffer bound to the `pi' backend."
   (interactive)
   (let* ((directory (or directory
-                        (when (fboundp 'project-current)
-                          (when-let* ((proj (project-current)))
-                            (project-root proj)))
-                        default-directory))
+                         (when (fboundp 'project-current)
+                           (when-let* ((proj (project-current)))
+                             (project-root proj)))
+                         default-directory))
          (choice (opencode-pi--read-session))
-         (session-file (and (consp choice) (plist-get (cdr choice) :file))))
-    (opencode-pi--launch directory session-file)))
+         (session (and (consp choice) (cdr choice)))
+         (session-file (and session (plist-get session :file)))
+         (session-directory (and session (plist-get session :directory))))
+    (opencode-pi--launch (or session-directory directory) session-file)))
 
 (defun opencode-pi--read-session ()
   "Prompt for a Pi session to resume, or `new'.
@@ -718,7 +839,9 @@ Returns `new' or a cons (TITLE . SESSION-PLIST)."
     (if (equal pick new-label)
         'new
       (let ((s (cdr (assoc pick alist))))
-        (cons pick (list :file (plist-get (plist-get s :raw) :file)))))))
+        (cons pick
+              (list :file (plist-get (plist-get s :raw) :file)
+                    :directory (plist-get s :directory)))))))
 
 (defun opencode-pi--launch (directory &optional session-file)
   "Spawn a Pi RPC subprocess in DIRECTORY and open its chat buffer.
@@ -739,7 +862,7 @@ When SESSION-FILE is non-nil, resume that session via `--session'."
           (lambda ()
             (opencode-pi-unbind-conn session-id)
             (opencode-pi-widget-cleanup session-id)))
-    (opencode-chat-open session-id directory nil 'pi)
+    (opencode-chat-open session-id (opencode-pi-conn-cwd conn) nil 'pi)
     session-id))
 
 ;;; --- Backend registration ---
@@ -755,6 +878,7 @@ When SESSION-FILE is non-nil, resume that session via `--session'."
   :connected-p-fn nil
   :list-sessions-fn #'opencode-pi-list-sessions
   :send-prompt-fn #'opencode-pi-send-prompt
+  :execute-command-fn #'opencode-pi-execute-command
   :abort-session-fn #'opencode-pi-abort
   :get-messages-fn #'opencode-pi-get-messages
   :get-messages-sync-fn #'opencode-pi-get-messages-sync

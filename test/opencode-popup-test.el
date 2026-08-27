@@ -159,5 +159,54 @@ sessions or during loading before the input area exists."
        (insert "test"))
      :type 'error)))
 
+(ert-deftest opencode-popup-render-error-restores-child-input-tail ()
+  "A failed inline render restores input, footer, and child navigation."
+  (opencode-test-with-temp-buffer "*opencode: popup-render-error*"
+    (opencode-chat-mode)
+    (opencode-chat--set-session-id "ses_popup_child")
+    (opencode-chat--set-session
+     '(:id "ses_popup_child" :parentID "ses_popup_parent"
+       :directory "/tmp/popup-error"))
+    (let ((inhibit-read-only t)
+          (buffer-undo-list t))
+      (opencode-chat--render-input-tail))
+    (opencode-chat--replace-input "draft")
+    (opencode-popup--save-input)
+    (should-error
+     (opencode-popup--with-inline-region nil opencode-test-prop
+       (insert "partial popup")
+       (error "render failed")))
+    (should-not (opencode-popup--recover-render-error))
+    (should (equal (opencode-chat--input-text) "draft"))
+    (should (opencode-test-buffer-contains-p "Sub-agent session"))
+    (should (opencode-test-buffer-contains-p "[Parent]"))
+    (should-not opencode-popup--inline-p)
+    (should-not opencode-popup--saved-input)
+    (should-not opencode-popup--overlay)
+    (should
+     (marker-insertion-type (opencode-chat-message-messages-end)))))
+
+(ert-deftest opencode-popup-restore-error-unwinds-inline-state ()
+  "A restore failure still clears popup state and repairs messages-end."
+  (opencode-test-with-temp-buffer "*opencode: popup-restore-error*"
+    (opencode-chat-mode)
+    (opencode-chat--set-session-id "ses_popup_restore_error")
+    (opencode-chat--set-session
+     '(:id "ses_popup_restore_error" :directory "/tmp/popup-error"))
+    (let ((inhibit-read-only t)
+          (buffer-undo-list t))
+      (opencode-chat--render-input-tail))
+    (opencode-popup--save-input)
+    (opencode-popup--with-inline-region nil opencode-test-prop
+      (insert "popup"))
+    (cl-letf (((symbol-function 'opencode-chat--render-input-tail)
+               (lambda () (error "tail failed"))))
+      (should-error (opencode-popup--restore-input)))
+    (should-not opencode-popup--inline-p)
+    (should-not opencode-popup--saved-input)
+    (should-not opencode-popup--overlay)
+    (should
+     (marker-insertion-type (opencode-chat-message-messages-end)))))
+
 (provide 'opencode-popup-test)
 ;;; opencode-popup-test.el ends here

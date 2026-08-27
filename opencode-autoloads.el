@@ -20,7 +20,7 @@ either customize it (see the info node `Easy Customization')
 or call the function `opencode-mode'.")
 (custom-autoload 'opencode-mode "opencode" nil)
 (autoload 'opencode-mode "opencode" "\
-Global minor mode for the OpenCode AI coding agent.
+Global minor mode for OpenCode and Pi AI coding agents.
 
 When enabled, provides the `C-c o' prefix keymap and modeline indicator.
 
@@ -62,18 +62,20 @@ Interactively, prompts for URL; with prefix arg also prompts for DIRECTORY.
 
 (fn URL &optional DIRECTORY)" t)
 (autoload 'opencode-chat "opencode" "\
-Open a chat buffer for SESSION-ID.
+Open a chat buffer for SESSION-ID using BACKEND in DIRECTORY.
 If SESSION-ID is nil, prompts for a session.
 The completion list includes a \"★ New session\" option at the top.
 Auto-connects to the server if `opencode-server-port' is set.
-The picker is scoped to the current buffer's project (via
-`project-current'), so switching projects shows the right sessions.
+When DIRECTORY is nil, the picker is scoped to the current buffer's
+project via `project-current', so switching projects shows the right
+sessions.  BACKEND defaults to `opencode-backend-current'.
 
-(fn &optional SESSION-ID)" t)
+(fn &optional SESSION-ID BACKEND DIRECTORY)" t)
 (autoload 'opencode-new-session "opencode" "\
 Create a new session with optional TITLE and open it.
+BACKEND defaults to `opencode-backend-current'.
 
-(fn &optional TITLE)" t)
+(fn &optional TITLE BACKEND)" t)
 (autoload 'opencode-abort "opencode" "\
 Abort the current generation in the active chat buffer." t)
 (autoload 'opencode-toggle-sidebar "opencode" "\
@@ -81,9 +83,9 @@ Toggle the OpenCode session sidebar." t)
 (autoload 'opencode-disconnect "opencode" "\
 Disconnect from the OpenCode server and stop the subprocess." t)
 (autoload 'opencode-refresh "opencode" "\
-Refresh all cached data from the server.
-Invalidates agent, config, and command caches, re-fetches everything,
-and schedules a refresh for all open chat and sidebar buffers.
+Refresh all cached OpenCode data from the server.
+Invalidates OpenCode agent, config, and command caches, re-fetches
+everything, and schedules a refresh for all open chat and sidebar buffers.
 Same behavior as `server.instance.disposed'." t)
 (register-definition-prefixes "opencode" '("opencode-"))
 
@@ -95,7 +97,7 @@ Same behavior as `server.instance.disposed'." t)
 
 ;;; Generated autoloads from opencode-api.el
 
-(register-definition-prefixes "opencode-api" '("opencode-"))
+(register-definition-prefixes "opencode-api" '("opencode-api-"))
 
 
 ;;; Generated autoloads from opencode-chat.el
@@ -142,13 +144,7 @@ Same behavior as `server.instance.disposed'." t)
 
 (autoload 'opencode-server-status "opencode-status" "\
 Show server status popup (MCP, LSP, Formatter)." t)
-
 (register-definition-prefixes "opencode-status" '("opencode-status-"))
-
-
-;;; Generated autoloads from opencode-server.el
-
-(register-definition-prefixes "opencode-server" '("opencode-server-"))
 
 
 ;;; Generated autoloads from opencode-session.el
@@ -227,7 +223,7 @@ If not in a chat buffer, creates a new session first." t)
 
 ;;; Generated autoloads from opencode-event.el
 
-(register-definition-prefixes "opencode-event" '("opencode-event-"))
+(register-definition-prefixes "opencode-event" '("opencode-"))
 
 
 ;;; Generated autoloads from opencode-tool-render.el
@@ -238,6 +234,145 @@ If not in a chat buffer, creates a new session first." t)
 ;;; Generated autoloads from opencode-ui.el
 
 (register-definition-prefixes "opencode-ui" '("opencode-ui--"))
+
+
+;;; Generated autoloads from opencode-backend.el
+
+(register-definition-prefixes "opencode-backend" '("opencode-backend-"))
+
+
+;;; Generated autoloads from opencode-lifecycle.el
+
+(register-definition-prefixes "opencode-lifecycle" '("opencode-lifecycle-"))
+
+
+;;; Generated autoloads from opencode-pi.el
+
+(autoload 'opencode-pi "opencode-pi" "\
+Start or resume a Pi coding-agent session and open a chat buffer.
+DIRECTORY is the project root (defaults to the current project or
+`default-directory').  Offers existing on-disk sessions plus a \"New
+session\" option.  Spawns `pi --mode rpc' (resuming the chosen session
+file when applicable), learns the Pi session id, wires event and UI
+handlers, then opens the chat buffer bound to the `pi' backend.
+
+(fn &optional DIRECTORY)" t)
+(register-definition-prefixes "opencode-pi" '("opencode-pi-"))
+
+
+;;; Generated autoloads from opencode-pi-rpc.el
+
+(register-definition-prefixes "opencode-pi-rpc" '("opencode-pi-"))
+
+
+;;; Generated autoloads from opencode-pi-widget.el
+
+(register-definition-prefixes "opencode-pi-widget" '("opencode-pi-widget-"))
+
+
+;;; Generated autoloads from opencode-pipeline-core.el
+
+(autoload 'opencode-pipeline-stage-buffer "opencode-pipeline-core" "\
+Return STAGE's live chat buffer, or nil.
+STAGE must be an execution-specific `opencode-pipeline-node'.  This helper
+never creates or displays a buffer.
+
+(fn STAGE)")
+(register-definition-prefixes "opencode-pipeline-core" '("opencode-pipeline-"))
+
+
+;;; Generated autoloads from opencode-pipeline-debug.el
+
+(autoload 'opencode-pipeline-show-debug-log "opencode-pipeline-debug" "\
+Display PIPELINE's debug buffer.
+PIPELINE must have been started with :debug non-nil.
+
+(fn PIPELINE)" t)
+(register-definition-prefixes "opencode-pipeline-debug" '("opencode-pipeline--debug"))
+
+
+;;; Generated autoloads from opencode-pipeline-runtime.el
+
+
+;;; Generated autoloads from opencode-pipeline-commands.el
+
+(autoload 'opencode-pipeline-start "opencode-pipeline-commands" "\
+Instantiate and start PIPELINE, returning its execution.
+PIPELINE must be an `opencode-pipeline-node-template' struct.  INPUT is
+exposed to node prompt functions.  TITLE names this execution and prefixes
+every session title.  DIRECTORY selects the single project used by every node
+session.  When DEBUG is non-nil, write lifecycle and transition details to a
+per-execution debug buffer.  MAX-EXECUTIONS limits the total prompts sent when
+it is a positive number; nil, zero, and negative values mean unlimited
+execution.
+
+(fn PIPELINE &key ID INPUT TITLE DIRECTORY DEBUG MAX-EXECUTIONS ORIGIN DEFAULT-AGENT DEFAULT-MODEL DEFAULT-VARIANT ON-CREATE-FUNCTIONS)" nil)
+(autoload 'opencode-pipeline-stop "opencode-pipeline-commands" "\
+Stop PIPELINE without deleting its sessions.
+When ABORT is non-nil, also abort the current backend session.
+
+(fn PIPELINE &key ABORT)" '((list (opencode-pipeline--read-execution) :abort current-prefix-arg)))
+(autoload 'opencode-pipeline-reset "opencode-pipeline-commands" "\
+Remove PIPELINE execution without deleting its sessions.
+
+(fn PIPELINE)" t)
+(register-definition-prefixes "opencode-pipeline-commands" '("opencode-pipeline-"))
+
+
+;;; Generated autoloads from opencode-pipeline-runtime.el
+
+(register-definition-prefixes "opencode-pipeline-runtime" '("opencode-pipeline-"))
+
+
+;;; Generated autoloads from opencode-pipeline-ui.el
+
+(autoload 'opencode-pipeline-describe "opencode-pipeline-ui" "\
+Display runtime information for PIPELINE.
+Interactively, choose from currently registered executions.
+
+(fn PIPELINE)" t)
+(register-definition-prefixes "opencode-pipeline-ui" '("opencode-pipeline-"))
+
+
+;;; Generated autoloads from opencode-workflow.el
+
+(autoload 'opencode-workflow-rerun "opencode-workflow" "\
+Rerun a previously stored dynamic workflow." t)
+(register-definition-prefixes "opencode-workflow" '("opencode-workflow-"))
+
+
+;;; Generated autoloads from opencode-workflow-rpc.el
+
+(autoload 'opencode-workflow-submit "opencode-workflow-rpc" "\
+Submit unevaluated workflow SOURCE and return a JSON result string.
+TITLE, INPUT, IDEMPOTENCY-KEY, SOURCE-SESSION-ID, SOURCE-MESSAGE-ID,
+DIRECTORY, and AGENT are trusted metadata supplied by the bridge caller.
+
+(fn SOURCE &key TITLE INPUT IDEMPOTENCY-KEY SOURCE-SESSION-ID SOURCE-MESSAGE-ID DIRECTORY AGENT)" nil)
+(autoload 'opencode-workflow-status "opencode-workflow-rpc" "\
+Return workflow execution ID status as a JSON string.
+
+(fn ID)" nil)
+(autoload 'opencode-workflow-stop "opencode-workflow-rpc" "\
+Stop workflow execution ID and return a JSON string.
+When ABORT is non-nil, also abort the current worker backend session.
+
+(fn ID &key ABORT)" nil)
+(register-definition-prefixes "opencode-workflow-rpc" '("opencode-workflow-"))
+
+
+;;; Generated autoloads from opencode-workflow-bridge.el
+
+(autoload 'opencode-workflow-bridge-start "opencode-workflow-bridge" "\
+Ensure the Emacs workflow bridge file and heartbeat are active." t)
+(autoload 'opencode-workflow-bridge-stop "opencode-workflow-bridge" "\
+Stop the workflow bridge heartbeat and remove its file." t)
+(register-definition-prefixes "opencode-workflow-bridge" '("opencode-workflow-"))
+
+
+;;; Generated autoloads from opencode-server.el
+
+(register-definition-prefixes "opencode-server" '("opencode-server-"))
 
 ;;; End of scraped data
 

@@ -7,6 +7,7 @@
 ;;; Code:
 
 (require 'test-helper nil t)
+(require 'opencode-backend-opencode)
 (require 'opencode-agent)
 
 ;;; --- Cache and list tests ---

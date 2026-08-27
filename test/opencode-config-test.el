@@ -8,6 +8,7 @@
 
 (require 'ert)
 (require 'test-helper nil t)
+(require 'opencode-backend-opencode)
 (require 'opencode-config)
 
 ;;; --- Config cache tests ---

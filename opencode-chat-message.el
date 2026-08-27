@@ -19,8 +19,7 @@
 (require 'opencode-markdown)
 (require 'opencode-log)
 (require 'opencode-util)
-(require 'opencode-api)
-(require 'opencode-backend)
+(require 'opencode-backend-core)
 (require 'opencode-diff)
 (require 'opencode-agent)
 (require 'opencode-chat-state)
@@ -156,7 +155,6 @@ RET/o opens the edited file.  `opencode-chat--apply-message-props'
 knows not to overwrite existing `keymap' properties, so this map is
 preserved across re-renders without needing a parent-chain trick.")
 
-(declare-function opencode-chat--schedule-refresh "opencode-chat" ())
 (declare-function opencode-chat-open "opencode-chat" (session-id &optional directory display-action))
 
 ;;; --- Internal state ---
@@ -168,8 +166,7 @@ preserved across re-renders without needing a parent-chain trick.")
 ;; (opencode-chat--diff-shown) — readers — and `opencode-chat--set-store'
 ;; / `--set-diff-cache' / `--set-diff-shown' — writers.
 
-;; The six slots formerly declared here — current-message-id,
-;; streaming-part-id / msg-id / fontify-timer / region-start,
+;; The two slots formerly declared here — current-message-id and
 ;; messages-end — now live in the `opencode-chat-state' struct.  Reads
 ;; go through the generated `opencode-chat--SLOT' functions, writes
 ;; through `opencode-chat--set-SLOT'.
@@ -201,7 +198,7 @@ Returns the exact parts structure from the message as delivered by
 the /session/:id/message API, so callers can iterate it with
 `seq-doseq' and access `:type', `:text', etc. without reaching into
 the store internals.  Distinct from the store's per-part-id hash —
-this is the input to rendering, not the rendered parts' markers."
+this is the input to rendering, not the rendered parts' range overlays."
   (when-let* ((entry (gethash msg-id (opencode-chat--store)))
               (msg (plist-get entry :msg)))
     (plist-get msg :parts)))
@@ -221,12 +218,19 @@ this is the input to rendering, not the rendered parts' markers."
         (puthash msg-id entry (opencode-chat--store))
         entry)))
 
-(defun opencode-chat--store-part-marker (msg-id part-id)
-  "Return the marker for PART-ID in MSG-ID, or nil."
+(defun opencode-chat--store-part-overlay (msg-id part-id)
+  "Return the range overlay for PART-ID in MSG-ID, or nil."
   (when-let* ((entry (opencode-chat--store-get msg-id))
               (parts (plist-get entry :parts))
               (info (gethash part-id parts)))
-    (plist-get info :marker)))
+    (plist-get info :range-overlay)))
+
+(defun opencode-chat--store-part-section-overlay (msg-id part-id)
+  "Return the cached UI section overlay for PART-ID in MSG-ID, or nil."
+  (when-let* ((entry (opencode-chat--store-get msg-id))
+              (parts (plist-get entry :parts))
+              (info (gethash part-id parts)))
+    (plist-get info :overlay)))
 
 (defun opencode-chat--store-part-type (msg-id part-id)
   "Return the type string for PART-ID in MSG-ID, or nil."
@@ -235,15 +239,39 @@ this is the input to rendering, not the rendered parts' markers."
               (info (gethash part-id parts)))
     (plist-get info :type)))
 
-(defun opencode-chat--store-set-part (msg-id part-id type marker)
-  "Register PART-ID under MSG-ID with TYPE and MARKER.
-Frees any previous marker for this part."
+(defun opencode-chat--store-set-part (msg-id part-id type range-overlay)
+  "Register PART-ID under MSG-ID with TYPE and RANGE-OVERLAY.
+Deletes any previous range overlay for this part while preserving its
+cached UI section overlay."
   (let* ((entry (opencode-chat--store-ensure msg-id))
-         (parts (plist-get entry :parts)))
-    (when-let* ((old (gethash part-id parts))
-                (m (plist-get old :marker)))
-      (when (markerp m) (set-marker m nil)))
-    (puthash part-id (list :type type :marker marker) parts)))
+         (parts (plist-get entry :parts))
+         (old (gethash part-id parts))
+         (section-overlay (and old (plist-get old :overlay))))
+    (when-let* ((old-range (and old (plist-get old :range-overlay))))
+      (when (overlayp old-range) (delete-overlay old-range)))
+    (puthash part-id
+             (list :type type
+                   :range-overlay range-overlay
+                   :overlay section-overlay)
+             parts)))
+
+(defun opencode-chat--section-overlay-at (pos id)
+  "Return the section overlay beginning at POS whose section id is ID."
+  (seq-find
+   (lambda (ov)
+     (when-let* ((section (overlay-get ov 'opencode-section)))
+       (and (= (overlay-start ov) pos)
+            (equal (plist-get section :id) id))))
+   (overlays-at pos)))
+
+(defun opencode-chat--store-cache-part-section (msg-id part-id pos)
+  "Cache PART-ID's UI section overlay beginning at POS, when present."
+  (when-let* ((section (opencode-chat--section-overlay-at pos part-id))
+              (entry (opencode-chat--store-get msg-id))
+              (parts (plist-get entry :parts))
+              (info (gethash part-id parts)))
+    (plist-put info :overlay section)
+    section))
 
 (defun opencode-chat--store-find-overlay (id)
   "Return the section overlay whose :id matches ID.
@@ -291,13 +319,17 @@ Falls back to buffer scan and caches the result."
      found)))
 
 (defun opencode-chat--store-clear ()
-  "Free all markers and clear the store."
+  "Delete all stored overlays and clear the store."
   (maphash (lambda (_msg-id entry)
+             (when-let* ((ov (plist-get entry :overlay)))
+               (when (overlayp ov) (delete-overlay ov)))
              (when-let* ((parts (plist-get entry :parts)))
-               (maphash (lambda (_part-id info)
-                          (when-let* ((m (plist-get info :marker)))
-                            (when (markerp m) (set-marker m nil))))
-                        parts)))
+                (maphash (lambda (_part-id info)
+                           (when-let* ((range (plist-get info :range-overlay)))
+                             (when (overlayp range) (delete-overlay range)))
+                           (when-let* ((ov (plist-get info :overlay)))
+                             (when (overlayp ov) (delete-overlay ov))))
+                         parts)))
            (opencode-chat--store))
   (clrhash (opencode-chat--store)))
 
@@ -352,6 +384,85 @@ how buffer and state came to be tracked in two places."
          (error "Chat state has no live buffer"))
        (with-current-buffer ,buf ,@body))))
 
+(defvar opencode-chat--transcript-depth 0
+  "Non-zero while a transcript mutation is in progress.
+Only the outermost `opencode-chat--in-transcript' repairs the undo
+list; an inner one would shift the same edit twice.")
+
+(defun opencode-chat--shift-undo-entry (elt delta)
+  "Return undo entry ELT with its buffer positions moved by DELTA.
+Throws `opencode-chat--undo-unshiftable' for shapes whose positions
+cannot be located --- notably `apply' entries, which bury them in
+arbitrary function arguments."
+  (cond
+   ;; Boundaries, first-change markers and marker adjustments hold no
+   ;; position we own: markers are adjusted by the insertion itself.
+   ((null elt) elt)
+   ((eq (car-safe elt) t) elt)
+   ((markerp (car-safe elt)) elt)
+   ((integerp elt) (+ elt delta))
+   ;; (BEG . END) — text was inserted there.
+   ((and (consp elt) (integerp (car elt)) (integerp (cdr elt)))
+    (cons (+ (car elt) delta) (+ (cdr elt) delta)))
+   ;; (TEXT . POS) — text was deleted there; a negative POS records that
+   ;; point was at the end of the deletion, so the sign must survive.
+   ((and (consp elt) (stringp (car elt)) (integerp (cdr elt)))
+    (cons (car elt)
+          (if (< (cdr elt) 0) (- (cdr elt) delta) (+ (cdr elt) delta))))
+   ;; (nil PROPERTY VALUE BEG . END) — a text property changed.
+   ((and (consp elt) (null (car elt)))
+    (let ((bounds (nthcdr 3 elt)))
+      (unless (and (consp bounds)
+                   (integerp (car bounds))
+                   (integerp (cdr bounds)))
+        (throw 'opencode-chat--undo-unshiftable 'discard))
+      (cl-list* nil (nth 1 elt) (nth 2 elt)
+                (cons (+ (car bounds) delta) (+ (cdr bounds) delta)))))
+   (t (throw 'opencode-chat--undo-unshiftable 'discard))))
+
+(defun opencode-chat--shift-undo-list (delta)
+  "Move every position recorded in `buffer-undo-list' by DELTA.
+
+Transcript redraws are kept out of the undo list because they are not
+user edits.  That leaves the entries already recorded for the input area
+holding absolute positions that Emacs will not adjust --- it adjusts
+markers, not undo entries, and it only keeps undo positions consistent
+because normally every edit is recorded.  So an insertion above the
+input area leaves each recorded position DELTA characters too early, and
+the next `undo' rewrites whatever transcript now sits there.
+
+The shift is exact rather than approximate: every transcript edit is
+strictly before `input-start' and every recorded edit strictly after it,
+so all recorded positions move by the same amount.
+
+The list is rewritten through its existing cons cells rather than
+rebuilt.  Those cells are identity-significant: `pending-undo-list' is a
+tail of this list and `undo-equiv-table' is keyed by tails, so a fresh
+list from `mapcar' would strand an undo already in progress on the old,
+unshifted cells and drop every redo record with it.  Mutating in place
+means an undo chain and its redo history simply keep working, and
+nothing global --- `last-command', `pending-undo-list' --- has to be
+cleared from what is usually a process filter running while the user is
+editing some other buffer.
+
+An entry that cannot be rewritten takes the whole history with it: an
+undo list pointing at the wrong text is worse than no undo list.  The
+validation pass runs first so a rejected entry cannot leave the list
+half-shifted."
+  (when (and (/= delta 0) (consp buffer-undo-list))
+    (if (eq t
+            (catch 'opencode-chat--undo-unshiftable
+              (let ((cell buffer-undo-list))
+                (while (consp cell)
+                  (opencode-chat--shift-undo-entry (car cell) delta)
+                  (setq cell (cdr cell))))
+              t))
+        (let ((cell buffer-undo-list))
+          (while (consp cell)
+            (setcar cell (opencode-chat--shift-undo-entry (car cell) delta))
+            (setq cell (cdr cell))))
+      (setq buffer-undo-list nil))))
+
 (defmacro opencode-chat--in-transcript (&rest body)
   "Run BODY as a mutation of the rendered transcript.
 
@@ -361,13 +472,29 @@ by hand: `inhibit-read-only', because the transcript carries a
 are not user edits and must not consume the undo history of the input
 area, which shares this buffer.  Point is restored.
 
+Excluding the redraw from the undo list is only half of it: the entries
+already in the list are absolute positions that the redraw silently
+invalidates, so the outermost mutation repairs them through
+`opencode-chat--shift-undo-list'.  That repair is an unwind form, not a
+trailing one --- a renderer that mutates and then signals would
+otherwise leave exactly the corruption this exists to prevent.
+
 Mutating the transcript from anywhere else is a bug: the input area,
 prompt and footer live in the same buffer below `messages-end', so an
 unguarded `delete-region' can eat what the user is typing."
   (declare (indent 0) (debug t))
-  `(let ((inhibit-read-only t)
-         (buffer-undo-list t))
-     (save-excursion ,@body)))
+  (let ((size (make-symbol "size")))
+    `(let ((,size (buffer-size)))
+       (unwind-protect
+           (let ((inhibit-read-only t)
+                 (buffer-undo-list t)
+                 (opencode-chat--transcript-depth
+                  (1+ opencode-chat--transcript-depth)))
+             (save-excursion ,@body))
+         ;; Runs after the bindings above unwind, so the shift sees the
+         ;; buffer's real undo list and the restored nesting depth.
+         (when (zerop opencode-chat--transcript-depth)
+           (opencode-chat--shift-undo-list (- (buffer-size) ,size)))))))
 
 (defun opencode-chat--insert-section (pos render &optional state)
   "Draw a new section at POS by calling RENDER.  Return the position past it.
@@ -396,18 +523,26 @@ without the gutter its `line-prefix' assumes."
     ("subtask"     (opencode-chat--render-subtask-part
                     part (or (opencode-chat--msg-role msg-id) 'user)))))
 
-(defun opencode-chat--recache-part (msg-id part-id part-type end)
-  "Record PART-ID's marker at END and its new overlay after a redraw.
-The overlay is looked up rather than passed in because the renderer
-creates it, and which overlay ends up covering the section is only
-knowable once the drawing is done."
+(defun opencode-chat--part-range-overlay (start end part-id)
+  "Create PART-ID's data range overlay from START to END.
+The front boundary advances and the rear boundary does not: text
+inserted at START belongs to the preceding part, while text inserted at
+END belongs to the following part unless this part explicitly extends
+its own range."
+  (let ((ov (make-overlay start end nil t nil)))
+    (overlay-put ov 'opencode-part-id part-id)
+    ov))
+
+(defun opencode-chat--recache-part (msg-id part-id part-type start end)
+  "Record PART-ID's range from START to END after an inline redraw.
+The UI section overlay is looked up rather than passed in because the
+renderer creates it, and which overlay covers the section is only
+knowable once drawing is done."
   (when msg-id
-    (opencode-chat--store-set-part msg-id part-id part-type (copy-marker end t))
-    (when-let* ((new-ov (opencode-chat--store-find-overlay part-id))
-                (entry (opencode-chat--store-get msg-id))
-                (parts (plist-get entry :parts))
-                (pinfo (gethash part-id parts)))
-      (plist-put pinfo :overlay new-ov))))
+    (opencode-chat--store-set-part
+     msg-id part-id part-type
+     (opencode-chat--part-range-overlay start end part-id))
+    (opencode-chat--store-cache-part-section msg-id part-id start)))
 
 (defun opencode-chat--replace-section (ov render &optional state)
   "Redraw the section spanned by overlay OV by calling RENDER.
@@ -523,16 +658,34 @@ set that property so this function knows to skip it."
         (setq pos next))))
   (add-text-properties start end (append (or extra-props nil) '(read-only t))))
 
-(defun opencode-chat--clear-streaming-state ()
-  "Clear all streaming-related buffer-local state.
-Frees streaming markers and clears parts hash."
-  (when-let* ((region-start (opencode-chat--streaming-region-start)))
-    (set-marker region-start nil))
-  (opencode-chat--set-streaming-part-id nil)
-  (opencode-chat--set-streaming-msg-id nil)
-  (opencode-chat--set-streaming-region-start nil)
-  ;; streaming-assistant-info is kept in chat.el for SSE routing.
-  )
+;;; --- Collapse state that outlives a redraw ---
+
+(defun opencode-chat--record-collapse-override (section collapsed-p)
+  "Remember that the user set SECTION to COLLAPSED-P.
+Registered on `opencode-ui-section-toggled-functions'.  Keyed by section
+id rather than by overlay, because the overlay is discarded every time
+the section is redrawn --- which, for a tool, is once per status change."
+  (when (and opencode-chat--state (plist-get section :id))
+    (puthash (plist-get section :id) (and collapsed-p t)
+             (opencode-chat--collapse-overrides))))
+
+(add-hook 'opencode-ui-section-toggled-functions
+          #'opencode-chat--record-collapse-override)
+
+(defun opencode-chat--section-collapsed-p (id default)
+  "Return whether the section identified by ID should render collapsed.
+An explicit choice the user made with TAB wins over DEFAULT, which is
+whatever the renderer considers a sensible starting state."
+  (let ((table (and id opencode-chat--state
+                    (opencode-chat--collapse-overrides))))
+    (if (and table (not (eq (gethash id table :absent) :absent)))
+        (gethash id table)
+      default)))
+
+(defun opencode-chat--apply-collapse-state (ov collapsed-p)
+  "Collapse section overlay OV when COLLAPSED-P is non-nil."
+  (when (and ov collapsed-p)
+    (opencode-ui--collapse-section ov)))
 
 (defun opencode-chat--agent-chip-face (color)
   "Return a face spec for an agent mention chip tinted with COLOR.
@@ -575,6 +728,10 @@ MSG is a plist from the API with :info and :parts."
                (if (string= role "user")
                    (opencode-chat--render-user-message info parts)
                  (opencode-chat--render-assistant-message info parts)))))
+      ;; A message the user collapsed stays collapsed across the redraw
+      ;; this call is part of.
+      (opencode-chat--apply-collapse-state
+       ov (opencode-chat--section-collapsed-p msg-id nil))
       ;; Cache overlay + original message data in store
       (when msg-id
         (let ((entry (opencode-chat--store-ensure msg-id)))
@@ -704,7 +861,8 @@ on body lines, `:underline' on footer."
 (defun opencode-chat--render-part (part role)
   "Render a single PART plist.  ROLE is `user' or `assistant'."
   (let ((type (plist-get part :type))
-        (part-id (plist-get part :id)))
+        (part-id (plist-get part :id))
+        (start (point)))
     (pcase type
       ("text"       (opencode-chat--render-text-part part role))
       ("tool"       (opencode-chat--render-tool-part part))
@@ -715,19 +873,17 @@ on body lines, `:underline' on footer."
       ("agent"       (opencode-chat--render-agent-part part role))
       ("subtask"     (opencode-chat--render-subtask-part part role))
       (_            (opencode-chat--render-text-part part role)))
-    ;; Track part position for streaming updates.
-    ;; Text/reasoning markers start with insertion type nil so that tool
-    ;; parts inserted at the same position (via `message-insert-pos')
-    ;; don't push the marker forward.  The marker is switched to type t
-    ;; on the first streaming delta (in `append-delta'), so subsequent
-    ;; deltas correctly advance it.  Non-text markers use type t directly
-    ;; since they are not streaming targets.
+    ;; Every part owns a data range overlay, separate from any collapsible
+    ;; UI section overlay the renderer created.  Its boundaries exclude
+    ;; insertions at either shared edge until this part explicitly resizes
+    ;; it, so neighbouring parts cannot move or absorb one another.
     (when-let* ((part-id part-id)
-                (cur-msg-id (opencode-chat--current-message-id)))
-      (let ((insertion-type (not (member type '("text" "reasoning")))))
-        (opencode-chat--store-set-part
-         cur-msg-id part-id
-         type (copy-marker (point) insertion-type))))))
+                 (cur-msg-id (opencode-chat--current-message-id)))
+      (opencode-chat--store-set-part
+       cur-msg-id part-id type
+       (opencode-chat--part-range-overlay start (point) part-id))
+      (opencode-chat--store-cache-part-section
+       cur-msg-id part-id start))))
 
 (defun opencode-chat--render-text-part (part role)
   "Render a text PART.  ROLE determines the face.
@@ -792,15 +948,15 @@ The body shows the full prompt text and is collapsed by default."
          (model-info (plist-get part :model))
          (block-face (if (eq role 'user) 'opencode-user-block 'opencode-assistant-block))
          (stripe (propertize opencode--stripe-char 'face block-face))
-         (section (opencode-ui--make-section 'subtask
-                                             (plist-get part :id)
-                                             part))
+         (part-id (plist-get part :id))
+         (collapsed-p (opencode-chat--section-collapsed-p part-id t))
+         (section (opencode-ui--make-section 'subtask part-id part nil t))
          (section-ov
           (opencode-ui--with-section section
             ;; Header line
             (let ((header-start (point)))
               (insert " ")
-              (opencode-ui--insert-icon 'collapsed)
+              (opencode-ui--insert-icon (if collapsed-p 'collapsed 'expanded))
               (insert " ")
               (insert (propertize (concat "/" command) 'face 'opencode-subtask-name))
               (unless (string-empty-p description)
@@ -824,22 +980,7 @@ The body shows the full prompt text and is collapsed by default."
                            'default
                            (opencode--prose-prefix block-face)))))
                 (opencode-markdown-mark-region body-start (point)))))))
-    ;; Collapse by default
-    (when section-ov
-      (let* ((start (overlay-start section-ov))
-             (end (overlay-end section-ov))
-             (body-start (save-excursion
-                           (goto-char start)
-                           (min (1+ (pos-eol)) end))))
-        (when (< body-start end)
-          (put-text-property body-start end 'invisible 'opencode-section)
-          (overlay-put section-ov 'opencode-collapsed t)
-          (save-excursion
-            (goto-char start)
-            (goto-char (pos-eol))
-            (insert (propertize " [collapsed]"
-                                'face 'font-lock-comment-face
-                                'opencode-collapsed-indicator t))))))))
+    (opencode-chat--apply-collapse-state section-ov collapsed-p)))
 
 (defun opencode-chat--render-tool-part (part)
   "Render a tool call PART with status indicator.
@@ -866,9 +1007,13 @@ unregistered tools route to the MCP-generic renderer."
           (summary (if (plist-member model :summary)
                        (plist-get model :summary)
                      arg-summary))
-          (should-collapse-p (and (plist-member model :collapsed-p)
-                                  (plist-get model :collapsed-p)))
-          (section (opencode-ui--make-section 'tool-call (plist-get part :id) part))
+          (part-id (plist-get part :id))
+          (should-collapse-p
+           (opencode-chat--section-collapsed-p
+            part-id
+            (and (plist-member model :collapsed-p)
+                 (plist-get model :collapsed-p))))
+          (section (opencode-ui--make-section 'tool-call part-id part nil t))
           (section-ov
            (opencode-ui--with-section section
              ;; Header line
@@ -908,22 +1053,7 @@ unregistered tools route to the MCP-generic renderer."
                (when (> (point) body-start)
                  (put-text-property body-start (max body-start (1- (point)))
                                     'line-prefix tool-prefix))))))
-    ;; Collapse sections when the renderer model requests it.
-    (when (and should-collapse-p section-ov)
-      (let* ((start (overlay-start section-ov))
-             (end (overlay-end section-ov))
-             (body-start (save-excursion
-                           (goto-char start)
-                           (min (1+ (pos-eol)) end))))
-        (when (< body-start end)
-          (put-text-property body-start end 'invisible 'opencode-section)
-          (overlay-put section-ov 'opencode-collapsed t)
-          (save-excursion
-            (goto-char start)
-            (goto-char (pos-eol))
-            (insert (propertize " [collapsed]"
-                                'face 'font-lock-comment-face
-                                'opencode-collapsed-indicator t))))))))
+    (opencode-chat--apply-collapse-state section-ov should-collapse-p)))
 
 
 (defun opencode-chat--render-reasoning-part (part)
@@ -932,33 +1062,35 @@ Uses assistant block face for left border.
 Always renders the header so that streaming deltas (via `message.part.delta')
 have a marker position to insert at.  Content is rendered only when non-empty.
 
-The section overlay is created with `rear-advance' so streaming
-deltas that land at the overlay's end (initial render with empty
-text → marker at header-newline = overlay-end) are INCLUDED in the
-overlay.  Without this the TAB toggle can only collapse the header
-line; streamed Thinking content would stay visible outside the
-section."
-  (let ((text (or (plist-get part :text) ""))
-        (stripe (propertize opencode--stripe-char 'face 'opencode-assistant-block))
-        (section (opencode-ui--make-section 'reasoning (plist-get part :id)
-                                            nil 'rear-advance)))
-    (opencode-ui--with-section section
-      ;; Header line — always rendered
-      (let ((line-start (point)))
-        (insert " ")
-        (opencode-ui--insert-icon 'expanded)
-        (insert (propertize " Thinking..." 'face 'opencode-reasoning))
-        (put-text-property line-start (point) 'line-prefix stripe)
-        (insert "\n"))
-      ;; Content — only when text is non-empty.
-      ;; Uses `insert-streaming-delta' so both streaming and refresh
-      ;; paths produce identical per-line formatting (space prefix,
-      ;; face, line-prefix, trailing newline handling).
-      (when (not (string-empty-p text))
-        (opencode-chat--insert-streaming-delta text "reasoning")
-        ;; Ensure trailing newline so subsequent parts start on a new line
-        (unless (bolp)
-          (insert "\n"))))))
+The section advertises that it grows even when initially bodyless, so
+the user may collapse it before the first delta.  Streaming explicitly
+extends both the data range and this UI section; neither boundary uses
+rear advancement that could absorb the following part."
+  (let* ((text (or (plist-get part :text) ""))
+         (stripe (propertize opencode--stripe-char 'face 'opencode-assistant-block))
+         (part-id (plist-get part :id))
+         (section (opencode-ui--make-section 'reasoning part-id
+                                             nil nil
+                                             'front-advance 'grows)))
+    (opencode-chat--apply-collapse-state
+     (opencode-ui--with-section section
+       ;; Header line — always rendered
+       (let ((line-start (point)))
+         (insert " ")
+         (opencode-ui--insert-icon 'expanded)
+         (insert (propertize " Thinking..." 'face 'opencode-reasoning))
+         (put-text-property line-start (point) 'line-prefix stripe)
+         (insert "\n"))
+       ;; Content — only when text is non-empty.
+       ;; Uses `insert-streaming-delta' so both streaming and refresh
+       ;; paths produce identical per-line formatting (space prefix,
+       ;; face, line-prefix, trailing newline handling).
+       (when (not (string-empty-p text))
+         (opencode-chat--insert-streaming-delta text "reasoning")
+         ;; Ensure trailing newline so subsequent parts start on a new line
+         (unless (bolp)
+           (insert "\n"))))
+     (opencode-chat--section-collapsed-p part-id nil))))
 
 (defun opencode-chat--render-step-start (_part)
   "Render a step-start PART with a display property separator."
@@ -1002,6 +1134,11 @@ line of its own)."
     ;; Apply all shared properties once over the entire inserted region
     (opencode-chat--apply-message-props region-start (point)
                                         (list 'line-prefix stripe))
+    ;; A section the user collapsed mid-stream has to stay collapsed.
+    ;; `insert' does not inherit `invisible', so without this every
+    ;; delta reappears inside the section that is supposedly hidden.
+    (when (opencode-ui--in-collapsed-section-p region-start)
+      (put-text-property region-start (point) 'invisible 'opencode-section))
     ;; Assistant prose is markdown; reasoning is not, matching what the
     ;; non-streaming render path marks.  `jit-lock' refontifies this span
     ;; on its own after each delta, so no timer is scheduled here.
@@ -1019,53 +1156,71 @@ Finds the message section overlay and searches forward for the footer face."
           (prop-match-beginning match)
         (overlay-end ov)))))
 
-(defun opencode-chat--update-part-inline (part)
+(defun opencode-chat--update-part-inline (part &optional owner-msg-id)
   "Update a non-text PART directly in the chat buffer.
-Case 1: existing section overlay — delete region and re-render in-place.
-Case 2: no overlay — bootstrap at message-insert-pos or messages-end.
-Case 3: no insertion point — defer to schedule-refresh."
+OWNER-MSG-ID, when given, is the normalized owning message id.  It is
+preferred over PART's `:messageID' so backends may carry ownership at
+the event-properties level.
+Case 1: existing range overlay — delete its text and re-render in-place.
+Case 2: no live range — bootstrap at message-insert-pos or messages-end.
+Case 3: no insertion point — return `:needs-refresh'.
+
+This message-owned primitive never schedules chat/controller work itself.
+Callers must interpret `:needs-refresh' in the chat controller."
   (let* ((part-id (plist-get part :id))
-         (msg-id (plist-get part :messageID))
+         (msg-id (or owner-msg-id (plist-get part :messageID)))
          (part-type (plist-get part :type))
-         (ov (opencode-chat--store-find-overlay part-id))
+         (range (opencode-chat--store-part-overlay msg-id part-id))
+         (section (opencode-chat--store-part-section-overlay msg-id part-id))
          (inhibit-read-only t))
     (cond
-     ;; Case 1: Existing overlay — redraw the section in place
-     ((and ov (overlay-buffer ov))
-      ;; Duplicate overlays for this part id are dropped first, before the
-      ;; section bounds are read: `--replace-section' takes them from the
-      ;; overlay, so deleting text earlier in the buffer cannot shift them.
-      (dolist (o (overlays-in (point-min) (point-max)))
-        (when-let* ((sec (overlay-get o 'opencode-section))
-                    ((equal (plist-get sec :id) part-id)))
-          (unless (eq o ov)
-            (opencode-chat--delete-section o))))
-      ;; Drop the cached overlay before it is deleted, so a lookup racing
-      ;; the redraw cannot hand out a dead one.
-      (when msg-id
-        (when-let* ((entry (opencode-chat--store-get msg-id))
-                    (parts (plist-get entry :parts))
-                    (pinfo (gethash part-id parts)))
-          (plist-put pinfo :overlay nil)))
-      (opencode-chat--recache-part
-       msg-id part-id part-type
-       (opencode-chat--replace-section
-        ov
-        (lambda () (opencode-chat--render-part-by-type part part-type msg-id)))))
+     ;; Case 1: Existing range — redraw exactly that part in place.
+     ((and (overlayp range) (overlay-buffer range))
+      (let ((start (overlay-start range))
+            (end (overlay-end range)))
+        ;; The part owns both overlays.  Delete their handles before replacing
+        ;; the text so no lookup can return a stale boundary mid-redraw.
+        (delete-overlay range)
+        (when (and (overlayp section) (overlay-buffer section))
+          (delete-overlay section))
+        (when (> end start)
+          (opencode-chat--in-transcript
+            (delete-region start end)))
+        (let ((new-end
+               (opencode-chat--insert-section
+                start
+                (lambda ()
+                  (opencode-chat--render-part-by-type
+                   part part-type msg-id)))))
+          (opencode-chat--recache-part
+           msg-id part-id part-type start new-end))
+        :upserted))
+     ;; A stored but dead range is a desync, not proof that the part was never
+     ;; rendered.  Preserve the entry for reset cleanup and request a canonical
+     ;; refresh rather than inserting a duplicate.
+     ((and range (not (overlay-buffer range)))
+      (opencode--debug
+       "opencode-chat: dead part range during inline update msg=%s part=%s"
+       msg-id part-id)
+      :needs-refresh)
      ;; Case 2: No overlay — insert at message-end or messages-end
      ((let ((pos (or (opencode-chat--message-insert-pos msg-id)
                      (when-let* ((end (opencode-chat--messages-end)))
                        (marker-position end)))))
-        (when pos
-          (opencode-chat--recache-part
-           msg-id part-id part-type
-           (opencode-chat--insert-section
-            pos
-            (lambda () (opencode-chat--render-part-by-type part part-type msg-id))))
-          t)))
-     ;; Case 3: No insertion point — defer
-     (t
-      (opencode-chat--schedule-refresh)))))
+         (when pos
+           (let (start)
+             (let ((end
+                    (opencode-chat--insert-section
+                     pos
+                     (lambda ()
+                       (setq start (point))
+                       (opencode-chat--render-part-by-type
+                        part part-type msg-id)))))
+               (opencode-chat--recache-part
+                msg-id part-id part-type (or start pos) end)))
+           :upserted)))
+      ;; Case 3: No insertion point — defer
+      (t :needs-refresh))))
 
 ;;; --- Public API ---
 
@@ -1080,20 +1235,28 @@ Case 3: no insertion point — defer to schedule-refresh."
   "Create or update message MSG-ID with DATA (info plist).
 DATA may include :parts for initial rendering.
 If the message doesn't exist, renders it at messages-end.
-If it exists, updates header/footer in-place."
+If it exists, updates header/footer in-place.
+
+Return `:inserted', `:updated', or `:needs-refresh'.  The latter means
+the message store could not render safely in the current buffer state;
+the chat controller should schedule a refresh."
   (if (opencode-chat-message-exists-p msg-id)
-      (opencode-chat--update-message-inline msg-id data)
+      (if (opencode-chat--update-message-inline msg-id data)
+          :updated
+        :needs-refresh)
     (let ((parts (plist-get data :parts))
           (info (if (plist-get data :role)
                     data
                   ;; DATA is already a full msg plist with :info
                   (plist-get data :info))))
-      (opencode-chat--insert-message-at-end
-       (list :info (or info data) :parts parts)))))
+      (if (opencode-chat--insert-message-at-end
+           (list :info (or info data) :parts parts))
+          :inserted
+        :needs-refresh))))
 
 (defun opencode-chat-message-delete (msg-id)
   "Delete message MSG-ID from buffer and store.
-Frees all part markers, removes the overlay, deletes the buffer region.
+Deletes all part range overlays, removes the message overlay and text.
 
 Goes through `opencode-chat--delete-section' rather than deleting the
 region directly, so the public delete gets the same guard as every other
@@ -1101,12 +1264,14 @@ section removal: a message overlay that has drifted into the input area
 must not take the user's unsent text with it."
   (when-let* ((ov (opencode-chat--store-find-overlay msg-id)))
     (opencode-chat--delete-section ov))
-  ;; Clean store entry (frees markers)
+  ;; Clean store entry (deletes part-owned overlays)
   (when-let* ((entry (opencode-chat--store-get msg-id)))
     (when-let* ((parts (plist-get entry :parts)))
       (maphash (lambda (_pid info)
-                 (when-let* ((m (plist-get info :marker)))
-                   (when (markerp m) (set-marker m nil))))
+                 (when-let* ((range (plist-get info :range-overlay)))
+                   (when (overlayp range) (delete-overlay range)))
+                 (when-let* ((part-ov (plist-get info :overlay)))
+                   (when (overlayp part-ov) (delete-overlay part-ov))))
                parts))
     (remhash msg-id (opencode-chat--store))))
 
@@ -1123,23 +1288,22 @@ Returns:
   :need-msg  — no message overlay, caller must bootstrap message
   nil        — no-op (finalized part or nothing to do)"
   (cond
-   ;; Non-text part (tool, step-*) — upsert inline
-   ((not (or (null part-type)
-             (string= part-type "text")
-             (string= part-type "reasoning")))
-    (opencode-chat--in-transcript
-      (opencode-chat--update-part-inline part))
-    :upserted)
+    ;; Non-text part (tool, step-*) — upsert inline
+    ((not (or (null part-type)
+              (string= part-type "text")
+              (string= part-type "reasoning")))
+     (opencode-chat--in-transcript
+       (opencode-chat--update-part-inline part msg-id)))
 
    ;; Streaming delta
    (delta
     (let ((type (or part-type
                     (opencode-chat--store-part-type msg-id part-id))))
       (cond
-       ;; Case 1: marker exists → append
+       ;; Case 1: range overlay exists → append
        ((opencode-chat--append-delta msg-id part-id delta type)
         :streamed)
-       ;; Case 2: message overlay exists → create marker, append.
+       ;; Case 2: message overlay exists → create a zero-width range, append.
        ;; When the previous streaming part's last delta ended mid-line
        ;; (no trailing newline), insert a separator so the new part
        ;; starts at bolp — otherwise the first delta for this part
@@ -1153,14 +1317,15 @@ Returns:
                     (buffer-undo-list t))
                 (insert "\n"))
               (setq pos (point)))
-            ;; Invariant: after the guard, the marker's anchor MUST be at
+            ;; Invariant: after the guard, the range's anchor MUST be at
             ;; bolp — otherwise the new streaming part's first delta will
             ;; glue onto the previous part's tail (the bug pinned by
             ;; `opencode-chat-streaming-new-part-breaks-line').
             (cl-assert (save-excursion (goto-char pos) (bolp)) t
-                       "new streaming part marker must anchor at bolp"))
+                       "new streaming part range must anchor at bolp"))
           (opencode-chat--store-set-part msg-id part-id (or type "text")
-                                        (copy-marker pos nil))
+                                        (opencode-chat--part-range-overlay
+                                         pos pos part-id))
           (opencode-chat--append-delta msg-id part-id delta (or type "text"))
           :streamed))
        ;; Case 3: no message → caller must bootstrap
@@ -1171,7 +1336,7 @@ Returns:
    ;; empty text placeholder doesn't glue onto the previous part's
    ;; tail when it didn't end on a newline.
    ((and part-id
-         (not (opencode-chat--store-part-marker msg-id part-id)))
+         (not (opencode-chat--store-part-overlay msg-id part-id)))
     (when-let* ((pos (opencode-chat--message-insert-pos msg-id)))
       (let ((role (or (opencode-chat--msg-role msg-id) 'assistant)))
         (opencode-chat--insert-section
@@ -1181,15 +1346,6 @@ Returns:
 
    ;; Finalized part — no-op
    (t nil)))
-
-(defun opencode-chat-message-set-state (msg-id state)
-  "Set the state for MSG-ID to STATE (:queued, :sending, or nil)."
-  (plist-put (opencode-chat--store-ensure msg-id) :state state))
-
-(defun opencode-chat-message-state (msg-id)
-  "Return the current state for MSG-ID, or nil."
-  (when-let* ((entry (opencode-chat--store-get msg-id)))
-    (plist-get entry :state)))
 
 (defun opencode-chat-message-has-parts-p (msg-id)
   "Return non-nil if MSG-ID has any registered parts."
@@ -1228,7 +1384,12 @@ Returns:
 Re-renders the header line (first line of the message section) so the
 timestamp, agent, model, and tokens reflect the latest server data.
 For assistant messages with `:completed' time, also re-renders the
-footer line (token counts + duration)."
+footer line (token counts + duration).
+
+Both re-renders replace text the collapse machinery owns --- the header
+carries the `[collapsed]' indicator and the icon, the footer sits inside
+the hidden body --- so a collapsed message is put back into agreement
+with its overlay at the end."
   (when-let* ((ov (opencode-chat--store-find-overlay msg-id))
               ((overlay-buffer ov)))
     (opencode-chat--in-transcript
@@ -1313,7 +1474,21 @@ footer line (token counts + duration)."
                   (insert (propertize (apply #'concat (nreverse footer-parts))
                                       'face 'opencode-message-footer-line))
                   (insert "\n"))
-                (opencode-chat--apply-message-props footer-start (point))))))
+                (opencode-chat--apply-message-props footer-start (point))
+                ;; The old footer ran to the overlay's end, so deleting it
+                ;; shrank the overlay to the footer's start; the overlay
+                ;; does not advance on insertion, so the replacement landed
+                ;; outside it.  A message whose footer is not in its own
+                ;; section cannot be collapsed --- and worse, every part
+                ;; inserted afterwards goes to `--message-insert-pos',
+                ;; which is now the overlay's end, and lands outside too.
+                (when (< (overlay-end ov) (point))
+                  (move-overlay ov (overlay-start ov) (point)))))))
+        ;; Both re-renders above wrote over text the collapse machinery
+        ;; owns.  Re-collapsing is idempotent and restores the icon, the
+        ;; indicator, and the hidden state of the new footer.
+        (when (overlay-get ov 'opencode-collapsed)
+          (opencode-ui--collapse-section ov))
         t)))))
 
 
@@ -1321,47 +1496,55 @@ footer line (token counts + duration)."
 (defun opencode-chat--append-delta (msg-id part-id delta field)
   "Append streaming DELTA for PART-ID in MSG-ID.
 FIELD is the part type (\"text\" or \"reasoning\").
-Moves point to the part marker before inserting so text lands at the
-correct buffer position.  Also initializes streaming region tracking
-on first delta for a part.
-Returns t on success, nil if no marker found for PART-ID."
-  (let ((marker (opencode-chat--store-part-marker msg-id part-id)))
-    (when (and marker (marker-position marker))
+Inserts at the end of the part's range overlay, then explicitly extends
+that range over the new text.  Returns t on success, nil if no live
+range overlay exists for PART-ID."
+  (let ((range (opencode-chat--store-part-overlay msg-id part-id)))
+    (when (and (overlayp range) (overlay-buffer range))
       (opencode-chat--in-transcript
-        ;; Switch marker to insertion type t so it advances as deltas
-        ;; are inserted.  Starts as nil (set in `render-part') to
-        ;; prevent tool parts inserted at the same position from
-        ;; pushing the marker forward before any text arrives.
-        (set-marker-insertion-type marker t)
-        (save-excursion
-          (goto-char (marker-position marker))
-          ;; Initialize streaming region tracking on first delta
-          (unless (opencode-chat--streaming-part-id)
-            (opencode-chat--set-streaming-msg-id msg-id)
-            (opencode-chat--set-streaming-part-id part-id)
-            (opencode-chat--set-streaming-region-start (copy-marker (point) nil)))
-          ;; Invariant: streaming-msg-id and streaming-part-id are both
-          ;; set or both nil — losing one would orphan the fontify timer.
-          (cl-assert (eq (and (opencode-chat--streaming-part-id) t)
-                         (and (opencode-chat--streaming-msg-id) t))
-                     t "streaming {msg,part}-id must be paired")
-          (opencode-chat--insert-streaming-delta delta field)))
+        (let ((start (overlay-start range))
+              (end (overlay-end range))
+              ;; Only reasoning streams into a part-owned collapsible
+              ;; section.  Text parts have no UI section; avoiding the
+              ;; lookup also avoids irrelevant work per text delta.
+              (section (and (equal field "reasoning")
+                            (opencode-chat--store-part-section-overlay
+                             msg-id part-id))))
+          (save-excursion
+            (goto-char end)
+            (opencode-chat--insert-streaming-delta delta field)
+            (when (and section (overlay-get section 'opencode-collapsed))
+              (put-text-property end (point)
+                                 'invisible 'opencode-section))
+            ;; The range uses rear-advance=nil so neighbouring inserts do
+            ;; not move it.  Only this part's own mutation extends it.
+            (move-overlay range start (point))
+            ;; A reasoning part also owns a collapsible UI section.  It uses
+            ;; the same explicit extension rule as the data range so the
+            ;; following part is never absorbed at a shared boundary.
+            (when (and section
+                       (= (overlay-end section) end)
+                       (< end (point)))
+              (move-overlay section (overlay-start section) (point))))))
       t)))
 
 (defun opencode-chat-message-clear-all ()
   "Clear all message state after erase-buffer.
-Nils messages-end, clears all hash tables, cancels streaming timers,
-frees all markers."
+Nils messages-end, clears all hash tables, and deletes stored overlays."
+  (when-let* ((end (opencode-chat--messages-end)))
+    (set-marker end nil))
   (opencode-chat--set-messages-end nil)
-  (opencode-chat--clear-streaming-state)
   (opencode-chat--store-clear)
   (when (hash-table-p (opencode-chat--diff-shown))
     (clrhash (opencode-chat--diff-shown)))
   (opencode-chat--set-current-message-id nil))
 
-(defun opencode-chat-message-clear-streaming ()
-  "Clear streaming state only."
-  (opencode-chat--clear-streaming-state))
+(defun opencode-chat-message-reset ()
+  "Reset all message-owned state after transcript erasure.
+Semantic alias for `opencode-chat-message-clear-all'.  Prefer this in
+cross-module code; generated state setters are compatibility shims and
+same-owner implementation details."
+  (opencode-chat-message-clear-all))
 
 (defun opencode-chat-message-messages-end ()
   "Return the messages-end marker (read accessor)."

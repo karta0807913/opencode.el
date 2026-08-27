@@ -10,6 +10,7 @@
 (require 'test-helper nil t)
 (require 'opencode-sidebar)
 (require 'opencode-api-cache)
+(require 'opencode-pipeline)
 
 ;; Ensure `opencode-default-directory' is a special (dynamically-bound) variable
 (defvar opencode-default-directory nil)
@@ -108,6 +109,263 @@
   (let ((item (list :group-name "myproject" :project-dir "/proj")))
     ;; No refreshing state
     (should (string-match-p "myproject" (opencode-sidebar--group-label item)))))
+
+(ert-deftest opencode-sidebar-project-name-never-empty ()
+  "Project display names must never be empty.
+The OpenCode `global' project has \"/\" as its worktree, whose basename
+is empty.  Treemacs puts the `button' property on the label text alone,
+so an empty label yields a node with no button: it cannot be selected
+or expanded."
+  (should (equal "(global)" (opencode-sidebar--project-name "/")))
+  (should (equal "myproject" (opencode-sidebar--project-name "/tmp/myproject/")))
+  (should-not (string-empty-p (opencode-sidebar--project-name nil)))
+  (should-not (string-empty-p (opencode-sidebar--project-name ""))))
+
+(ert-deftest opencode-sidebar-group-label-root-worktree ()
+  "The global project group renders a non-empty, selectable label."
+  (let ((item (list :group-name ""
+                    :group-type 'project
+                    :project-dir "/")))
+    (should (equal "(global)" (substring-no-properties
+                               (opencode-sidebar--group-label item))))))
+
+(ert-deftest opencode-sidebar-session-label-root-worktree-prefix ()
+  "Opened sessions in the global project get a non-empty project prefix."
+  (let* ((item (list :title "Global task" :opened t :project-dir "/"))
+         (label (substring-no-properties (opencode-sidebar--session-label item))))
+    (should (string-match-p "\\[(global)\\]" label))
+    (should-not (string-match-p "\\[\\]" label))))
+
+;;; --- Pipeline view tests ---
+
+(defun opencode-sidebar-test--file-string (file)
+  "Return FILE contents as a string."
+  (with-temp-buffer
+    (insert-file-contents (expand-file-name file
+                                            (file-name-directory
+                                             (locate-library "opencode-sidebar"))))
+    (buffer-string)))
+
+(ert-deftest opencode-sidebar-boundary-no-direct-chat-registry ()
+  "Sidebar production code must use public chat registry accessors."
+  (let ((src (opencode-sidebar-test--file-string "opencode-sidebar.el")))
+    (should-not (string-match-p "opencode--chat-registry" src))))
+
+(ert-deftest opencode-sidebar-boundary-no-mutable-pipeline-execution-items ()
+  "Sidebar items/views must not carry mutable pipeline execution structs."
+  (let ((src (opencode-sidebar-test--file-string "opencode-sidebar.el")))
+    (should-not (string-match-p ":pipeline-execution\\_>" src))))
+
+(defvar opencode-sidebar-test-pipeline-entry nil)
+(defvar opencode-sidebar-test-pipeline-next nil)
+
+(defun opencode-sidebar-test--install-pipeline ()
+  "Install a small pipeline for sidebar tests."
+  (let* ((next
+          (opencode-pipeline-template
+           :title "opencode-sidebar-test-pipeline-next"
+           :prompt "Verify"))
+         (entry
+          (opencode-pipeline-template
+           :title "opencode-sidebar-test-pipeline-entry"
+           :session-id "ses_pipeline_entry"
+           :prompt "Implement"
+           :next next)))
+    (setq opencode-sidebar-test-pipeline-entry entry
+          opencode-sidebar-test-pipeline-next next)))
+
+(defun opencode-sidebar-test--pipeline-execution ()
+  "Return a runtime execution for sidebar pipeline tests."
+  (let ((execution
+         (opencode-pipeline-execution--create
+          :id "plrun_sidebar"
+          :entry-template opencode-sidebar-test-pipeline-entry
+          :title "Sidebar Pipeline"
+          :directory "/project/"
+          :status 'running)))
+    (opencode-pipeline--instantiate-nodes execution)
+    (let* ((entry-symbol
+            (gethash opencode-sidebar-test-pipeline-entry
+                     (opencode-pipeline-execution-template-index execution)))
+           (next-symbol
+            (gethash opencode-sidebar-test-pipeline-next
+                     (opencode-pipeline-execution-template-index execution)))
+           (entry
+            (opencode-pipeline-execution-node execution entry-symbol)))
+      (setf (opencode-pipeline-execution-current execution) next-symbol)
+      (setf (opencode-pipeline-node-status entry) 'completed
+            (opencode-pipeline-node-visit-count entry) 1
+            (opencode-pipeline-node-invocation-count entry) 1))
+    execution))
+
+(ert-deftest opencode-sidebar-pipeline-execution-items-read-registry ()
+  "Pipeline execution rows carry immutable views, not runtime structs."
+  (let ((opencode-pipeline--executions (make-hash-table :test 'equal)))
+    (opencode-sidebar-test--install-pipeline)
+    (let ((execution (opencode-sidebar-test--pipeline-execution)))
+      (puthash "plrun_sidebar" execution
+               opencode-pipeline--executions)
+      (let ((items (opencode-sidebar--pipeline-execution-items)))
+        (should (= 1 (length items)))
+        (should-not (plist-member (car items) :pipeline-execution))
+        (should (equal "plrun_sidebar"
+                       (plist-get (car items) :pipeline-execution-id)))
+        (should (equal "plrun_sidebar"
+                       (plist-get (plist-get (car items) :pipeline-view) :id)))
+        (should
+         (string-match-p
+            "\\[project\\].*Sidebar Pipeline.*running"
+            (opencode-sidebar--pipeline-execution-label (car items))))))))
+
+(ert-deftest opencode-sidebar-pipeline-node-items-include-lazy-node ()
+  "Pipeline children include both bound and not-yet-created sessions."
+  (opencode-sidebar-test--install-pipeline)
+  (let* ((execution (opencode-sidebar-test--pipeline-execution))
+         (view (opencode-pipeline-view-execution execution))
+         (items (opencode-sidebar--pipeline-node-items view)))
+    (should (= 2 (length items)))
+    (should-not (plist-member (car items) :pipeline-execution))
+    (should (equal "ses_pipeline_entry"
+                   (plist-get (car items) :session-id)))
+    (should-not (plist-get (cadr items) :session-id))
+    (should
+     (equal "opencode-sidebar-test-pipeline-next"
+            (symbol-name (plist-get (cadr items) :pipeline-node))))))
+
+(ert-deftest opencode-sidebar-pipeline-node-keys-include-execution ()
+  "Pipeline child keys remain unique across executions of one template."
+  (opencode-sidebar-test--install-pipeline)
+  (let ((execution-a (opencode-sidebar-test--pipeline-execution))
+        (execution-b (opencode-sidebar-test--pipeline-execution)))
+    (setf (opencode-pipeline-execution-id execution-b) "plrun_sidebar_b")
+    (should-not
+     (equal (mapcar (lambda (item) (plist-get item :key))
+                    (opencode-sidebar--pipeline-node-items
+                     (opencode-pipeline-view-execution execution-a)))
+            (mapcar (lambda (item) (plist-get item :key))
+                    (opencode-sidebar--pipeline-node-items
+                     (opencode-pipeline-view-execution execution-b)))))))
+
+(ert-deftest opencode-sidebar-ret-on-pipeline-opens-status-buffer ()
+  "RET on a pipeline execution opens its SVG/text status buffer."
+  (opencode-sidebar-test--install-pipeline)
+  (let ((execution (opencode-sidebar-test--pipeline-execution))
+        (opencode-pipeline--executions (make-hash-table :test 'equal))
+        described)
+    (puthash "plrun_sidebar" execution opencode-pipeline--executions)
+    (cl-letf (((symbol-function 'opencode-sidebar--node-at-point)
+               (lambda () 'node))
+              ((symbol-function 'button-get)
+               (lambda (_node property)
+                 (when (eq property :item)
+                    (list :pipeline-view
+                          (opencode-pipeline-view-execution execution)
+                          :pipeline-execution-id "plrun_sidebar"))))
+              ((symbol-function 'opencode-sidebar--find-main-window)
+               (lambda () (selected-window)))
+              ((symbol-function 'opencode-pipeline-describe)
+               (lambda (value) (setq described value))))
+      (opencode-sidebar--ret-action)
+      (should (eq execution described)))))
+
+(ert-deftest opencode-sidebar-ret-on-pipeline-session-opens-chat ()
+  "RET on a bound pipeline node reuses normal session opening."
+  (opencode-sidebar-test--install-pipeline)
+  (let ((execution (opencode-sidebar-test--pipeline-execution))
+        opened described)
+    (cl-letf (((symbol-function 'opencode-sidebar--node-at-point)
+               (lambda () 'node))
+              ((symbol-function 'button-get)
+               (lambda (_node property)
+                 (when (eq property :item)
+                     (list :pipeline-view
+                           (opencode-pipeline-view-execution execution)
+                           :pipeline-node 'node
+                           :session-id "ses_pipeline"
+                          :project-dir "/project"
+                          :backend 'opencode))))
+              ((symbol-function 'opencode-sidebar--find-main-window)
+               (lambda () (selected-window)))
+              ((symbol-function 'opencode-pipeline-describe)
+               (lambda (&rest _) (setq described t)))
+              ((symbol-function 'opencode-chat-open)
+               (lambda (session-id directory display-action backend)
+                 (setq opened
+                       (list session-id directory display-action backend)))))
+      (opencode-sidebar--ret-action)
+      (should
+       (equal '("ses_pipeline" "/project" nil opencode) opened))
+      (should-not described))))
+
+(ert-deftest opencode-sidebar-delete-pipeline-execution-resets-only-run ()
+  "The `d' command removes a terminal pipeline execution."
+  (opencode-sidebar-test--install-pipeline)
+  (let ((execution (opencode-sidebar-test--pipeline-execution))
+        (opencode-pipeline--executions (make-hash-table :test 'equal))
+        reset rerendered)
+    (setf (opencode-pipeline-execution-status execution) 'failed)
+    (puthash "plrun_sidebar" execution opencode-pipeline--executions)
+    (cl-letf (((symbol-function 'opencode-sidebar--node-at-point)
+               (lambda () 'node))
+              ((symbol-function 'button-get)
+               (lambda (_node property)
+                 (when (eq property :item)
+                    (list :pipeline-view
+                          (opencode-pipeline-view-execution execution)
+                          :pipeline-execution-id "plrun_sidebar"))))
+              ((symbol-function 'opencode-pipeline-reset)
+               (lambda (value) (setq reset value)))
+              ((symbol-function 'opencode-sidebar--rerender)
+               (lambda () (setq rerendered t))))
+      (opencode-sidebar--delete-or-close)
+      (should (eq execution reset))
+      (should rerendered))))
+
+(ert-deftest opencode-sidebar-delete-running-pipeline-refuses ()
+  "The `d' command refuses to hide a running pipeline."
+  (opencode-sidebar-test--install-pipeline)
+  (let ((execution (opencode-sidebar-test--pipeline-execution))
+        (opencode-pipeline--executions (make-hash-table :test 'equal))
+        reset)
+    (puthash "plrun_sidebar" execution opencode-pipeline--executions)
+    (cl-letf (((symbol-function 'opencode-sidebar--node-at-point)
+               (lambda () 'node))
+              ((symbol-function 'button-get)
+               (lambda (_node property)
+                 (when (eq property :item)
+                    (list :pipeline-view
+                          (opencode-pipeline-view-execution execution)
+                          :pipeline-execution-id "plrun_sidebar"))))
+              ((symbol-function 'opencode-pipeline-reset)
+               (lambda (value) (setq reset value))))
+      (should-error (opencode-sidebar--delete-or-close)
+                    :type 'user-error)
+      (should-not reset))))
+
+(ert-deftest opencode-sidebar-delete-pipeline-child-is-noop ()
+  "The `d' command on a pipeline child never deletes its session."
+  (opencode-sidebar-test--install-pipeline)
+  (let ((execution (opencode-sidebar-test--pipeline-execution))
+        deleted killed reset)
+    (cl-letf (((symbol-function 'opencode-sidebar--node-at-point)
+               (lambda () 'node))
+              ((symbol-function 'button-get)
+               (lambda (_node property)
+                 (when (eq property :item)
+                     (list :pipeline-view
+                           (opencode-pipeline-view-execution execution)
+                           :pipeline-node 'verify
+                           :session-id "ses_verify"))))
+              ((symbol-function 'opencode-pipeline-reset)
+               (lambda (&rest _) (setq reset t)))
+              ((symbol-function 'opencode-sidebar--delete-session-impl)
+               (lambda (_item) (setq deleted t)))
+              ((symbol-function 'kill-buffer)
+               (lambda (&rest _) (setq killed t))))
+      (opencode-sidebar--delete-or-close)
+      (should-not deleted)
+      (should-not killed)
+      (should-not reset))))
 
 ;;; --- SSE event handler tests ---
 
@@ -271,8 +529,10 @@
                            created-backend backend)
                      '(:id "ses_new")))
                   ((symbol-function
-                    'opencode-api-cache-invalidate-project-sessions)
-                   (lambda (dir) (setq invalidated-dir dir)))
+                    'opencode-backend-invalidate-project-sessions)
+                   (lambda (dir &optional backend)
+                     (should (eq backend 'opencode))
+                     (setq invalidated-dir dir)))
                   ((symbol-function 'opencode-sidebar--find-main-window)
                    (lambda () (selected-window)))
                   ((symbol-function 'opencode-chat-open)
@@ -295,28 +555,83 @@
             (should (member "/tmp/project-a"
                             opencode-sidebar--known-project-dirs))))))))
 
-(ert-deftest opencode-sidebar-new-session-choose-project-delegates ()
-  "Uppercase `C' picks a project and creates it with the OpenCode backend."
-  (let (ready selected-dir selected-backend)
-    (cl-letf (((symbol-function 'opencode--ensure-ready)
-               (lambda () (setq ready t)))
-              ((symbol-function 'opencode-sidebar--read-project)
-               (lambda ()
-                 (should ready)
-                 "/tmp/project-b"))
-              ((symbol-function 'opencode-sidebar--new-session-in-project)
-               (lambda (dir &optional backend)
-                 (setq selected-dir dir
-                       selected-backend backend))))
-      (opencode-sidebar--new-session-choose-project)
-      (should (equal "/tmp/project-b" selected-dir))
-      (should (eq 'opencode selected-backend)))))
+(ert-deftest opencode-sidebar-chat-choose-project-delegates ()
+  "Uppercase `C' runs the project chat picker in the main window."
+  (save-window-excursion
+    (let ((sidebar-buf (generate-new-buffer " *opencode-test-sidebar*"))
+          (main-buf (generate-new-buffer " *opencode-test-main*"))
+          (chat-buf (generate-new-buffer " *opencode-test-chat*"))
+          (ready-count 0)
+          picker-args
+          picker-window)
+      (unwind-protect
+          (progn
+            (delete-other-windows)
+            (switch-to-buffer main-buf)
+            (let ((main-win (selected-window))
+                  (sidebar-win (split-window-right)))
+              (select-window sidebar-win)
+              (switch-to-buffer sidebar-buf)
+              (setq-local opencode-sidebar--last-main-window main-win)
+              (cl-letf (((symbol-function 'opencode--ensure-ready)
+                         (lambda () (cl-incf ready-count)))
+                        ((symbol-function 'opencode-sidebar--read-project)
+                         (lambda ()
+                           (should (= ready-count 1))
+                           "/tmp/project-b"))
+                        ((symbol-function 'opencode--open-chat-picker)
+                         (lambda (&optional session-id backend directory)
+                           (setq picker-args
+                                 (list session-id backend directory)
+                                 picker-window (selected-window))
+                           (switch-to-buffer chat-buf))))
+                (opencode-sidebar--chat-choose-project))
+              (should (= ready-count 1))
+              (should (equal picker-args
+                             '(nil opencode "/tmp/project-b")))
+              (should (eq picker-window main-win))
+              (should (eq (window-buffer main-win) chat-buf))
+              (should (eq (window-buffer sidebar-win) sidebar-buf))))
+        (dolist (buf (list sidebar-buf main-buf chat-buf))
+          (when (buffer-live-p buf)
+            (kill-buffer buf)))))))
+
+(ert-deftest opencode-sidebar-chat-choose-project-quit-restores-sidebar ()
+  "Cancelling the project chat picker restores focus to the sidebar."
+  (save-window-excursion
+    (let ((sidebar-buf (generate-new-buffer " *opencode-test-sidebar*"))
+          (main-buf (generate-new-buffer " *opencode-test-main*")))
+      (unwind-protect
+          (progn
+            (delete-other-windows)
+            (switch-to-buffer main-buf)
+            (let ((main-win (selected-window))
+                  (sidebar-win (split-window-right)))
+              (select-window sidebar-win)
+              (switch-to-buffer sidebar-buf)
+              (setq-local opencode-sidebar--last-main-window main-win)
+              (let ((quit-signaled nil))
+                (cl-letf (((symbol-function 'opencode--ensure-ready) #'ignore)
+                          ((symbol-function 'opencode-sidebar--read-project)
+                           (lambda () "/tmp/project-b"))
+                          ((symbol-function 'opencode--open-chat-picker)
+                           (lambda (&rest _) (signal 'quit nil))))
+                  (condition-case nil
+                      (opencode-sidebar--chat-choose-project)
+                    (quit (setq quit-signaled t))))
+                (should quit-signaled))
+              (should (eq (selected-window) sidebar-win))
+              (should (eq (window-buffer main-win) main-buf))
+              (should (eq (window-buffer sidebar-win) sidebar-buf))))
+        (dolist (buf (list sidebar-buf main-buf))
+          (when (buffer-live-p buf)
+            (kill-buffer buf)))))))
 
 (ert-deftest opencode-sidebar-keymap-binds-project-session-command ()
-  "Uppercase `C' opens the choose-project session flow."
+  "Uppercase `C' opens the choose-project chat picker flow."
   (should
    (eq (keymap-lookup opencode-sidebar--extra-map "C")
-       #'opencode-sidebar--new-session-choose-project)))
+       #'opencode-sidebar--chat-choose-project)))
 
 ;;; --- Project session cache tests ---
 
@@ -347,16 +662,19 @@
 
 (ert-deftest opencode-sidebar-build-subagent-children-filters-by-parent ()
   "Subagent children builder returns only sessions matching parentID."
-  (let ((opencode-api-cache--project-sessions (make-hash-table :test 'equal)))
-    (opencode-api-cache-put-project-sessions
-     "/proj"
-     [(:id "ses_parent" :title "Parent" :directory "/proj")
-      (:id "ses_child1" :title "Child 1" :parentID "ses_parent" :directory "/proj")
-      (:id "ses_child2" :title "Child 2" :parentID "ses_parent" :directory "/proj")
-      (:id "ses_other_child" :title "Other Child" :parentID "ses_other" :directory "/proj")])
-    (cl-letf (((symbol-function 'opencode-api-get-sync)
-               (lambda (_path &optional _params)
-                 (opencode-api-cache-project-sessions "/proj" :cache t))))
+  (let ((sessions
+         [(:id "ses_parent" :title "Parent" :directory "/proj")
+          (:id "ses_child1" :title "Child 1" :parentID "ses_parent"
+           :directory "/proj")
+          (:id "ses_child2" :title "Child 2" :parentID "ses_parent"
+           :directory "/proj")
+          (:id "ses_other_child" :title "Other Child" :parentID "ses_other"
+           :directory "/proj")]))
+    (cl-letf (((symbol-function 'opencode-backend-cached-project-sessions)
+               (lambda (project-dir &optional backend)
+                 (should (equal project-dir "/proj"))
+                 (should (eq backend 'opencode))
+                 sessions)))
       (let ((children (opencode-sidebar--build-subagent-children "ses_parent" "/proj")))
         (should (= 2 (length children)))
         (should (equal "ses_child1" (plist-get (car children) :session-id)))

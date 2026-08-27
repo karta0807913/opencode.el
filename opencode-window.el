@@ -140,17 +140,6 @@ Routes to the appropriate display mode."
        (string-prefix-p "*opencode:" buf-name)))
    (window-list)))
 
-(defun opencode-window--find-frame ()
-  "Find an existing opencode floating frame, or nil."
-  (seq-find
-   (lambda (frame)
-     (and (not (eq frame (selected-frame)))
-          (seq-some (lambda (win)
-                     (string-prefix-p "*opencode:"
-                                      (buffer-name (window-buffer win))))
-                   (window-list frame))))
-   (frame-list)))
-
 (defun opencode-window--hide (window)
   "Hide WINDOW.  If it's a side window, delete it.
 If it's a floating frame, iconify or delete the frame."

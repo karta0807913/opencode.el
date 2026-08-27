@@ -110,7 +110,41 @@
     ;; [Parent] button should be present
     (should (save-excursion
               (goto-char (point-min))
-              (search-forward "[Parent]" nil t)))))
+               (search-forward "[Parent]" nil t)))))
+
+(ert-deftest opencode-subagent-permission-popup-restores-parent-link ()
+  "Dismissing an inline permission popup restores child navigation."
+  (opencode-scenario-with-replay
+      (concat
+       ":session ses_child_permission_restore\n"
+       ":parent-id ses_parent_permission_restore\n"
+       ":directory /tmp/permission-restore\n"
+       ":api POST /permission/per_child_restore/reply 200 true\n"
+       ":eval (opencode-chat--set-session '(:id \"ses_child_permission_restore\" :parentID \"ses_parent_permission_restore\" :directory \"/tmp/permission-restore\"))\n"
+       ":sse {\"type\":\"permission.asked\",\"properties\":{\"id\":\"per_child_restore\",\"sessionID\":\"ses_child_permission_restore\",\"permission\":\"bash\",\"patterns\":[\"echo hi\"],\"metadata\":{}}}\n"
+       ":assert-permission\n"
+       ":answer-permission allow-once\n"
+       ":assert-no-permission\n")
+    (should (opencode-test-buffer-contains-p "Sub-agent session"))
+    (should (opencode-test-buffer-contains-p "[Parent]"))
+    (should (opencode-popup--input-area-valid-p))))
+
+(ert-deftest opencode-subagent-question-popup-restores-parent-link ()
+  "Dismissing an inline question popup restores child navigation."
+  (opencode-scenario-with-replay
+      (concat
+       ":session ses_child_question_restore\n"
+       ":parent-id ses_parent_question_restore\n"
+       ":directory /tmp/question-restore\n"
+       ":api POST /question/que_child_restore/reply 200 true\n"
+       ":eval (opencode-chat--set-session '(:id \"ses_child_question_restore\" :parentID \"ses_parent_question_restore\" :directory \"/tmp/question-restore\"))\n"
+       ":sse {\"type\":\"question.asked\",\"properties\":{\"id\":\"que_child_restore\",\"sessionID\":\"ses_child_question_restore\",\"questions\":[{\"header\":\"Pick\",\"question\":\"Pick one\",\"options\":[{\"label\":\"A\",\"description\":\"first\"},{\"label\":\"B\",\"description\":\"second\"}],\"multiple\":false,\"custom\":false}]}}\n"
+       ":assert-question\n"
+       ":answer-question 1\n"
+       ":assert-no-question\n")
+    (should (opencode-test-buffer-contains-p "Sub-agent session"))
+    (should (opencode-test-buffer-contains-p "[Parent]"))
+    (should (opencode-popup--input-area-valid-p))))
 
 (ert-deftest opencode-subagent-state-init-agent-default-model ()
   "State-init uses agent's :model field when no message history exists."
@@ -147,22 +181,41 @@
 ;;   Step 4: first available provider/model
 
 (ert-deftest opencode-subagent-state-init-messages-param ()
-  "Messages parameter: state-init extracts agent/model from last assistant."
+  "Messages parameter restores agent, model, provider, and variant."
   (opencode-scenario-with-replay
       (concat ":session ses_msg_param\n"
               ":directory /tmp/test\n")
     (let ((messages [(:info (:id "m1" :role "user"
                              :time (:created 1700000000)))
                      (:info (:id "m2" :role "assistant"
-                             :agent "deep-thinker"
-                             :modelID "o3-pro"
-                             :providerID "openai"
-                             :time (:created 1700000001)))]))
-      (setq opencode-chat--state nil)
-      (opencode-chat--state-init messages)
-      (should (equal (opencode-chat-state-agent opencode-chat--state) "deep-thinker"))
-      (should (equal (opencode-chat-state-model-id opencode-chat--state) "o3-pro"))
-      (should (equal (opencode-chat-state-provider-id opencode-chat--state) "openai")))))
+                              :agent "deep-thinker"
+                              :modelID "o3-pro"
+                              :providerID "openai"
+                              :variant "high"
+                              :time (:created 1700000001)))]))
+      (cl-letf (((symbol-function 'opencode-agent-valid-p)
+                  (lambda (name) (equal name "deep-thinker"))))
+        (setq opencode-chat--state nil)
+        (opencode-chat--state-init messages)
+        (should (equal (opencode-chat-state-agent opencode-chat--state) "deep-thinker"))
+        (should (equal (opencode-chat-state-model-id opencode-chat--state) "o3-pro"))
+        (should (equal (opencode-chat-state-provider-id opencode-chat--state) "openai"))
+        (should (equal (opencode-chat-state-variant opencode-chat--state) "high"))))))
+
+(ert-deftest opencode-subagent-state-init-preserves-existing-variant ()
+  "State-init preserves an existing variant when history omits one."
+  (opencode-scenario-with-replay
+      (concat ":session ses_variant_existing\n"
+              ":directory /tmp/test\n")
+    (opencode-chat--state-ensure)
+    (opencode-chat--set-variant "max")
+    (opencode-chat--state-init
+     [(:info (:id "m1" :role "assistant"
+              :agent "build"
+              :modelID "claude-opus-4-6"
+              :providerID "anthropic"))])
+    (should (equal (opencode-chat-state-variant opencode-chat--state)
+                   "max"))))
 
 (ert-deftest opencode-subagent-state-init-step1-existing-state-preserved ()
   "Step 1: existing state (set by SSE handler) is preserved by state-init."
@@ -175,10 +228,12 @@
     (opencode-chat--set-model-id "o3-pro")
     (opencode-chat--set-provider-id "openai")
     ;; Re-init — should preserve the values set above
-    (opencode-chat--state-init)
-    (should (equal (opencode-chat-state-agent opencode-chat--state) "deep-thinker"))
-    (should (equal (opencode-chat-state-model-id opencode-chat--state) "o3-pro"))
-    (should (equal (opencode-chat-state-provider-id opencode-chat--state) "openai"))))
+    (cl-letf (((symbol-function 'opencode-agent-valid-p)
+               (lambda (name) (equal name "deep-thinker"))))
+      (opencode-chat--state-init)
+      (should (equal (opencode-chat-state-agent opencode-chat--state) "deep-thinker"))
+      (should (equal (opencode-chat-state-model-id opencode-chat--state) "o3-pro"))
+      (should (equal (opencode-chat-state-provider-id opencode-chat--state) "openai")))))
 
 (ert-deftest opencode-subagent-state-init-step2-agent-model-wins ()
   "Step 2: agent's :model overrides config default when no messages."

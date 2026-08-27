@@ -29,15 +29,24 @@
 ;;   `opencode-section'       — plist identifying the section (:type :id :data)
 ;;   `opencode-collapsed'     — non-nil if section is collapsed
 
-(defun opencode-ui--make-section (type &optional id data rear-advance)
+(defun opencode-ui--make-section (type &optional id data rear-advance
+                                       front-advance grows)
   "Create a section plist.
 TYPE is a symbol (e.g., `message', `tool-call', `session').
 ID is an optional unique identifier.
 DATA is an optional plist of section-specific data.
 When REAR-ADVANCE is non-nil, the overlay will be created with
 `rear-advance' so insertions at its end are included in the overlay
-\(used by streaming reasoning sections so deltas join the section)."
-  (list :type type :id id :data data :rear-advance rear-advance))
+\(used by streaming reasoning sections so deltas join the section).
+When FRONT-ADVANCE is non-nil, insertions at the section's beginning
+stay outside it.  Part-level sections use this so a late delta appended
+to the preceding part cannot become part of the following section.
+When GROWS is non-nil, an empty section may still collapse because later
+content will be added by an explicit range update."
+  (list :type type :id id :data data
+        :rear-advance rear-advance
+        :front-advance front-advance
+        :grows grows))
 
 ;;; --- Section insertion ---
 
@@ -58,8 +67,10 @@ BODY is evaluated with `inhibit-read-only' bound to t."
          (section-val ,section))
      ,@body
      (let* ((section-end (point))
+             (front-advance (plist-get section-val :front-advance))
              (rear-advance (plist-get section-val :rear-advance))
-             (ov (make-overlay section-start section-end nil nil rear-advance)))
+             (ov (make-overlay section-start section-end nil
+                               front-advance rear-advance)))
        (overlay-put ov 'opencode-section section-val)
        (overlay-put ov 'evaporate t)
        ov)))
@@ -93,11 +104,6 @@ Returns the innermost section when sections are nested."
   (when-let* ((ov (opencode-ui--innermost-section-overlay pos)))
     (overlay-start ov)))
 
-(defun opencode-ui--section-end (&optional pos)
-  "Return the end position of the section at POS."
-  (when-let* ((ov (opencode-ui--innermost-section-overlay pos)))
-    (overlay-end ov)))
-
 (defun opencode-ui--section-type (&optional pos)
   "Return the type of the section at POS."
   (plist-get (opencode-ui--section-at pos) :type))
@@ -108,10 +114,55 @@ Returns the innermost section when sections are nested."
 
 ;;; --- Section collapse/expand ---
 
+(defvar opencode-ui-section-toggled-functions nil
+  "Abnormal hook run after `opencode-ui--toggle-section' flips a section.
+Each function receives the section plist and non-nil when the section is
+now collapsed.
+
+A section overlay does not outlive the text it covers, so a redraw of
+that text silently reverts whatever the user chose with TAB.  This file
+keeps no memory of its own --- it does not know which redraws are
+coming, or what identifies a section across one --- so it reports the
+choice and lets the buffer that owns the content remember it.")
+
 (defun opencode-ui--section-collapsed-p (&optional pos)
   "Return non-nil if the section at POS is collapsed."
   (when-let* ((ov (opencode-ui--innermost-section-overlay pos)))
     (overlay-get ov 'opencode-collapsed)))
+
+(defun opencode-ui--in-collapsed-section-p (pos)
+  "Return non-nil when POS lies inside a collapsed section.
+Text inserted at POS is therefore hidden, and must be marked hidden
+itself: `insert' does not inherit the `invisible' property, so streamed
+content appended into a collapsed section would otherwise reappear one
+delta at a time."
+  (let ((found nil))
+    (dolist (ov (overlays-at pos))
+      (when (and (overlay-get ov 'opencode-section)
+                 (overlay-get ov 'opencode-collapsed))
+        (setq found t)))
+    found))
+
+(defun opencode-ui--section-body-start (ov)
+  "Return the first position of OV's body: just past its header line.
+Bounded by OV's end, so a section that is only a header reports an
+empty body rather than running into the next one."
+  (save-excursion
+    (goto-char (overlay-start ov))
+    (min (1+ (pos-eol)) (overlay-end ov))))
+
+(defun opencode-ui--collapsed-indicator-bounds (ov)
+  "Return (START . END) of OV's `[collapsed]' indicator, or nil."
+  (let* ((start (overlay-start ov))
+         (search-end (opencode-ui--section-body-start ov))
+         (ind-start (text-property-any start search-end
+                                       'opencode-collapsed-indicator t)))
+    (when ind-start
+      (cons ind-start
+            (or (next-single-property-change ind-start
+                                             'opencode-collapsed-indicator
+                                             nil search-end)
+                search-end)))))
 
 (defun opencode-ui--swap-collapse-icon (ov new-char)
   "Replace the collapse/expand icon in overlay OV header with NEW-CHAR."
@@ -130,95 +181,88 @@ Returns the innermost section when sections are nested."
                 (goto-char eol))
             (forward-char 1)))))))
 
-(defun opencode-ui--reset-nested-collapsed (ov)
-  "Reset collapsed state of all section overlays nested inside OV.
-Removes `[collapsed]' indicators, clears `opencode-collapsed' property,
-and swaps icons back to expanded for any inner sections that were
-independently collapsed."
-  (let ((start (overlay-start ov))
+(defun opencode-ui--recollapse-nested (ov)
+  "Re-hide the sections nested in OV that are collapsed in their own right.
+Expanding OV clears `invisible' across its whole body, inner sections
+included.  Those carry their own collapsed state, and a choice the user
+made about them specifically, so opening the outer section must not open
+them too: that would leave an inner section looking expanded while its
+overlay still says collapsed, and the next redraw would snap it shut
+again."
+  (dolist (inner (overlays-in (overlay-start ov) (overlay-end ov)))
+    (when (and (not (eq inner ov))
+               (overlay-get inner 'opencode-section)
+               (overlay-get inner 'opencode-collapsed))
+      (opencode-ui--collapse-section inner))))
+
+(defun opencode-ui--collapse-section (ov)
+  "Collapse section overlay OV.  Return non-nil if it collapsed.
+
+A section with nothing under its header collapses only if it is one that
+grows into itself --- the `grows' flag from
+`opencode-ui--make-section'.  A reasoning section exists from the moment
+the part is announced, when it is a header and nothing else, and the
+user can fold it away before its first delta arrives; refusing to record
+that left the header claiming expanded and every later delta visible.  A
+section that is complete when drawn and simply has no body, like a
+subtask carrying no prompt, has nothing to collapse and must not claim
+otherwise.
+
+Idempotent, and deliberately so: a caller that redraws part of a
+collapsed section's header deletes the `[collapsed]' indicator with it,
+and re-running this is how it puts the header back in agreement with the
+overlay.  Re-running must not then stack a second indicator."
+  (let* ((body-start (opencode-ui--section-body-start ov))
+         (end (overlay-end ov))
+         (has-body (< body-start end)))
+    (when (or has-body
+              (plist-get (overlay-get ov 'opencode-section) :grows)
+              ;; Compatibility for non-chat sections that still grow via
+              ;; rear-advance rather than explicit `move-overlay'.
+              (plist-get (overlay-get ov 'opencode-section) :rear-advance))
+      (when has-body
+        (put-text-property body-start end 'invisible 'opencode-section))
+      (overlay-put ov 'opencode-collapsed t)
+      (opencode-ui--swap-collapse-icon ov "▶")
+      (unless (opencode-ui--collapsed-indicator-bounds ov)
+        (save-excursion
+          (goto-char (overlay-start ov))
+          (goto-char (pos-eol))
+          (insert (propertize " [collapsed]"
+                              'face 'font-lock-comment-face
+                              'opencode-collapsed-indicator t))))
+      t)))
+
+(defun opencode-ui--expand-section (ov)
+  "Expand section overlay OV, leaving sections nested in it as they were."
+  (when-let* ((bounds (opencode-ui--collapsed-indicator-bounds ov)))
+    (delete-region (car bounds) (cdr bounds)))
+  ;; Only clear `invisible' where the value is ours.  Markdown hides its
+  ;; own markup under `opencode-md' and has to survive an expand.
+  (let ((pos (opencode-ui--section-body-start ov))
         (end (overlay-end ov)))
-    (dolist (inner (overlays-in start end))
-      (when (and (not (eq inner ov))
-                 (overlay-get inner 'opencode-section)
-                 (overlay-get inner 'opencode-collapsed))
-        ;; Remove [collapsed] indicator from inner header line
-        (let ((inner-start (overlay-start inner)))
-          (save-excursion
-            (goto-char inner-start)
-            (let* ((eol (pos-eol))
-                   (search-end (min (1+ eol) (overlay-end inner)))
-                   (ind-start (text-property-any inner-start search-end
-                                                 'opencode-collapsed-indicator t)))
-              (when ind-start
-                (let ((ind-end (or (next-single-property-change
-                                    ind-start 'opencode-collapsed-indicator
-                                    nil search-end)
-                                   search-end)))
-                  (delete-region ind-start ind-end))))))
-        (overlay-put inner 'opencode-collapsed nil)
-        (opencode-ui--swap-collapse-icon inner "▼")))))
+    (while (< pos end)
+      (let ((next (or (next-single-property-change pos 'invisible nil end)
+                      end)))
+        (when (eq (get-text-property pos 'invisible) 'opencode-section)
+          (remove-text-properties pos next '(invisible nil)))
+        (setq pos next))))
+  (overlay-put ov 'opencode-collapsed nil)
+  (opencode-ui--swap-collapse-icon ov "▼")
+  (opencode-ui--recollapse-nested ov))
 
 (defun opencode-ui--toggle-section (&optional pos)
   "Toggle collapse/expand of the innermost section at POS."
   (interactive)
-  (let ((ov (opencode-ui--innermost-section-overlay (or pos (point)))))
-    (when ov
-      (let* ((inhibit-read-only t)
-             (buffer-undo-list t)
-             (start (overlay-start ov))
-             (end (overlay-end ov))
-             ;; Body starts after the header line's newline
-             (body-start (save-excursion
-                           (goto-char start)
-                           (min (1+ (pos-eol)) end))))
-        (if (overlay-get ov 'opencode-collapsed)
-            ;; Expand: remove [collapsed] indicator, then show body
-            (progn
-              ;; Remove [collapsed] indicator from header line
-              (save-excursion
-                (goto-char start)
-                (let* ((eol (pos-eol))
-                       (search-end (min (1+ eol) (overlay-end ov)))
-                       (ind-start (text-property-any start search-end
-                                                      'opencode-collapsed-indicator t)))
-                  (when ind-start
-                    (let ((ind-end (or (next-single-property-change
-                                        ind-start 'opencode-collapsed-indicator
-                                        nil search-end)
-                                       search-end)))
-                      (delete-region ind-start ind-end)))))
-              ;; Reset any nested sections that were independently collapsed
-              (opencode-ui--reset-nested-collapsed ov)
-              ;; Recalculate body-start and end after deletion
-              (let* ((new-end (overlay-end ov))
-                     (new-body-start (save-excursion
-                                       (goto-char start)
-                                       (min (1+ (pos-eol)) new-end))))
-                ;; Only remove 'invisible where value is 'opencode-section
-                ;; Preserve other invisible values (e.g., 'opencode-md for markdown)
-                (let ((pos new-body-start))
-                  (while (< pos new-end)
-                    (let ((next (or (next-single-property-change pos 'invisible nil new-end)
-                                     new-end))
-                          (val (get-text-property pos 'invisible)))
-                      (when (eq val 'opencode-section)
-                        (remove-text-properties pos next '(invisible nil)))
-                      (setq pos next)))))
-              (overlay-put ov 'opencode-collapsed nil)
-              (opencode-ui--swap-collapse-icon ov "▼"))
-          ;; Collapse: hide everything after the first line
-          (when (< body-start end)
-            (put-text-property body-start end
-                               'invisible 'opencode-section)
-            (overlay-put ov 'opencode-collapsed t)
-            (opencode-ui--swap-collapse-icon ov "▶")
-            ;; Append [collapsed] indicator at end of header line
-            (save-excursion
-              (goto-char start)
-              (goto-char (pos-eol))
-              (insert (propertize " [collapsed]"
-                                  'face 'font-lock-comment-face
-                                  'opencode-collapsed-indicator t)))))))))
+  (when-let* ((ov (opencode-ui--innermost-section-overlay (or pos (point)))))
+    (let ((inhibit-read-only t)
+          (buffer-undo-list t))
+      (if (overlay-get ov 'opencode-collapsed)
+          (opencode-ui--expand-section ov)
+        (opencode-ui--collapse-section ov))
+      (run-hook-with-args 'opencode-ui-section-toggled-functions
+                          (overlay-get ov 'opencode-section)
+                          (and (overlay-get ov 'opencode-collapsed) t)))))
 
 ;;; --- Section navigation ---
 
@@ -289,11 +333,6 @@ Uses a space with `display' property for full-width extension."
     (insert (if face (propertize text 'face face) text)
             "\n")))
 
-(defun opencode-ui--insert-prop (text &rest properties)
-  "Insert TEXT with PROPERTIES applied."
-  (let ((inhibit-read-only t))
-    (insert (apply #'propertize text properties))))
-
 (defun opencode-ui--insert-icon (type)
   "Insert a status icon for TYPE.
 TYPE is one of: `active', `idle', `archived', `pending',
@@ -329,36 +368,6 @@ If LAST-P is non-nil, insert └─, otherwise insert ├─."
   (setq buffer-read-only t
         truncate-lines t)
   (buffer-disable-undo))
-
-(defmacro opencode-ui--save-excursion (&rest body)
-  "Execute BODY preserving point relative to section content.
-Useful when re-rendering a buffer — saves the current section ID
-and restores point to the same section afterward."
-  (declare (indent 0) (debug t))
-  `(let ((saved-section-id (opencode-ui--section-id))
-         (saved-col (current-column))
-         (saved-line-offset
-          (when (opencode-ui--section-start)
-            (count-lines (opencode-ui--section-start)
-                         (point)))))
-     ,@body
-     ;; Restore position
-     (if saved-section-id
-         (let ((found nil))
-           ;; Use overlays-in to find the section with matching ID
-           (dolist (ov (overlays-in (point-min) (point-max)))
-             (when (and (not found)
-                        (overlay-get ov 'opencode-section)
-                        (equal (plist-get (overlay-get ov 'opencode-section) :id)
-                               saved-section-id))
-               (goto-char (overlay-start ov))
-               (when saved-line-offset
-                 (forward-line saved-line-offset))
-               (move-to-column saved-col)
-               (setq found t)))
-           (unless found
-             (goto-char (point-min))))
-       (goto-char (point-min)))))
 
 (provide 'opencode-ui)
 ;;; opencode-ui.el ends here

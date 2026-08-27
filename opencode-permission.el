@@ -5,24 +5,25 @@
 
 ;;; Commentary:
 
-;; SSE-driven permission popup.  When the agent needs file/tool permission,
+;; Backend-driven permission popup.  OpenCode supplies permission requests via
+;; SSE events; Pi supplies them via RPC extension UI requests.  The UI receives
+;; normalized OpenCode-shaped events either way.  When the agent needs
+;; file/tool permission,
 ;; the chat buffer's input area is replaced with the permission details
 ;; and approve/reject keybindings.  After responding, the original input
 ;; text is restored.
-;;
-;; Falls back to a standalone side-window buffer when no chat buffer found.
 
 ;;; Code:
 
 (require 'cl-lib)
-(require 'opencode-api)
-(require 'opencode-backend)
+(require 'opencode-backend-core)
 (require 'opencode-faces)
 (require 'opencode-popup)
 (require 'opencode-log)
 (require 'opencode-util)
 
 ;; Cross-module reference for input-start marker
+(declare-function opencode-chat--backend "opencode-chat-state" (&optional state))
 
 ;; Avoid byte-compile warning — defined in opencode-sse.el
 (defvar opencode-sse-permission-replied-hook)
@@ -32,16 +33,14 @@
 
 (defvar-local opencode-permission--pending nil
   "FIFO list of pending permission request plists.
-Buffer-local in each chat buffer; SSE events dispatch to the correct
+Buffer-local in each chat buffer; backend events dispatch to the correct
 buffer via `opencode-event--dispatch-chat'.")
 
 (defvar-local opencode-permission--current nil
   "Currently displayed permission request plist.")
 
-;;; --- Buffer name (standalone fallback) ---
-
 (defconst opencode-permission--buffer-name "*opencode: permission*"
-  "Buffer name for the permission popup.")
+  "Legacy standalone popup buffer name used during cleanup.")
 
 ;;; --- Inline keymap ---
 
@@ -56,29 +55,10 @@ buffer via `opencode-event--dispatch-chat'.")
   ;; Block self-insert so random keys don't corrupt the UI
   "<remap> <self-insert-command>" #'ignore)
 
-;;; --- Standalone keymap + mode ---
-
-(defvar-keymap opencode-permission-mode-map
-  :doc "Keymap for `opencode-permission-mode'."
-  :parent special-mode-map
-  "a" #'opencode-permission--allow-once
-  "A" #'opencode-permission--allow-always
-  "r" #'opencode-permission--reject
-  "m" #'opencode-permission--reject-with-message
-  "q" #'opencode-permission--reject)
-
-(define-derived-mode opencode-permission-mode special-mode "OpenCode Permission"
-  "Major mode for the OpenCode permission request popup (standalone fallback).
-
-\\{opencode-permission-mode-map}"
-  :group 'opencode
-  (setq truncate-lines t)
-  (buffer-disable-undo))
-
-;;; --- SSE handler ---
+;;; --- Backend event handler ---
 
 (defun opencode-permission--on-asked (event)
-  "Handle a `permission.asked' SSE EVENT.
+  "Handle a `permission.asked' OpenCode-shaped EVENT.
 Extract the permission request from EVENT properties and queue it.
 Runs in the chat buffer context (dispatched by session-id)."
   (when-let* ((props (plist-get event :properties)))
@@ -112,8 +92,7 @@ If no pending requests remain, do nothing."
 Returns non-nil on success.  Returns nil (push back to queue) when:
 - the target buffer is busy with another popup,
 - the target buffer has no valid input area (child session / loading), or
-- no chat buffer is available at all.
-The standalone buffer is only used by `render-standalone' for tests."
+- no chat buffer is available at all."
   (let ((chat-buf (opencode-popup--find-chat-buffer request)))
     (cond
      ;; Chat buffer found, available, and has valid input area
@@ -128,15 +107,17 @@ The standalone buffer is only used by `render-standalone' for tests."
               (opencode-permission--render-inline request)
               t)
           (error
-           ;; Render failed -- restore state so future popups aren't blocked
-           (opencode--debug "opencode-permission: render error: %S" err)
-           (setq opencode-permission--current nil)
-           (when (overlayp opencode-popup--overlay)
-             (delete-overlay opencode-popup--overlay))
-           (setq opencode-popup--inline-p nil
-                 opencode-popup--saved-input nil
-                 opencode-popup--overlay nil)
-           nil))))
+            ;; Render failed -- restore the input tail before unblocking
+            ;; future popups.  Rendering deletes everything after
+            ;; messages-end, including child-session navigation.
+            (opencode--debug "opencode-permission: render error: %S" err)
+            (setq opencode-permission--current nil)
+            (when-let* ((recovery-error
+                         (opencode-popup--recover-render-error)))
+              (opencode--debug
+               "opencode-permission: render recovery error: %S"
+               recovery-error))
+            nil))))
      ;; Busy, no input area, or no buffer -- push back to queue
      (t nil))))
 
@@ -178,69 +159,15 @@ The standalone buffer is only used by `render-standalone' for tests."
       (overlay-put opencode-popup--overlay
                    'opencode-popup-request-id (plist-get request :id)))))
 
-;;; --- Standalone rendering (fallback / tests) ---
-
-(defun opencode-permission--render-standalone (request)
-  "Render permission REQUEST in a standalone side-window buffer."
-  (let ((buf (get-buffer-create opencode-permission--buffer-name))
-        (permission (or (plist-get request :permission) "unknown"))
-        (patterns (plist-get request :patterns))
-        (session-id (or (plist-get request :sessionID) "unknown"))
-        (perm-id (or (plist-get request :id) "unknown")))
-    (with-current-buffer buf
-      (opencode-permission-mode)
-      (setq opencode-permission--current request)
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        ;; Border
-        (insert (propertize "── Permission Required ──"
-                            'face 'opencode-popup-border)
-                "\n\n")
-        ;; Title
-        (insert (propertize "Permission Required"
-                            'face 'opencode-popup-title)
-                "\n\n")
-        ;; Details
-        (insert (propertize "Permission: " 'face 'bold)
-                permission "\n")
-        (insert (propertize "Patterns:   " 'face 'bold)
-                (if (and patterns (length> patterns 0))
-                    (mapconcat #'identity patterns ", ")
-                  "none")
-                "\n")
-        (insert (propertize "Session:    " 'face 'bold)
-                session-id "\n")
-        (insert (propertize "Request ID: " 'face 'bold)
-                perm-id "\n\n")
-        ;; Key hints
-        (let* ((always-pats (plist-get request :always))
-                (pattern-str (opencode-permission--format-patterns-short
-                              :patterns (or always-pats patterns)
-                              :permission permission)))
-          (insert (propertize "[a]" 'face 'opencode-popup-key)
-                  " Allow once  "
-                  (propertize "[A]" 'face 'opencode-popup-key)
-                  (format " Allow always (%s)  " pattern-str)
-                  (propertize "[r]" 'face 'opencode-popup-key)
-                  " Reject  "
-                  (propertize "[m]" 'face 'opencode-popup-key)
-                  " Reject with message\n"))
-        (goto-char (point-min))))
-    ;; Display in side window
-    (display-buffer buf
-                    '(display-buffer-in-side-window
-                      . ((side . bottom)
-                         (window-height . 8)
-                         (no-delete-other-windows . t))))))
-
 ;;; --- Reply ---
 
-(cl-defun opencode-permission-reply (&key id choice message)
+(cl-defun opencode-permission-reply (&key id choice message backend)
   "Reply to permission request ID with CHOICE.
 CHOICE is \"once\", \"always\", or \"reject\".  MESSAGE is an optional
-reply message.  This is the public API for users handling permission
-requests from SSE hooks."
-  (opencode-backend-reply-permission id choice message))
+reply message.  BACKEND identifies the request backend and defaults to
+`opencode-backend-current'.  This is the public API for users handling
+permission requests from backend hooks."
+  (opencode-backend-reply-permission id choice message backend))
 
 (cl-defun opencode-permission--default-always-message (&key request)
   "Return the default always-allow message for permission REQUEST."
@@ -269,8 +196,9 @@ the currently displayed popup."
         (opencode-permission-reply
          :id perm-id
          :choice choice
-         :message message)
-      (opencode-api-error
+         :message message
+         :backend (opencode-chat--backend))
+      (error
        (message "opencode-permission: reply failed: %s" (error-message-string err))))
     ;; Clean up — but only if on-replied didn't already handle it.
     ;; The sync HTTP call above can trigger accept-process-output,
@@ -312,10 +240,10 @@ can see exactly what was always-allowed in the permission popup."
   (let ((msg (read-string "Rejection reason: ")))
     (opencode-permission--reply :choice "reject" :message msg)))
 
-;;; --- SSE replied handler ---
+;;; --- Backend replied handler ---
 
 (defun opencode-permission--on-replied (event)
-  "Handle a `permission.replied' SSE EVENT.
+  "Handle a `permission.replied' OpenCode-shaped EVENT.
 Dismiss the permission popup if it matches the replied request, and
 remove stale copies from pending queues in all buffers.
 This handles the case where the permission was replied to elsewhere

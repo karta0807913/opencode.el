@@ -21,9 +21,10 @@ BATCH = $(EMACS) -Q -batch -L . -L test $(DEPS)
 endif
 
 SOURCES = $(wildcard *.el)
-TEST_SOURCES = $(wildcard test/*-test.el)
+PIPELINE_SCRIPT_SOURCES = $(filter-out scripts/pipelines/pipeline-scripts-test.el,$(wildcard scripts/pipelines/*.el))
+TEST_SOURCES = $(wildcard test/*-test.el) scripts/pipelines/pipeline-scripts-test.el
 
-.PHONY: test lint compile clean all
+.PHONY: test pipeline-test lint compile clean all
 
 all: compile test ## Build and test
 
@@ -37,8 +38,14 @@ else
 	  -f ert-run-tests-batch-and-exit
 endif
 
+pipeline-test: clean ## Run pipeline script ERT tests
+	$(BATCH) -l test/test-helper.el \
+	  -l scripts/pipelines/pipeline-scripts-test.el \
+	  -f ert-run-tests-batch-and-exit
+
 compile: ## Byte-compile all .el files
-	$(BATCH) -f batch-byte-compile $(SOURCES)
+	$(BATCH) -L scripts/pipelines -f batch-byte-compile \
+	  $(SOURCES) $(PIPELINE_SCRIPT_SOURCES)
 
 lint: ## Run checkdoc on all source files
 	@for f in $(SOURCES); do \
@@ -47,7 +54,7 @@ lint: ## Run checkdoc on all source files
 	done
 
 clean: ## Remove compiled files
-	rm -f *.elc test/*.elc
+	rm -f *.elc test/*.elc scripts/pipelines/*.elc
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \

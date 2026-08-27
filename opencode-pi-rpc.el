@@ -77,6 +77,11 @@ this connection serves (set once known via `get_state')."
   ui-handler
   exit-handler
   session-id
+  cwd
+  pending-prompt-message-ids
+  active-prompt-message-id
+  active-assistant-message-id
+  (assistant-correlations (make-hash-table :test 'equal))
   (alive t))
 
 ;;; --- Lifecycle ---
@@ -96,10 +101,11 @@ PLIST keys:
                        (format " *opencode-pi-rpc:%s*"
                                (file-name-nondirectory
                                 (directory-file-name default-directory)))))
-         (args (append (list "--mode" "rpc") (plist-get plist :args)))
-         (conn (opencode-pi-conn--create
-                :work-buffer work-buffer
-                :event-handler (plist-get plist :event-handler)
+          (args (append (list "--mode" "rpc") (plist-get plist :args)))
+          (conn (opencode-pi-conn--create
+                 :work-buffer work-buffer
+                 :cwd default-directory
+                 :event-handler (plist-get plist :event-handler)
                 :ui-handler (plist-get plist :ui-handler)
                 :exit-handler (plist-get plist :exit-handler))))
     (with-current-buffer work-buffer

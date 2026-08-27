@@ -26,6 +26,37 @@ future backend can register itself without changing chat rendering code."
     (should (opencode-backend-get))
     (should (opencode-backend-capable-p 'messages))))
 
+(ert-deftest opencode-backend-core-loads-without-opencode-api ()
+  "The generic backend core must not load OpenCode HTTP/cache modules.
+Alternate backends and generic modules require this core to avoid forcing
+OpenCode adapter registration or HTTP cache initialization."
+  (let* ((repo (expand-file-name default-directory))
+         (expr (prin1-to-string
+                `(progn
+                   (add-to-list 'load-path ,repo)
+                   (require 'opencode-backend-core)
+                   (princ
+                    (format "%S"
+                            (list (featurep 'opencode-backend-core)
+                                  (featurep 'opencode-api)
+                                  (featurep 'opencode-api-cache)))))))
+         (output
+          (with-temp-buffer
+            (let ((status (call-process
+                           (or (getenv "EMACS")
+                               (expand-file-name invocation-name
+                                                 invocation-directory))
+                           nil t nil "-Q" "--batch" "--eval" expr)))
+              (should (= status 0))
+              (buffer-string)))))
+    (should (equal "(t nil nil)" output))))
+
+(ert-deftest opencode-backend-facade-loads-opencode-adapter ()
+  "The compatibility facade still registers the built-in OpenCode backend."
+  (require 'opencode-backend)
+  (should (featurep 'opencode-backend-opencode))
+  (should (opencode-backend-get 'opencode)))
+
 (ert-deftest opencode-backend-opencode-session-normalizes-core-fields ()
   "OpenCode session payloads must adapt to the canonical session shape.
 Without this boundary, alternate backends would have to mimic OpenCode's
@@ -46,6 +77,15 @@ Without this boundary, alternate backends would have to mimic OpenCode's
     (should (equal (plist-get project :directory) "/tmp/project"))
     (should (equal (plist-get project :name) "Project"))
     (should (eq (plist-get project :raw) raw))))
+
+(ert-deftest opencode-backend-opencode-project-names-root-worktree ()
+  "Projects on a root worktree fall back to the id for their name.
+The `global' project has \"/\" as its worktree, and its basename is
+empty, which would leave project pickers showing a blank name."
+  (let ((project (opencode-backend-opencode-project
+                  '(:id "global" :worktree "/"))))
+    (should (equal (plist-get project :directory) "/"))
+    (should (equal (plist-get project :name) "global"))))
 
 (ert-deftest opencode-backend-opencode-list-projects-uses-project-api ()
   "OpenCode project listing stays behind the backend adapter boundary."
@@ -90,6 +130,51 @@ to supply in a backend-neutral way."
     (should (equal (plist-get normalized :part-id) "prt_1"))
     (should (equal (plist-get normalized :delta) "hi"))))
 
+(ert-deftest opencode-backend-opencode-event-normalizes-part-delta ()
+  "A standalone part delta retains its field and routing identifiers.
+Current OpenCode servers send text/reasoning chunks as
+`message.part.delta', without embedding a full part object."
+  (let* ((event '(:type "message.part.delta"
+                  :properties (:sessionID "ses_1"
+                               :messageID "msg_1"
+                               :partID "prt_1"
+                               :field "reasoning"
+                               :delta "thinking")))
+         (normalized (opencode-backend-opencode-event event)))
+    (should (equal (plist-get normalized :session-id) "ses_1"))
+    (should (equal (plist-get normalized :message-id) "msg_1"))
+    (should (equal (plist-get normalized :part-id) "prt_1"))
+    (should (equal (plist-get normalized :field) "reasoning"))
+    (should (equal (plist-get normalized :delta) "thinking"))))
+
+(ert-deftest opencode-backend-opencode-event-preserves-canonical-metadata ()
+  "OpenCode events provide a self-contained canonical routing object."
+  (let* ((event '(:type "message.updated"
+                  :directory "/tmp/project"
+                  :id "evt_1"
+                  :properties
+                  (:info (:id "msg_1"
+                          :sessionID "ses_1"
+                          :parentID "msg_user"
+                          :role "assistant"
+                          :agent "build"
+                          :modelID "opus"
+                          :providerID "anthropic"
+                          :tokens (:input 2 :output 3)
+                          :time (:created 10 :completed 20)))))
+         (normalized (opencode-backend-opencode-event event))
+         (message (plist-get normalized :message)))
+    (should (eq 'opencode (plist-get normalized :backend)))
+    (should (equal "/tmp/project" (plist-get normalized :directory)))
+    (should (equal "evt_1" (plist-get normalized :id)))
+    (should (equal "msg_user" (plist-get message :parent-id)))
+    (should (equal "build" (plist-get message :agent)))
+    (should (equal "opus" (plist-get message :model-id)))
+    (should (equal "anthropic" (plist-get message :provider-id)))
+    (should (= 20 (plist-get message :completed-at)))
+    (should (equal '(:input 2 :output 3)
+                   (plist-get message :tokens)))))
+
 (ert-deftest opencode-backend-normalize-event-uses-registered-adapter ()
   "Event normalization must dispatch through the active backend adapter.
 This keeps message/question/permission handlers separated from SSE/API
@@ -106,7 +191,8 @@ wire formats and lets future backends adapt at one boundary."
                         :raw event))))
     (let ((normalized (opencode-backend-normalize-event '(:sid "s1"))))
       (should (equal (plist-get normalized :type) "canonical"))
-      (should (equal (plist-get normalized :session-id) "s1")))))
+      (should (equal (plist-get normalized :session-id) "s1"))
+      (should (eq (plist-get normalized :backend) 'fake)))))
 
 (ert-deftest opencode-backend-canonical-shapes-cover-pi-style-blocks ()
   "Canonical shapes must be broad enough for Pi adapters without making

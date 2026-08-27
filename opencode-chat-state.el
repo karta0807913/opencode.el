@@ -97,7 +97,7 @@ a minimal placeholder.")
   (disposed-refresh-timer nil
    :documentation "Debounce timer for post-`server.instance.disposed' refresh.")
 
-  ;; --- Migrated from chat-message.el (9 slots) ---
+  ;; --- Migrated from chat-message.el (6 slots) ---
   (store nil
    :documentation "Hash table msg-id → plist (:msg MSG :overlay OV :parts PARTS :state STATE).
 Lazily initialised by `--state-ensure'.")
@@ -110,12 +110,12 @@ Lazily initialised by `--state-ensure'.")
   (diff-shown nil
    :documentation "Hash table partID → t when inline diff is expanded.
 Lazily initialised by `--state-ensure'.")
-  (streaming-part-id nil
-   :documentation "ID of the part currently receiving streaming deltas, or nil.")
-  (streaming-msg-id nil
-   :documentation "ID of the message whose part is streaming, or nil.")
-  (streaming-region-start nil
-   :documentation "Marker at the start of the current streaming region, or nil.")
+  (collapse-overrides nil
+   :documentation "Hash table section id → non-nil when the user collapsed it.
+Records explicit TAB choices, which a section overlay cannot: the
+overlay dies with the text it covers, and the transcript is redrawn
+whenever a tool advances or the session goes idle.
+Lazily initialised by `--state-ensure'.")
   (messages-end nil
    :documentation "Marker at the end of messages, before the input area.")
 
@@ -200,12 +200,16 @@ their slots alone — this is an in-place update."
   (let* ((existing-agent (opencode-chat-state-agent opencode-chat--state))
          (existing-model-id (opencode-chat-state-model-id opencode-chat--state))
          (existing-provider-id (opencode-chat-state-provider-id opencode-chat--state))
+         (existing-variant (opencode-chat-state-variant opencode-chat--state))
          (resolved (opencode-chat--resolve-defaults
-                    messages existing-agent existing-model-id existing-provider-id)))
+                      messages existing-agent existing-model-id
+                      existing-provider-id existing-variant
+                      (opencode-chat-state-backend opencode-chat--state))))
     (opencode-chat--set-agent (plist-get resolved :agent))
     (opencode-chat--set-agent-color (plist-get resolved :agent-color))
     (opencode-chat--set-model-id (plist-get resolved :model-id))
     (opencode-chat--set-provider-id (plist-get resolved :provider-id))
+    (opencode-chat--set-variant (plist-get resolved :variant))
     (opencode-chat--set-context-limit (plist-get resolved :context-limit))))
 
 
@@ -361,6 +365,9 @@ operate on it without first making its buffer current." noun)
                                   :lazy (make-hash-table :test 'equal))
 (opencode-chat-state--define-slot diff-shown :doc "shown-diffs hash table"
                                   :lazy (make-hash-table :test 'equal))
+(opencode-chat-state--define-slot collapse-overrides
+                                  :doc "user collapse-choice hash table"
+                                  :lazy (make-hash-table :test 'equal))
 (opencode-chat-state--define-slot agent)
 (opencode-chat-state--define-slot agent-color)
 (opencode-chat-state--define-slot model-id)
@@ -376,16 +383,13 @@ operate on it without first making its buffer current." noun)
 (opencode-chat-state--define-slot retry-overlay)
 (opencode-chat-state--define-slot disposed-refresh-timer)
 
-;; --- Migrated from chat-message.el (9 slots) ---
+;; --- Migrated from chat-message.el (6 slots) ---
 ;;
 ;; `store', `diff-cache', `diff-shown' are hash tables.  Their readers
 ;; call `--state-ensure' (which auto-allocates the tables on demand) so
 ;; callers never see nil — matches the pre-migration invariant where
 ;; the defvar-local defaulted to a fresh hash.
 (opencode-chat-state--define-slot current-message-id)
-(opencode-chat-state--define-slot streaming-part-id)
-(opencode-chat-state--define-slot streaming-msg-id)
-(opencode-chat-state--define-slot streaming-region-start)
 (opencode-chat-state--define-slot messages-end)
 
 ;; --- Migrated from chat-input.el (8 slots) ---

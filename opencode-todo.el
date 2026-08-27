@@ -14,7 +14,7 @@
 
 (require 'cl-lib)
 (require 'tabulated-list)
-(require 'opencode-api)
+(require 'opencode-backend-core)
 (require 'opencode-ui)
 (require 'opencode-faces)
 
@@ -25,6 +25,9 @@
 
 (defvar-local opencode-todo--todos nil
   "Vector of todo items for the current session.")
+
+(defvar-local opencode-todo--backend 'opencode
+  "Backend owning the current todo session.")
 
 ;;; --- Keymap ---
 
@@ -56,7 +59,7 @@
   "Fetch todos for SESSION-ID from the API.
 Returns a vector of todo items, or nil on error."
   (condition-case err
-      (opencode-api-get-sync (format "/session/%s/todo" session-id))
+      (opencode-backend-get-todos-sync session-id opencode-todo--backend)
     (error
      (message "Failed to fetch todos: %s" (error-message-string err))
      nil)))
@@ -294,19 +297,6 @@ Used by the inline chat footer and the todowrite tool body renderer."
   "Revert function for `opencode-todo-mode' buffers.
 Re-fetches todos and re-renders the buffer."
   (opencode-todo--refresh))
-
-;;; --- Buffer management ---
-
-(defun opencode-todo--open (session-id)
-  "Open or create a todo buffer for SESSION-ID.
-Fetches todos from the API and renders them."
-  (let ((buf (get-buffer-create "*opencode: todos*")))
-    (with-current-buffer buf
-      (opencode-todo-mode)
-      (setq opencode-todo--session-id session-id)
-      (setq opencode-todo--todos (opencode-todo--fetch session-id))
-      (opencode-todo--render))
-    (display-buffer buf)))
 
 (defun opencode-todo--refresh ()
   "Refresh the todo list by re-fetching from the API."

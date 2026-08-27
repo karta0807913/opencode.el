@@ -22,15 +22,18 @@
 (require 'opencode-util)
 (require 'opencode-faces)
 (require 'opencode-session)
-(require 'opencode-backend)
-(require 'opencode-api-cache)
+(require 'opencode-backend-core)
 (require 'opencode-chat-state)
+(require 'opencode-pipeline)
+(require 'opencode-pipeline-view)
 
 (declare-function opencode--register-sidebar-buffer "opencode" (&rest args))
 (declare-function opencode--deregister-sidebar-buffer "opencode" (&rest args))
 (declare-function opencode--chat-buffer-for-session "opencode" (session-id))
 (declare-function opencode--all-chat-buffers "opencode" ())
 (declare-function opencode--ensure-ready "opencode" ())
+(declare-function opencode--open-chat-picker "opencode"
+                  (&optional session-id backend directory))
 (declare-function opencode-chat-open "opencode-chat"
                   (session-id &optional directory display-action backend))
 
@@ -51,10 +54,10 @@ preventing rerender storms during rapid SSE events."
   :group 'opencode-sidebar)
 
 (defcustom opencode-sidebar-session-limit 100
-  "Maximum number of sessions to fetch per project."
+  "Deprecated maximum number of sessions to fetch per project.
+This option is retained for compatibility but is no longer used."
   :type 'integer
   :group 'opencode)
-
 
 (defmacro opencode-sidebar--log (fmt &rest args)
   "Log FMT with ARGS to debug buffer via `opencode--debug'."
@@ -85,7 +88,7 @@ Values: busy, idle, retry, question, permission.")
 
 (defvar-local opencode-sidebar--known-project-dirs nil
   "List of known project directories.
-Includes primary + discovered from chat registry + SSE events.")
+Includes primary + discovered from open chat buffers + SSE events.")
 
 (defvar-local opencode-sidebar--refresh-timer nil
   "Pending debounce timer for SSE-triggered rerender.")
@@ -120,7 +123,10 @@ Walks the parent chain via the project session cache, bounded by
       (while (and parent-id (< depth opencode-sidebar--max-ancestor-depth))
         (when (opencode--chat-buffer-for-session parent-id)
           (throw 'found t))
-        (let* ((all (and dir (opencode-api-cache-project-sessions dir :cache t)))
+        (let* ((all
+                (and dir
+                     (opencode-backend-cached-project-sessions
+                      dir 'opencode)))
                (parent (and all
                             (seq-find (lambda (s)
                                         (equal (plist-get s :id) parent-id))
@@ -133,14 +139,14 @@ Walks the parent chain via the project session cache, bounded by
   "Return a hash-set of opened session IDs shown in the Opened Session group.
 Excludes child sessions whose any ancestor is also opened."
   (let ((ids (make-hash-table :test 'equal)))
-    (when (boundp 'opencode--chat-registry)
-      (maphash (lambda (sid buf)
-                 (when (buffer-live-p buf)
-                   (let* ((session (with-current-buffer buf
-                                     (opencode-chat--session))))
-                     (unless (opencode-sidebar--ancestor-opened-p session)
-                       (puthash sid t ids)))))
-               opencode--chat-registry))
+    (dolist (buf (opencode--all-chat-buffers))
+      (let* ((session (with-current-buffer buf
+                        (opencode-chat--session)))
+             (sid (with-current-buffer buf
+                    (opencode-chat--session-id))))
+        (when (and sid
+                   (not (opencode-sidebar--ancestor-opened-p session)))
+          (puthash sid t ids))))
     ids))
 
 (defun opencode-sidebar--opened-session-items ()
@@ -148,38 +154,59 @@ Excludes child sessions whose any ancestor is also opened."
 Reads session data from each chat buffer's cached session plist.
 Excludes child sessions whose parent is also opened."
   (let ((items '()))
-    (when (boundp 'opencode--chat-registry)
-      (maphash
-       (lambda (sid buf)
-         (when (buffer-live-p buf)
-           (let* ((session (with-current-buffer buf (opencode-chat--session))))
-             ;; Skip child sessions if any ancestor is also opened
-             (unless (opencode-sidebar--ancestor-opened-p session)
-               (push (list :key (concat "session/" sid)
-                           :session-id sid
-                           :title (or (and session (plist-get session :title))
-                                      "(untitled)")
-                           :time (and session (plist-get session :time))
-                           :summary (and session (plist-get session :summary))
-                           :opened t)
-                     items)))))
-       opencode--chat-registry))
+    (dolist (buf (opencode--all-chat-buffers))
+      (let* ((session (with-current-buffer buf (opencode-chat--session)))
+             (sid (with-current-buffer buf (opencode-chat--session-id))))
+        ;; Skip child sessions if any ancestor is also opened
+        (when (and sid
+                   (not (opencode-sidebar--ancestor-opened-p session)))
+          (push (list :key (concat "session/" sid)
+                      :session-id sid
+                      :title (or (and session (plist-get session :title))
+                                 "(untitled)")
+                      :time (and session (plist-get session :time))
+                      :summary (and session (plist-get session :summary))
+                      :opened t)
+                items))))
     (nreverse items)))
 
 (defun opencode-sidebar--discover-project-dirs ()
-  "Discover project directories from the chat registry.
+  "Discover project directories from open chat buffers.
 Adds any new directories to `opencode-sidebar--known-project-dirs'."
-  (when (boundp 'opencode--chat-registry)
-    (maphash
-     (lambda (_sid buf)
-       (when (buffer-live-p buf)
-         (let* ((session (with-current-buffer buf (opencode-chat--session)))
-                (dir (and session (plist-get session :directory))))
-           (when (and dir (not (member dir opencode-sidebar--known-project-dirs)))
-             (push dir opencode-sidebar--known-project-dirs)))))
-     opencode--chat-registry)))
+  (dolist (buf (opencode--all-chat-buffers))
+    (let* ((session (with-current-buffer buf (opencode-chat--session)))
+           (dir (and session (plist-get session :directory))))
+      (when (and dir (not (member dir opencode-sidebar--known-project-dirs)))
+        (push dir opencode-sidebar--known-project-dirs)))))
 
 ;;; --- Rendering helpers ---
+
+(defcustom opencode-sidebar-global-project-name "(global)"
+  "Display name for OpenCode's `global' project.
+
+That project has \"/\" as its worktree, so its basename is empty and
+there is no meaningful directory name to show."
+  :type 'string
+  :group 'opencode-sidebar)
+
+(defun opencode-sidebar--project-name (dir)
+  "Return a non-empty display name for project directory DIR.
+
+Treemacs puts the `button' text property on the label text alone, so a
+node rendered with an empty label carries no button at all: point can
+never land on it, and it can be neither selected nor expanded.  Project
+labels must therefore never be empty.
+
+The plain basename is empty for a root worktree -- OpenCode's `global'
+project has \"/\" as its worktree -- so name that one after
+`opencode-sidebar-global-project-name', fall back to the path itself
+via `opencode--shorten-path' otherwise, and to a placeholder when there
+is no path at all."
+  (let ((name (opencode--shorten-path dir)))
+    (cond
+     ((null name) "(unknown)")
+     ((equal name "/") opencode-sidebar-global-project-name)
+     (t name))))
 
 (defun opencode-sidebar--session-label (item)
   "Build a display label for session ITEM plist.
@@ -198,8 +225,7 @@ Opened sessions get a [project] prefix."
          (project-prefix
           (when (plist-get item :opened)
             (let* ((dir (opencode-sidebar--session-project-dir item))
-                   (proj (and dir (file-name-nondirectory
-                                  (directory-file-name dir)))))
+                   (proj (and dir (opencode-sidebar--project-name dir))))
               (when proj
                 (propertize (format "[%s] " proj)
                             'face 'treemacs-git-ignored-face)))))
@@ -285,12 +311,106 @@ For opened sessions, shows status-based icons."
 
 (defun opencode-sidebar--group-label (item)
   "Build a display label for group ITEM.
-Shows \"(refreshing)\" indicator when a fetch is in-flight."
-  (let ((name (plist-get item :group-name))
-        (dir (plist-get item :project-dir)))
-    (if (and dir (opencode-api-cache-project-sessions-refreshing-p dir))
+Shows \"(refreshing)\" indicator when a fetch is in-flight.
+Never returns an empty string: a label-less node has no treemacs button
+and so cannot be selected or expanded."
+  (let* ((dir (plist-get item :project-dir))
+         (raw-name (plist-get item :group-name))
+         (name (if (and (stringp raw-name) (not (string-empty-p raw-name)))
+                   raw-name
+                 (opencode-sidebar--project-name dir))))
+    (if (and dir
+             (opencode-backend-project-sessions-refreshing-p
+              dir 'opencode))
         (propertize (concat name " (refreshing)") 'face 'treemacs-directory-face)
       (propertize name 'face 'treemacs-directory-face))))
+
+(defun opencode-sidebar--pipeline-execution-label (item)
+  "Build a display label for pipeline execution ITEM."
+  (let* ((view (plist-get item :pipeline-view))
+         (title (plist-get view :title))
+         (directory (plist-get view :directory))
+         (project
+          (and directory (opencode-sidebar--project-name directory)))
+         (status (plist-get view :status))
+         (current (plist-get view :current)))
+    (concat
+     (when project
+       (propertize (format "[%s] " project)
+                   'face 'treemacs-git-ignored-face))
+     (propertize title 'face 'treemacs-directory-face)
+     (propertize
+      (format "  %s%s"
+              status
+              (if current (format " · %s" current) ""))
+      'face 'treemacs-git-ignored-face))))
+
+(defun opencode-sidebar--pipeline-node-label (item)
+  "Build a display label for pipeline session node ITEM."
+  (let* ((node-view (plist-get item :pipeline-node-view))
+         (node-symbol (plist-get node-view :symbol))
+         (status (plist-get node-view :status))
+         (retry (plist-get node-view :retry-index))
+         (retry-count (plist-get node-view :retry-count)))
+    (concat
+     (propertize (symbol-name node-symbol) 'face 'treemacs-directory-face)
+     (propertize
+      (format "  %s%s"
+              status
+              (if (> retry 0)
+                  (format " · retry %d/%d" retry retry-count)
+                ""))
+      'face 'treemacs-git-ignored-face))))
+
+(defun opencode-sidebar--pipeline-status-icon (status &optional indent)
+  "Return an icon for pipeline STATUS.
+When INDENT is non-nil, prefix the icon for a child row."
+  (concat
+   (if indent "  " "")
+   (pcase status
+     ('running   (propertize "⬤ " 'face 'opencode-session-active))
+     ('retrying  (propertize "⬤ " 'face 'opencode-session-active))
+     ('completed (propertize "✓ " 'face 'success))
+     ('failed    (propertize "! " 'face 'error))
+     ('stopped   (propertize "■ " 'face 'shadow))
+     (_          (propertize "○ " 'face 'opencode-session-idle)))))
+
+(defun opencode-sidebar--pipeline-execution-items ()
+  "Return sidebar items for current pipeline executions."
+  (mapcar
+   (lambda (view)
+     (let ((entry (plist-get view :entry))
+           (execution-id (plist-get view :id)))
+        (list :key (format "pipeline/%s/%s" entry execution-id)
+              :pipeline-entry entry
+              :pipeline-execution-id execution-id
+              :pipeline-view view)))
+    (opencode-pipeline-view-current-executions)))
+
+(defun opencode-sidebar--pipeline-node-items (execution-view)
+  "Return pipeline session-node items for EXECUTION-VIEW.
+EXECUTION-VIEW is an immutable view plist produced by
+`opencode-pipeline-view-execution'."
+  (mapcar
+   (lambda (node-view)
+     (let ((node-symbol (plist-get node-view :symbol)))
+       (list :key
+               (format "pipeline/%s/%s/node/%s"
+                       (plist-get execution-view :entry)
+                       (plist-get execution-view :id)
+                       node-symbol)
+              :pipeline-entry (plist-get execution-view :entry)
+              :pipeline-execution-id (plist-get execution-view :id)
+              :pipeline-view execution-view
+              :pipeline-node node-symbol
+              :pipeline-node-view node-view
+              :session-id (plist-get node-view :session-id)
+              :title (symbol-name node-symbol)
+              :project-dir (or (plist-get node-view :directory)
+                               opencode-sidebar--primary-project-dir)
+              :backend (or (plist-get node-view :backend)
+                           opencode-backend-current))))
+   (plist-get execution-view :nodes)))
 
 ;;; --- Actions ---
 
@@ -320,14 +440,6 @@ If no suitable window exists, split the frame to create one."
              (not (eq (window-buffer window) (current-buffer)))
              (not (window-minibuffer-p window)))
     (setq opencode-sidebar--last-main-window window)))
-
-(defun opencode-sidebar--display-buffer-other-window (buffer)
-  "Display BUFFER in a non-sidebar window and select it."
-  (when-let* ((win (display-buffer buffer
-                             '((display-buffer-use-some-window
-                                display-buffer-pop-up-window)
-                               (inhibit-same-window . t)))))
-    (select-window win)))
 
 (defun opencode-sidebar--session-project-dir (item)
   "Return the project directory for session ITEM.
@@ -390,6 +502,20 @@ File nodes show a diff buffer; session/message-turn nodes open the chat."
                         (goto-char (point-min)))
                       (switch-to-buffer buf))
                   (user-error "No changes for %s" file-path)))))
+            ;; Pipeline children carry their owning view too, so route them
+            ;; before the execution row itself.
+           ((plist-get item :pipeline-node)
+            (if (plist-get item :session-id)
+                (opencode-sidebar--open-session-in-window item target-win)
+             (message "Pipeline node %s has no bound session yet"
+                      (plist-get item :pipeline-node))))
+             ;; Pipeline execution — open the interactive SVG status graph.
+             ((plist-get item :pipeline-view)
+              (select-window target-win)
+              (opencode-pipeline-describe
+               (or (opencode-pipeline-store-find-execution
+                    (plist-get item :pipeline-execution-id))
+                   (user-error "Pipeline execution no longer exists"))))
            ;; Session node — has :session-id
            ((plist-get item :session-id)
             (opencode-sidebar--open-session-in-window item target-win))))))))
@@ -397,9 +523,10 @@ File nodes show a diff buffer; session/message-turn nodes open the chat."
 (defun opencode-sidebar--open-session-in-window (item target-win)
   "Open the session described by ITEM in TARGET-WIN."
   (let ((session-id (plist-get item :session-id))
-        (project-dir (opencode-sidebar--session-project-dir item)))
+        (project-dir (opencode-sidebar--session-project-dir item))
+        (backend (plist-get item :backend)))
     (select-window target-win)
-    (opencode-chat-open session-id project-dir)))
+    (opencode-chat-open session-id project-dir nil backend)))
 
 ;;; --- Toggle node ---
 
@@ -445,13 +572,36 @@ Prompts for a new title and updates via PATCH /session/:id."
 ;;; --- Delete / Close ---
 
 (defun opencode-sidebar--delete-or-close ()
-  "Close or delete the session at point.
-In the Opened Session group: kill the chat buffer (close).
-In project groups: delete the session (with confirmation)."
+  "Remove the pipeline execution or close/delete the session at point.
+Pipeline child nodes are intentionally unaffected: their sessions remain.
+In the Opened Session group, kill the chat buffer.  In project groups,
+delete the session after confirmation."
   (interactive)
   (when-let ((node (opencode-sidebar--node-at-point)))
     (let ((item (button-get node :item)))
-      (when (and item (plist-get item :session-id))
+      (cond
+        ;; A pipeline child is a reference to a session, not an owned session
+        ;; record.  Child items also carry :pipeline-view, so this most
+        ;; specific case must precede execution-row handling.
+        ((and item (plist-get item :pipeline-node))
+         nil)
+        ;; Remove only the execution projection/runtime object.  Sessions are
+        ;; retained.  Active executions must be stopped explicitly first.
+        ((and item (plist-get item :pipeline-view))
+          (let* ((view (plist-get item :pipeline-view))
+                 (status (plist-get view :status))
+                 (execution
+                  (opencode-pipeline-store-find-execution
+                   (plist-get item :pipeline-execution-id))))
+           (unless execution
+             (user-error "Pipeline execution no longer exists"))
+           (when (memq status '(running stopping))
+             (user-error "Stop pipeline before removing it"))
+           (opencode-pipeline-reset execution)
+           (opencode-sidebar--rerender)
+           (message "Removed pipeline: %s"
+                    (plist-get view :title))))
+       ((and item (plist-get item :session-id))
         (if (plist-get item :opened)
             ;; Close: kill the chat buffer
             (let* ((sid (plist-get item :session-id))
@@ -460,7 +610,7 @@ In project groups: delete the session (with confirmation)."
                 (kill-buffer buf))
               (opencode-sidebar--rerender))
           ;; Delete: confirm then delete
-          (opencode-sidebar--delete-session-impl item))))))
+          (opencode-sidebar--delete-session-impl item)))))))
 
 (defun opencode-sidebar--delete-session-impl (item)
   "Delete the session described by ITEM after confirmation."
@@ -486,12 +636,17 @@ Each candidate is a cons of a unique display label and project directory."
       (when-let ((dir (plist-get project :directory)))
         (unless (gethash dir seen)
           (puthash dir t seen)
-          (let* ((name (or (plist-get project :name)
-                           (file-name-nondirectory dir)))
+          (let* ((raw-name (plist-get project :name))
+                 (name (if (and (stringp raw-name)
+                                (not (string-empty-p raw-name)))
+                           raw-name
+                         (opencode-sidebar--project-name dir)))
                  (id (plist-get project :id))
                  (label (format "%s — %s%s"
                                 name dir
-                                (if id (format " (%s)" id) ""))))
+                                (if (and id (not (equal id name)))
+                                    (format " (%s)" id)
+                                  ""))))
             (push (cons label dir) candidates)))))
     (nreverse candidates)))
 
@@ -527,7 +682,8 @@ Prompts for an optional title.  BACKEND defaults to the current backend."
                                     opencode-sidebar--known-project-dirs)))
               (push project-dir opencode-sidebar--known-project-dirs))
             (when project-dir
-              (opencode-api-cache-invalidate-project-sessions project-dir))
+              (opencode-backend-invalidate-project-sessions
+               project-dir 'opencode))
             (let ((target-win (opencode-sidebar--find-main-window)))
               (select-window target-win))
             (opencode-chat-open (plist-get session :id)
@@ -552,20 +708,29 @@ The session is created in the project directory of the node at point."
                           opencode-sidebar--primary-project-dir)))
     (opencode-sidebar--new-session-in-project project-dir)))
 
-(defun opencode-sidebar--new-session-choose-project ()
-  "Choose an OpenCode project, then create and open a session there."
+(defun opencode-sidebar--chat-choose-project ()
+  "Choose an OpenCode project, then run the regular chat picker there.
+This is the sidebar equivalent of `C-c o c' after selecting a project."
   (interactive)
-  (let ((project-dir
+  (let ((sidebar-win (selected-window))
+        (project-dir
          (condition-case err
              (progn
                (opencode--ensure-ready)
                (opencode-sidebar--read-project))
            (quit
             (signal 'quit nil))
-           (error
-            (user-error "Failed to choose project: %s"
-                        (error-message-string err))))))
-    (opencode-sidebar--new-session-in-project project-dir 'opencode)))
+            (error
+             (user-error "Failed to choose project: %s"
+                         (error-message-string err))))))
+    (let ((target-win (opencode-sidebar--find-main-window)))
+      (select-window target-win)
+      (condition-case err
+          (opencode--open-chat-picker nil 'opencode project-dir)
+        (quit
+         (when (window-live-p sidebar-win)
+           (select-window sidebar-win))
+         (signal (car err) (cdr err)))))))
 
 ;;; --- Session expansion helpers ---
 
@@ -606,9 +771,10 @@ The session is created in the project directory of the node at point."
 (defun opencode-sidebar--build-subagent-children (session-id project-dir)
   "Build sub-agent child session items for SESSION-ID.
 Reads from the project session cache for PROJECT-DIR."
-  (let* ((all-sessions (opencode-api-cache-project-sessions
-                        (or project-dir opencode-sidebar--primary-project-dir)
-                        :cache t))
+  (let* ((all-sessions
+          (opencode-backend-cached-project-sessions
+           (or project-dir opencode-sidebar--primary-project-dir)
+           'opencode))
          (all-list (and all-sessions (seq-into all-sessions 'list))))
     (mapcar
      (lambda (s)
@@ -635,20 +801,35 @@ Reads from the project session cache for PROJECT-DIR."
 ;; lambda only accepts 2 args → wrong-number-of-arguments error →
 ;; silent rerender failure → sidebar stops updating.
 (treemacs-define-expandable-node-type opencode-sidebar-child
-  :closed-icon (if (plist-get item :file-path)
-                   "  "
-                 (opencode-sidebar--child-session-icon item))
-  :open-icon (if (plist-get item :file-path)
-                 "  "
-               (opencode-sidebar--child-session-icon item))
-  :label (if (plist-get item :file-path)
-             (opencode-sidebar--file-label item)
-           (opencode-sidebar--child-session-label item))
+  :closed-icon
+  (cond
+   ((plist-get item :file-path) "  ")
+    ((plist-get item :pipeline-node)
+     (opencode-sidebar--pipeline-status-icon
+      (plist-get (plist-get item :pipeline-node-view) :status)
+      t))
+   (t (opencode-sidebar--child-session-icon item)))
+  :open-icon
+  (cond
+   ((plist-get item :file-path) "  ")
+    ((plist-get item :pipeline-node)
+     (opencode-sidebar--pipeline-status-icon
+      (plist-get (plist-get item :pipeline-node-view) :status)
+      t))
+   (t (opencode-sidebar--child-session-icon item)))
+  :label
+  (cond
+   ((plist-get item :file-path)
+    (opencode-sidebar--file-label item))
+   ((plist-get item :pipeline-node)
+    (opencode-sidebar--pipeline-node-label item))
+   (t (opencode-sidebar--child-session-label item)))
   :key (plist-get item :key)
   :children
   (let ((session-id (plist-get item :session-id))
         (project-dir (plist-get item :project-dir)))
-    (if (plist-get item :file-path)
+    (if (or (plist-get item :file-path)
+            (plist-get item :pipeline-node))
         (funcall callback nil)
       (funcall callback
                (opencode-sidebar--build-subagent-children session-id project-dir))))
@@ -658,37 +839,58 @@ Reads from the project session cache for PROJECT-DIR."
 
 ;; Expandable: session node (async children via diff + message APIs)
 (treemacs-define-expandable-node-type opencode-session
-  :closed-icon (opencode-sidebar--session-icon item nil)
-  :open-icon (opencode-sidebar--session-icon item t)
-  :label (opencode-sidebar--session-label item)
+  :closed-icon
+  (if-let ((view (plist-get item :pipeline-view)))
+      (concat "▸ "
+              (opencode-sidebar--pipeline-status-icon
+               (plist-get view :status)))
+    (opencode-sidebar--session-icon item nil))
+  :open-icon
+  (if-let ((view (plist-get item :pipeline-view)))
+      (concat "▾ "
+              (opencode-sidebar--pipeline-status-icon
+               (plist-get view :status)))
+    (opencode-sidebar--session-icon item t))
+  :label
+  (if (plist-get item :pipeline-view)
+      (opencode-sidebar--pipeline-execution-label item)
+    (opencode-sidebar--session-label item))
   :key (plist-get item :key)
   :children
-  (let ((session-id (plist-get item :session-id))
-        (project-dir (or (plist-get item :project-dir)
-                         opencode-sidebar--primary-project-dir))
-        (buf (current-buffer)))
-    (opencode-sidebar--log "EXPAND >>> sid=%s" session-id)
-    (let ((opencode-default-directory (or project-dir opencode-default-directory)))
-      (opencode-backend-get-diff
-       session-id
-       (lambda (response)
-         (when (buffer-live-p buf)
-           (with-current-buffer buf
-             (condition-case err
-                 (let* ((diff-body (plist-get response :body))
-                        (diff-entries (and diff-body (seq-into diff-body 'list)))
-                        (files (opencode-sidebar--build-file-children
-                                session-id diff-entries))
-                        (subagents (opencode-sidebar--build-subagent-children
-                                    session-id project-dir))
-                        (children (append subagents files)))
-                   (opencode-sidebar--log "EXPAND <<< sid=%s children=%d"
-                                           session-id (length children))
-                   (let ((inhibit-read-only t))
-                     (funcall callback children)))
-               (error
-                 (opencode-sidebar--log "EXPAND error: %s"
-                                          (error-message-string err))))))))))
+  (if-let ((view (plist-get item :pipeline-view)))
+      (funcall callback
+               (opencode-sidebar--pipeline-node-items view))
+    (let ((session-id (plist-get item :session-id))
+          (project-dir (or (plist-get item :project-dir)
+                           opencode-sidebar--primary-project-dir))
+          (buf (current-buffer)))
+      (opencode-sidebar--log "EXPAND >>> sid=%s" session-id)
+      (let ((opencode-default-directory
+             (or project-dir opencode-default-directory)))
+        (opencode-backend-get-diff
+         session-id
+         (lambda (response)
+           (when (buffer-live-p buf)
+             (with-current-buffer buf
+               (condition-case err
+                   (let* ((diff-body (plist-get response :body))
+                          (diff-entries
+                           (and diff-body (seq-into diff-body 'list)))
+                          (files (opencode-sidebar--build-file-children
+                                  session-id diff-entries))
+                          (subagents
+                           (opencode-sidebar--build-subagent-children
+                            session-id project-dir))
+                          (children (append subagents files)))
+                     (opencode-sidebar--log
+                      "EXPAND <<< sid=%s children=%d"
+                      session-id (length children))
+                     (let ((inhibit-read-only t))
+                       (funcall callback children)))
+                 (error
+                  (opencode-sidebar--log
+                   "EXPAND error: %s"
+                   (error-message-string err)))))))))))
   :child-type 'opencode-sidebar-child
   :async? t
   :ret-action #'opencode-sidebar--ret-action)
@@ -704,15 +906,19 @@ Reads from the project session cache for PROJECT-DIR."
   (let ((group-type (plist-get item :group-type))
         (project-dir (plist-get item :project-dir))
         (buf (current-buffer)))
-    (pcase group-type
-      ('opened
-       ;; Synchronous: read from chat registry
-       (let ((items (opencode-sidebar--opened-session-items)))
-         (funcall callback items)))
+      (pcase group-type
+       ('pipeline
+        (funcall callback (opencode-sidebar--pipeline-execution-items)))
+       ('opened
+        ;; Synchronous: read from public chat-buffer registry accessors.
+        (let ((items (opencode-sidebar--opened-session-items)))
+          (funcall callback items)))
       ('project
        ;; Read from cache or fetch async
-       (let* ((opened-ids (opencode-sidebar--opened-session-ids))
-              (cached (opencode-api-cache-project-sessions project-dir :cache t)))
+        (let* ((opened-ids (opencode-sidebar--opened-session-ids))
+               (cached
+                (opencode-backend-cached-project-sessions
+                 project-dir 'opencode)))
          (if cached
              (let* ((all (seq-into cached 'list))
                     (top-level (seq-filter
@@ -734,10 +940,9 @@ Reads from the project session cache for PROJECT-DIR."
                             filtered)))
                (funcall callback items))
            ;; Not cached: fetch async
-           (opencode-api-cache-project-sessions
-            project-dir
-            :callback
-            (lambda (sessions)
+            (opencode-backend-fetch-project-sessions
+             project-dir
+             (lambda (sessions)
               (when (buffer-live-p buf)
                 (with-current-buffer buf
                   (let* ((all (and sessions (seq-into sessions 'list)))
@@ -758,8 +963,9 @@ Reads from the project session cache for PROJECT-DIR."
                                            :summary (plist-get s :summary)
                                            :project-dir project-dir)))
                                  filtered)))
-                    (let ((inhibit-read-only t))
-                      (funcall callback items))))))))))))
+                     (let ((inhibit-read-only t))
+                       (funcall callback items)))))
+             nil 'opencode)))))))
   :child-type 'opencode-session
   :async? t)
 
@@ -768,15 +974,17 @@ Reads from the project session cache for PROJECT-DIR."
   :key 'opencode-sidebar-root
   :children
   (progn
-    ;; Discover project dirs from chat registry
+    ;; Discover project dirs from open chat buffers.
     (opencode-sidebar--discover-project-dirs)
     (let* ((opened-group (list :key "group/opened"
                                :group-name "Opened Session"
                                :group-type 'opened))
+           (pipeline-group (list :key "group/pipeline"
+                                 :group-name "Pipeline"
+                                 :group-type 'pipeline))
            (primary-dir opencode-sidebar--primary-project-dir)
            (primary-name (and primary-dir
-                              (file-name-nondirectory
-                               (directory-file-name primary-dir))))
+                              (opencode-sidebar--project-name primary-dir)))
            (primary-group (when primary-dir
                             (list :key (concat "group/project/" primary-dir)
                                   :group-name primary-name
@@ -788,12 +996,11 @@ Reads from the project session cache for PROJECT-DIR."
            (other-groups (mapcar
                           (lambda (dir)
                             (list :key (concat "group/project/" dir)
-                                  :group-name (file-name-nondirectory
-                                               (directory-file-name dir))
+                                  :group-name (opencode-sidebar--project-name dir)
                                   :group-type 'project
                                   :project-dir dir))
                           other-dirs))
-           (groups (list opened-group)))
+           (groups (list opened-group pipeline-group)))
       (when primary-group
         (setq groups (append groups (list primary-group))))
       (append groups other-groups)))
@@ -839,7 +1046,7 @@ DIRECTION is `right' for a vertical split or `below' for a horizontal split."
   "d" #'opencode-sidebar--delete-or-close
   "R" #'opencode-sidebar--rename-session
   "c" #'opencode-sidebar--new-session
-  "C" #'opencode-sidebar--new-session-choose-project)
+  "C" #'opencode-sidebar--chat-choose-project)
 
 (defun opencode-sidebar--ret-wrapper (&optional arg)
   "Wrapper for RET that logs diagnostics then delegates to treemacs.
@@ -867,15 +1074,15 @@ ARG is the prefix argument."
   (let ((buf (current-buffer))
         (opencode-default-directory (or project-dir opencode-default-directory)))
     ;; Invalidate cache and fetch fresh
-    (opencode-api-cache-invalidate-project-sessions project-dir)
+    (opencode-backend-invalidate-project-sessions project-dir 'opencode)
     (opencode-sidebar--rerender) ; show refreshing indicator
-    (opencode-api-cache-project-sessions
+    (opencode-backend-fetch-project-sessions
      project-dir
-     :callback
      (lambda (_sessions)
        (when (buffer-live-p buf)
          (with-current-buffer buf
-           (opencode-sidebar--rerender)))))))
+            (opencode-sidebar--rerender))))
+     t 'opencode)))
 
 ;;; --- Rerender ---
 
@@ -946,7 +1153,7 @@ PROJECT-DIR is used as the primary project on first creation.
 If the buffer already exists, returns it without re-fetching."
   (let ((existing (get-buffer opencode-sidebar--buffer-name)))
     ;; Retry cache load if it failed during startup
-    (opencode-api-cache-ensure-loaded)
+    (opencode-backend-ensure-ready 'opencode)
     (if existing
         existing
       ;; Full initialization
@@ -1031,13 +1238,15 @@ Updates status store, discovers new projects, invalidates caches."
     ;; Invalidate project session cache on data changes
     (when (and event-dir
                (member event-type '("session.updated" "session.deleted"))
-               (opencode-api-cache-project-sessions event-dir :cache t))
-      (opencode-api-cache-invalidate-project-sessions event-dir)
+               (opencode-backend-cached-project-sessions
+                event-dir 'opencode))
+      (opencode-backend-invalidate-project-sessions event-dir 'opencode)
       ;; Re-fetch asynchronously (never block the SSE filter)
-      (opencode-api-cache-project-sessions
+      (opencode-backend-fetch-project-sessions
        event-dir
-       :callback (lambda (_sessions)
-                   (opencode-sidebar--schedule-rerender))))
+       (lambda (_sessions)
+         (opencode-sidebar--schedule-rerender))
+       nil 'opencode))
     ;; Debounced rerender
     (opencode-sidebar--schedule-rerender)
     (run-hook-with-args 'opencode-sidebar-on-session-event-hook event)))
@@ -1061,10 +1270,19 @@ Updates status store, discovers new projects, invalidates caches."
         (opencode-sidebar--discover-project-dirs)
         (opencode-sidebar--schedule-rerender)))))
 
+(defun opencode-sidebar--on-pipeline-state-changed (&rest _)
+  "Rerender the sidebar after a pipeline state change."
+  (when-let ((buf (get-buffer opencode-sidebar--buffer-name)))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (opencode-sidebar--schedule-rerender)))))
+
 (advice-add 'opencode--register-chat-buffer :after
             #'opencode-sidebar--on-chat-registry-change)
 (advice-add 'opencode--deregister-chat-buffer :after
             #'opencode-sidebar--on-chat-registry-change)
+(add-hook 'opencode-pipeline-state-changed-hook
+          #'opencode-sidebar--on-pipeline-state-changed)
 
 (provide 'opencode-sidebar)
 ;;; opencode-sidebar.el ends here

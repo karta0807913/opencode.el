@@ -24,8 +24,8 @@
 (require 'opencode-ui)
 (require 'opencode-log)
 (require 'opencode-util)
-(require 'opencode-api)
-(require 'opencode-backend)
+(require 'opencode-backend-core)
+(require 'opencode-prompt)
 (require 'opencode-agent)
 (require 'opencode-config)
 (require 'opencode-session)
@@ -65,8 +65,10 @@ Called with one argument, a plist:
 
 ;; The following slots live in the opencode-chat-state struct; their
 ;; `defvar-local's were removed in the Step 5 struct migration
-;; (2026-04-18).  Read via `(opencode-chat--SLOT)', write via
-;; `(opencode-chat--set-SLOT VALUE)':
+;; (2026-04-18).  Cross-module code should use the semantic APIs in
+;; this file (`opencode-chat-input-reset', `...-set-inline-todos',
+;; `...-set-optimistic-msg-id') rather than generated setters.  The
+;; generated setters remain as same-owner compatibility shims:
 ;;   input-start            — marker for the start of the input area
 ;;   input-history          — ring of previously sent input strings
 ;;   input-history-index    — current index when browsing history
@@ -175,6 +177,28 @@ Applies the standard input-area text properties (face, keymap, opencode-input)."
   "Clear the input area text, including multiple lines."
   (opencode-chat--replace-input nil))
 
+(defun opencode-chat-input-reset ()
+  "Reset input-owned markers and transient UI state before a full rerender.
+Frees the input-start marker and inline todo overlay, then forgets their
+state slots.  This preserves the historical marker behavior from
+`opencode-chat--clear-for-rerender' while giving chat.el a semantic API."
+  (when (opencode-chat--input-start)
+    (set-marker (opencode-chat--input-start) nil)
+    (opencode-chat--set-input-start nil))
+  (when-let* ((ov (opencode-chat--inline-todos-ov)))
+    (when (overlayp ov)
+      (delete-overlay ov))
+    (opencode-chat--set-inline-todos-ov nil)))
+
+(defun opencode-chat-input-set-inline-todos (todos)
+  "Store TODOS in input-owned inline todo state and refresh the footer UI."
+  (opencode-chat--set-inline-todos todos)
+  (opencode-chat--refresh-inline-todos todos))
+
+(defun opencode-chat-input-set-optimistic-msg-id (msg-id)
+  "Record MSG-ID as the input-owned optimistic message id."
+  (opencode-chat--set-optimistic-msg-id msg-id))
+
 (defun opencode-chat--in-input-area-p ()
   "Return non-nil when point is in the editable input content.
 Uses the `opencode-input' text property — which is stamped on the
@@ -240,9 +264,10 @@ The region is tagged with `opencode-footer-info' text property so that
                            :cache-read 0 :cache-write 0)))
          (ctx-limit (or (opencode-chat-state-context-limit st)
                         ;; Re-try from provider cache (may have populated since state-init)
-                        (let ((lim (when (and provider-id model-id)
-                                     (opencode-config--model-context-limit
-                                      provider-id model-id))))
+                         (let ((lim (when (and provider-id model-id)
+                                      (opencode-config--model-context-limit
+                                       provider-id model-id
+                                       (opencode-chat--backend)))))
                           (when lim
                             (opencode-chat--set-context-limit lim))
                           lim)))
@@ -1166,7 +1191,9 @@ effective agent; model and variant always come from the buffer."
                (variant (opencode-chat--effective-variant)))
     (opencode--debug "opencode-chat: executing command /%s args=%S cmd-agent=%S agent=%s model=%s variant=%s sid=%s"
                      command arguments cmd-agent agent model variant session-id)
-    (opencode-config-execute-command session-id command arguments agent model variant)))
+    (opencode-config-execute-command
+     session-id command arguments agent model variant
+     (opencode-chat--backend) (opencode-chat--busy))))
 
 (defun opencode-chat--send-prompt (text session-id new-msg-id mentions images)
   "Send TEXT as a prompt_async message for SESSION-ID.
@@ -1184,17 +1211,21 @@ present."
                           (setq ctx (plist-put ctx :selection
                                                (buffer-substring-no-properties start end)))))
                       ctx)))
-         (prompt-body (opencode-api--prompt-body
-                       text agent
-                       (plist-get model :modelID)
-                       (plist-get model :providerID)
-                       (opencode-chat--effective-variant)
-                       mentions images new-msg-id context)))
-    (opencode--debug "opencode-chat: sending prompt_async sid=%s body=%S"
-                     session-id prompt-body)
+          (intent (opencode-prompt-intent-create
+                   :text text
+                   :agent agent
+                   :model-id (plist-get model :modelID)
+                   :provider-id (plist-get model :providerID)
+                   :variant (opencode-chat--effective-variant)
+                   :mentions mentions
+                   :images images
+                   :message-id new-msg-id
+                   :context context)))
+    (opencode--debug "opencode-chat: sending prompt intent sid=%s intent=%S"
+                     session-id intent)
     (opencode-backend-send-prompt
      session-id
-     prompt-body
+     intent
      (lambda (response)
        (opencode--debug "opencode-chat: prompt_async callback status=%s body=%S"
                         (plist-get response :status)
@@ -1278,7 +1309,7 @@ Slash commands route via `--send-slash-command'; otherwise `--send-prompt'."
                   :type "text"
                   :text ,text
                   :time (:start ,now :end ,now)))))
-      (opencode-chat--set-optimistic-msg-id new-msg-id)
+      (opencode-chat-input-set-optimistic-msg-id new-msg-id)
       ;; Reset undo — the sent message and cleared input must not be
       ;; undoable.  Without this, C-/ after send would reverse the
       ;; optimistic insert and resurrect the input text.
@@ -1300,7 +1331,9 @@ Slash commands route via `--send-slash-command'; otherwise `--send-prompt'."
   (when (opencode-chat--session-id)
     (condition-case err
         (progn
-          (opencode-session-abort (opencode-chat--session-id))
+          (opencode-session-abort
+           (opencode-chat--session-id)
+           (opencode-chat--backend))
           ;; State cleanup (busy/queued) handled by session.idle/error SSE
           (message "Aborted"))
       (error (message "Abort failed: %s" (error-message-string err))))))
@@ -1333,7 +1366,8 @@ Cycles: nil → first → second → ... → nil (back to default)."
   (let* ((model (opencode-chat--effective-model))
          (provider-id (plist-get model :providerID))
          (model-id (plist-get model :modelID))
-         (keys (opencode-config--variant-keys provider-id model-id)))
+         (keys (opencode-config--variant-keys
+                provider-id model-id (opencode-chat--backend))))
     (if (null keys)
         (message "No variants available for %s" (or model-id "unknown"))
       ;; Cycle: nil → first → second → ... → nil

@@ -10,6 +10,8 @@
 
 (require 'test-helper nil t)
 (require 'opencode-pi)
+(require 'opencode-lifecycle)
+(require 'opencode-prompt)
 
 ;;; --- Content blocks ---
 
@@ -119,8 +121,37 @@ Drives the chat buffer into the streaming/busy state."
 (ert-deftest opencode-pi-event-agent-end-is-idle ()
   "`agent_end' maps to session.idle so the buffer leaves busy state.
 Without this, the chat buffer would appear stuck generating forever."
-  (let ((ev (opencode-pi--event (list :type "agent_end" :messages []))))
-    (should (equal "session.idle" (plist-get ev :type)))))
+  (let ((ev (opencode-pi--event
+             (list :type "agent_end" :messages []) "ses_pi")))
+    (should (equal "session.idle" (plist-get ev :type)))
+    (should (equal "ses_pi" (plist-get ev :session-id)))))
+
+(ert-deftest opencode-pi-event-agent-settled-is-idle ()
+  "`agent_settled' is the authoritative fully-settled lifecycle boundary."
+  (let ((ev (opencode-pi--event
+             (list :type "agent_settled") "ses_pi")))
+    (should (equal "session.idle" (plist-get ev :type)))
+    (should (equal "ses_pi" (plist-get ev :session-id)))))
+
+(ert-deftest opencode-pi-messages-use-turn-scoped-correlations ()
+  "Each Pi assistant keeps the user correlation recorded for its own turn."
+  (let* ((messages
+          (vector
+           (list :role "assistant" :timestamp 1
+                 :content (vector (list :type "text" :text "first")))
+           (list :role "assistant" :timestamp 2
+                 :content (vector (list :type "text" :text "second")))))
+         (correlations (make-hash-table :test 'equal)))
+    (puthash "pimsg-assistant-1" "msg_first" correlations)
+    (puthash "pimsg-assistant-2" "msg_second" correlations)
+    (let ((normalized
+           (append (opencode-pi--messages messages correlations) nil)))
+      (should (equal "msg_first"
+                     (plist-get (plist-get (car normalized) :info)
+                                :parentID)))
+      (should (equal "msg_second"
+                     (plist-get (plist-get (cadr normalized) :info)
+                                :parentID))))))
 
 (ert-deftest opencode-pi-event-text-delta-streams ()
   "A text_delta message_update maps to message.part.updated with a delta.
@@ -201,24 +232,24 @@ pull).  Diffs and todos have no Pi equivalent and must stay off."
   (should-not (opencode-backend-capable-p 'diffs 'pi))
   (should-not (opencode-backend-capable-p 'todos 'pi)))
 
-;;; --- Prompt body translation ---
+;;; --- Prompt intent translation ---
 
-(ert-deftest opencode-pi-body-to-message-extracts-text ()
-  "An OpenCode-shaped prompt body reduces to its concatenated text.
+(ert-deftest opencode-pi-intent-to-message-extracts-text ()
+  "A prompt intent reduces directly to its text for Pi.
 Pi's prompt command wants a plain message string, not OpenCode parts."
-  (let ((body (list :parts (vector (list :type "text" :text "hello")
-                                   (list :type "text" :text " world")))))
-    (should (equal "hello world" (opencode-pi--body->message body)))))
+  (let ((intent (opencode-prompt-intent-create :text "hello world")))
+    (should (equal "hello world"
+                   (opencode-prompt-intent-text intent)))))
 
-(ert-deftest opencode-pi-body-to-images ()
-  "Image parts in a prompt body convert to Pi image blocks.
+(ert-deftest opencode-pi-intent-to-images ()
+  "Image attachments in a prompt intent convert to Pi image blocks.
 Pi expects {type:image,data,mimeType}; wrong shape drops attachments."
-  (let* ((body (list :parts (vector
-                             (list :type "text" :text "look")
-                             (list :type "image"
-                                   :source (list :data "BASE64"
-                                                 :mediaType "image/png")))))
-         (images (append (opencode-pi--body->images body) nil)))
+  (let* ((intent (opencode-prompt-intent-create
+                  :text "look"
+                  :images (list (list :data-url "data:image/png;base64,BASE64"
+                                      :mime "image/png"
+                                      :filename "test.png"))))
+         (images (append (opencode-pi--intent-images intent) nil)))
     (should (= 1 (length images)))
     (should (equal "image" (plist-get (car images) :type)))
     (should (equal "BASE64" (plist-get (car images) :data)))
@@ -253,11 +284,25 @@ Guards the default send path (no streamingBehavior when not busy)."
       (opencode-pi-bind-conn "ses_pi" (opencode-pi-conn--create))
       (opencode-pi-send-prompt
        "ses_pi"
-       (list :parts (vector (list :type "text" :text "do it")))
-       nil nil)
+        (opencode-prompt-intent-create :text "do it")
+        nil nil)
       (should (equal "prompt" (plist-get sent :type)))
       (should (equal "do it" (plist-get sent :message)))
       (should-not (plist-member sent :streamingBehavior)))))
+
+(ert-deftest opencode-pi-execute-command-forwards-slash-text ()
+  "Pi slash commands use its normal prompt/steering transport."
+  (let (sent)
+    (cl-letf (((symbol-function 'opencode-pi-send-prompt)
+               (lambda (session-id intent callback &optional busy)
+                 (setq sent (list session-id intent callback busy)))))
+      (opencode-pi-execute-command
+       "ses_pi" "btw" "check this" nil nil nil #'ignore t)
+      (should (equal "ses_pi" (nth 0 sent)))
+      (should (equal "/btw check this"
+                     (opencode-prompt-intent-text (nth 1 sent))))
+      (should (eq #'ignore (nth 2 sent)))
+      (should (eq t (nth 3 sent))))))
 
 (ert-deftest opencode-pi-send-prompt-busy-steers ()
   "A busy send maps to a `prompt' with streamingBehavior steer (default mode).
@@ -271,10 +316,33 @@ This is the redirect-now behavior confirmed for Pi buffers."
       (opencode-pi-bind-conn "ses_pi" (opencode-pi-conn--create))
       (opencode-pi-send-prompt
        "ses_pi"
-       (list :parts (vector (list :type "text" :text "wait, do this")))
-       nil t)
+        (opencode-prompt-intent-create :text "wait, do this")
+        nil t)
       (should (equal "prompt" (plist-get sent :type)))
       (should (equal "steer" (plist-get sent :streamingBehavior))))))
+
+(ert-deftest opencode-pi-busy-steer-does-not-steal-active-correlation ()
+  "A steer modifies the active turn without replacing its user message ID."
+  (let ((opencode-pi--conns (make-hash-table :test 'equal))
+        (opencode-pi-steering-mode 'steer))
+    (cl-letf (((symbol-function 'opencode-pi-rpc-alive-p) (lambda (_c) t))
+              ((symbol-function 'opencode-pi-rpc-send)
+               (lambda (&rest _) "id"))
+              ((symbol-function 'opencode-event-dispatch) #'ignore))
+      (let ((conn
+             (opencode-pi-conn--create
+              :active-prompt-message-id "msg_pipeline")))
+        (opencode-pi-bind-conn "ses_pi" conn)
+        (opencode-pi-send-prompt
+         "ses_pi"
+          (opencode-prompt-intent-create :text "steer"
+                                         :message-id "msg_manual")
+          nil t)
+        (should
+         (equal "msg_pipeline"
+                (opencode-pi-conn-active-prompt-message-id conn)))
+        (should-not
+         (opencode-pi-conn-pending-prompt-message-ids conn))))))
 
 (ert-deftest opencode-pi-send-prompt-busy-follow-up ()
   "With follow-up mode, a busy send maps to a `follow_up' command.
@@ -288,9 +356,35 @@ Verifies the configurable alternative to steering."
       (opencode-pi-bind-conn "ses_pi" (opencode-pi-conn--create))
       (opencode-pi-send-prompt
        "ses_pi"
-       (list :parts (vector (list :type "text" :text "later")))
-       nil t)
+        (opencode-prompt-intent-create :text "later")
+        nil t)
       (should (equal "follow_up" (plist-get sent :type))))))
+
+(ert-deftest opencode-pi-busy-follow-up-keeps-separate-turns ()
+  "A follow-up queues behind, rather than replacing, the active turn."
+  (let ((opencode-pi--conns (make-hash-table :test 'equal))
+        (opencode-pi-steering-mode 'follow-up))
+    (cl-letf (((symbol-function 'opencode-pi-rpc-alive-p) (lambda (_c) t))
+              ((symbol-function 'opencode-pi-rpc-send)
+               (lambda (&rest _) "id"))
+              ((symbol-function 'opencode-event-dispatch) #'ignore))
+      (let ((conn
+             (opencode-pi-conn--create
+              :active-prompt-message-id "msg_first")))
+        (opencode-pi-bind-conn "ses_pi" conn)
+        (opencode-pi-send-prompt
+         "ses_pi"
+          (opencode-prompt-intent-create :text "later"
+                                         :message-id "msg_follow")
+          nil t)
+        (should
+         (equal '("msg_follow")
+                (opencode-pi-conn-pending-prompt-message-ids conn)))
+        (opencode-pi--route-event "ses_pi" '(:type "agent_end"))
+        (opencode-pi--route-event "ses_pi" '(:type "agent_start"))
+        (should
+         (equal "msg_follow"
+                (opencode-pi-conn-active-prompt-message-id conn)))))))
 
 (ert-deftest opencode-pi-get-messages-normalizes ()
   "`opencode-pi-get-messages' normalizes the RPC get_messages response.
@@ -310,8 +404,40 @@ The callback must receive OpenCode-shaped messages, not raw Pi messages."
       (opencode-pi-bind-conn "ses_pi" (opencode-pi-conn--create))
       (opencode-pi-get-messages "ses_pi" (lambda (msgs) (setq result msgs)))
       (let ((msgs (append result nil)))
-        (should (= 1 (length msgs)))
-        (should (equal "user" (plist-get (plist-get (car msgs) :info) :role)))))))
+         (should (= 1 (length msgs)))
+         (should (equal "user" (plist-get (plist-get (car msgs) :info) :role)))))))
+
+(ert-deftest opencode-pi-session-directory-comes-from-connection ()
+  "Pi session metadata uses the subprocess cwd, not ambient buffer state."
+  (let ((opencode-pi--conns (make-hash-table :test 'equal))
+        (default-directory "/ambient/"))
+    (cl-letf (((symbol-function 'opencode-pi-rpc-alive-p) (lambda (_c) t))
+              ((symbol-function 'opencode-pi-rpc-request-sync)
+               (lambda (&rest _)
+                 '(:data (:sessionName "Pi Session"
+                          :cwd "/untrusted-state-cwd/")))))
+      (let ((conn (opencode-pi-conn--create :cwd "/project-b/")))
+        (opencode-pi-bind-conn "ses_pi" conn)
+        (should
+         (equal "/project-b/"
+                 (plist-get (opencode-pi-get-session-sync "ses_pi")
+                            :directory)))))))
+
+(ert-deftest opencode-pi-resume-uses-selected-session-directory ()
+  "Resuming a Pi session launches in its recorded project directory."
+  (let (launched-directory launched-file)
+    (cl-letf (((symbol-function 'opencode-pi--read-session)
+               (lambda ()
+                 '("Session"
+                   :file "/sessions/abc.jsonl"
+                   :directory "/recorded/project/")))
+              ((symbol-function 'opencode-pi--launch)
+               (lambda (directory session-file)
+                 (setq launched-directory directory
+                       launched-file session-file))))
+      (opencode-pi "/ambient/project/")
+      (should (equal "/recorded/project/" launched-directory))
+      (should (equal "/sessions/abc.jsonl" launched-file)))))
 
 ;;; --- Facade busy plumbing ---
 
@@ -321,19 +447,23 @@ This is the seam that lets a Pi buffer steer/follow_up while generating;
 without it, a mid-stream send would error or be dropped."
   (let (got-busy)
     (cl-letf (((symbol-function 'opencode-pi-send-prompt)
-               (lambda (_sid _body _cb &optional busy) (setq got-busy busy))))
-      (opencode-backend-send-prompt "ses_pi" (list :parts []) #'ignore 'pi t)
+               (lambda (_sid _intent _cb &optional busy) (setq got-busy busy))))
+      (opencode-backend-send-prompt
+       "ses_pi" (opencode-prompt-intent-create :text "hi") #'ignore 'pi t)
       (should (eq got-busy t))
-      (opencode-backend-send-prompt "ses_pi" (list :parts []) #'ignore 'pi nil)
+      (opencode-backend-send-prompt
+       "ses_pi" (opencode-prompt-intent-create :text "hi") #'ignore 'pi nil)
       (should (eq got-busy nil)))))
 
 (ert-deftest opencode-pi-facade-send-prompt-opencode-ignores-busy ()
   "OpenCode's send fn accepts and ignores the BUSY flag (no arity error).
 Adding mid-stream queueing for Pi must not break the OpenCode send path."
   (let (posted)
+    (require 'opencode-backend-opencode)
     (cl-letf (((symbol-function 'opencode-api-post)
                (lambda (path body _cb) (setq posted (cons path body)))))
-      (opencode-backend-send-prompt "ses_oc" (list :parts []) #'ignore 'opencode t)
+      (opencode-backend-send-prompt
+       "ses_oc" (opencode-prompt-intent-create :text "hi") #'ignore 'opencode t)
       (should (string-match-p "prompt_async" (car posted))))))
 
 ;;; --- Extension UI bridge ---
@@ -343,18 +473,20 @@ Adding mid-stream queueing for Pi must not break the OpenCode send path."
 This is how Pi surfaces approval prompts (it has no permission API)."
   (let ((opencode-pi--ui-requests (make-hash-table :test 'equal))
         dispatched)
-    (cl-letf (((symbol-function 'opencode-pi--dispatch-popup)
-               (lambda (sid handler event)
-                 (setq dispatched (list sid handler event)))))
+    (cl-letf (((symbol-function 'opencode-event-dispatch)
+               (lambda (backend-event &optional legacy-event)
+                 (setq dispatched (list backend-event legacy-event)))))
       (opencode-pi-handle-ui-request
        'fake-conn "ses_pi"
        (list :type "extension_ui_request" :id "u1" :method "confirm"
              :title "Allow bash?" :message "ls -la"))
-      (should (equal "ses_pi" (nth 0 dispatched)))
-      (should (eq #'opencode-permission--on-asked (nth 1 dispatched)))
-      (let ((ev (nth 2 dispatched)))
-        (should (equal "u1" (plist-get ev :id)))
-        (should (equal "Allow bash?" (plist-get ev :permission))))
+      (let* ((backend-event (car dispatched))
+             (request (plist-get backend-event :request)))
+        (should (equal "permission.asked" (plist-get backend-event :type)))
+        (should (equal "ses_pi" (plist-get backend-event :session-id)))
+        (should (equal "u1" (plist-get backend-event :request-id)))
+        (should (equal "u1" (plist-get request :id)))
+        (should (equal "Allow bash?" (plist-get request :permission))))
       ;; The request id is remembered for the reply.
       (should (eq 'fake-conn (gethash "u1" opencode-pi--ui-requests))))))
 
@@ -363,16 +495,17 @@ This is how Pi surfaces approval prompts (it has no permission API)."
 Select/input/editor map to the question popup, not the permission one."
   (let ((opencode-pi--ui-requests (make-hash-table :test 'equal))
         dispatched)
-    (cl-letf (((symbol-function 'opencode-pi--dispatch-popup)
-               (lambda (sid handler event)
-                 (setq dispatched (list sid handler event)))))
+    (cl-letf (((symbol-function 'opencode-event-dispatch)
+               (lambda (backend-event &optional legacy-event)
+                 (setq dispatched (list backend-event legacy-event)))))
       (opencode-pi-handle-ui-request
        'fake-conn "ses_pi"
        (list :type "extension_ui_request" :id "u2" :method "select"
-             :title "Pick one" :options (vector "A" "B")))
-      (should (eq #'opencode-question--on-asked (nth 1 dispatched)))
-      (let* ((ev (nth 2 dispatched))
-             (q (aref (plist-get ev :questions) 0)))
+              :title "Pick one" :options (vector "A" "B")))
+      (should (equal "question.asked" (plist-get (car dispatched) :type)))
+      (let* ((request (plist-get (car dispatched) :request))
+             (q (aref (plist-get request :questions) 0)))
+        (should (equal "u2" (plist-get (car dispatched) :request-id)))
         (should (equal "Pick one" (plist-get q :header)))
         (should (equal (vector "A" "B") (plist-get q :options)))))))
 
@@ -381,7 +514,7 @@ Select/input/editor map to the question popup, not the permission one."
 They carry no reply; surfacing them as popups would deadlock the queue."
   (let ((opencode-pi--ui-requests (make-hash-table :test 'equal))
         (called nil))
-    (cl-letf (((symbol-function 'opencode-pi--dispatch-popup)
+    (cl-letf (((symbol-function 'opencode-event-dispatch)
                (lambda (&rest _) (setq called t)))
               ((symbol-function 'message) (lambda (&rest _) nil)))
       (opencode-pi-handle-ui-request
@@ -400,7 +533,7 @@ fire-and-forget: no reply is registered."
     (cl-letf (((symbol-function 'opencode-pi-widget-set)
                (lambda (sid key lines &optional placement)
                  (setq widget-call (list sid key lines placement))))
-              ((symbol-function 'opencode-pi--dispatch-popup)
+              ((symbol-function 'opencode-event-dispatch)
                (lambda (&rest _) (setq popup-called t))))
       (opencode-pi-handle-ui-request
        'fake-conn "ses_pi"
@@ -490,48 +623,324 @@ Dismissing the popup must dismiss Pi's dialog, not leave it hanging."
 
 (ert-deftest opencode-pi-route-agent-start-emits-busy-status ()
   "A Pi agent_start routes to the chat session.status handler as busy.
-This drives the chat buffer into the streaming state at runtime.  It also
-bootstraps an assistant message so streaming parts have an owner."
+This drives the chat buffer into its busy streaming phase.  Message
+ownership is established by message_start, or lazily by the first delta."
   (let (emits)
-    (cl-letf (((symbol-function 'opencode-pi--emit)
-               (lambda (sid handler props) (push (list sid handler props) emits))))
+    (cl-letf (((symbol-function 'opencode-event-dispatch)
+               (lambda (backend-event &optional _legacy-event)
+                 (push backend-event emits))))
       (opencode-pi--route-event "ses_pi" (list :type "agent_start"))
       (setq emits (nreverse emits))
       (let ((status-emit (seq-find
-                          (lambda (e) (eq (nth 1 e) #'opencode-chat--on-session-status))
+                          (lambda (e) (equal (plist-get e :type) "session.status"))
                           emits)))
-        (should status-emit)
-        (should (equal "ses_pi" (nth 0 status-emit)))
-        (should (equal "busy"
-                       (plist-get (plist-get (nth 2 status-emit) :status) :type))))
-      ;; And an assistant message bootstrap is emitted.
-      (should (seq-find
-               (lambda (e) (eq (nth 1 e) #'opencode-chat--on-message-updated))
-               emits)))))
+         (should status-emit)
+         (should (equal "ses_pi" (plist-get status-emit :session-id)))
+         (should (equal "busy"
+                        (plist-get (plist-get status-emit :status) :type))))
+      (should-not (seq-find
+                   (lambda (e) (equal (plist-get e :type) "message.updated"))
+                   emits)))))
 
 (ert-deftest opencode-pi-route-agent-end-emits-idle ()
   "A Pi agent_end routes to the chat session.idle handler.
 Without this, the chat buffer never leaves the busy state."
   (let (emitted)
-    (cl-letf (((symbol-function 'opencode-pi--emit)
-               (lambda (sid handler _props) (setq emitted (cons sid handler)))))
+    (cl-letf (((symbol-function 'opencode-event-dispatch)
+               (lambda (backend-event &optional _legacy-event)
+                 (setq emitted backend-event))))
       (opencode-pi--route-event "ses_pi" (list :type "agent_end" :messages []))
-      (should (eq #'opencode-chat--on-session-idle (cdr emitted))))))
+      (should (equal "session.idle" (plist-get emitted :type)))
+      (should (equal "ses_pi" (plist-get emitted :session-id))))))
+
+(ert-deftest opencode-pi-route-agent-end-emits-lifecycle ()
+  "A retrying Pi agent_end does not prematurely advance lifecycle consumers."
+  (let ((opencode-pi--conns (make-hash-table :test 'equal))
+        lifecycle)
+    (cl-letf (((symbol-function 'opencode-pi-rpc-alive-p) (lambda (_c) t))
+              ((symbol-function 'opencode-event-dispatch)
+               (lambda (backend-event &optional legacy-event)
+                 (opencode-lifecycle--on-backend-event
+                  backend-event legacy-event)))
+              ((symbol-function 'opencode-lifecycle-emit)
+               (lambda (event) (setq lifecycle event))))
+      (let ((conn
+             (opencode-pi-conn--create
+              :active-prompt-message-id "msg_pipeline")))
+        (opencode-pi-bind-conn "ses_pi" conn)
+        (opencode-pi--route-event
+         "ses_pi" (list :type "agent_end" :messages [] :willRetry t))
+        (should-not lifecycle)
+        (should
+         (equal "msg_pipeline"
+                (opencode-pi-conn-active-prompt-message-id conn)))))))
+
+(ert-deftest opencode-pi-route-legacy-agent-end-emits-lifecycle ()
+  "A legacy Pi agent_end without settling metadata remains terminal."
+  (let ((opencode-pi--conns (make-hash-table :test 'equal))
+        lifecycle)
+    (cl-letf (((symbol-function 'opencode-pi-rpc-alive-p) (lambda (_c) t))
+              ((symbol-function 'opencode-event-dispatch)
+               (lambda (backend-event &optional legacy-event)
+                 (opencode-lifecycle--on-backend-event
+                  backend-event legacy-event)))
+              ((symbol-function 'opencode-lifecycle-emit)
+               (lambda (event) (setq lifecycle event))))
+      (let ((conn
+             (opencode-pi-conn--create
+              :active-prompt-message-id "msg_pipeline")))
+        (opencode-pi-bind-conn "ses_pi" conn)
+        (opencode-pi--route-event
+         "ses_pi" (list :type "agent_end" :messages []))
+        (should (equal "session.idle" (plist-get lifecycle :type)))
+        (should (equal "ses_pi" (plist-get lifecycle :session-id)))
+        (should-not
+         (opencode-pi-conn-active-prompt-message-id conn))))))
+
+(ert-deftest opencode-pi-route-nonretry-agent-end-preserves-correlation ()
+  "Modern Pi agent_end preserves correlation until agent_settled."
+  (let ((opencode-pi--conns (make-hash-table :test 'equal)))
+    (cl-letf (((symbol-function 'opencode-pi-rpc-alive-p) (lambda (_c) t))
+              ((symbol-function 'opencode-event-dispatch) #'ignore))
+      (let ((conn
+             (opencode-pi-conn--create
+              :active-prompt-message-id "msg_pipeline")))
+        (opencode-pi-bind-conn "ses_pi" conn)
+        (opencode-pi--route-event
+         "ses_pi" '(:type "agent_end" :messages [] :willRetry :false))
+        (should
+         (equal "msg_pipeline"
+                (opencode-pi-conn-active-prompt-message-id conn)))
+        (opencode-pi--route-event "ses_pi" '(:type "agent_settled"))
+        (should-not
+         (opencode-pi-conn-active-prompt-message-id conn))))))
+
+(ert-deftest opencode-pi-route-agent-settled-emits-lifecycle ()
+  "Pi agent_settled reaches backend-neutral lifecycle consumers."
+  (let (lifecycle)
+    (cl-letf (((symbol-function 'opencode-event-dispatch)
+               (lambda (backend-event &optional legacy-event)
+                 (opencode-lifecycle--on-backend-event
+                  backend-event legacy-event)))
+              ((symbol-function 'opencode-lifecycle-emit)
+               (lambda (event) (setq lifecycle event))))
+      (opencode-pi--route-event "ses_pi" (list :type "agent_settled"))
+      (should (eq 'pi (plist-get lifecycle :backend)))
+      (should (equal "session.idle" (plist-get lifecycle :type)))
+      (should (equal "ses_pi" (plist-get lifecycle :session-id))))))
+
+(ert-deftest opencode-pi-route-message-end-emits-correlated-lifecycle ()
+  "Pi message_end emits assistant ID, parent correlation, and completion."
+  (let ((opencode-pi--conns (make-hash-table :test 'equal))
+        lifecycle)
+    (cl-letf (((symbol-function 'opencode-pi-rpc-alive-p) (lambda (_c) t))
+              ((symbol-function 'opencode-event-dispatch)
+               (lambda (backend-event &optional legacy-event)
+                 (opencode-lifecycle--on-backend-event
+                  backend-event legacy-event)))
+              ((symbol-function 'opencode-lifecycle-emit)
+               (lambda (event) (setq lifecycle event))))
+      (let ((conn
+             (opencode-pi-conn--create
+              :active-prompt-message-id "msg_user")))
+        (opencode-pi-bind-conn "ses_pi" conn)
+        (opencode-pi--route-event
+         "ses_pi"
+         '(:type "message_end"
+           :message (:role "assistant" :timestamp 42)))
+        (should (equal "message.updated" (plist-get lifecycle :type)))
+        (should (equal "msg_user" (plist-get lifecycle :parent-id)))
+        (should (equal "assistant" (plist-get lifecycle :role)))
+        (should (plist-get lifecycle :message-id))
+        (should (eq t (plist-get lifecycle :completed)))))))
+
+(ert-deftest opencode-pi-route-multiple-assistants-get-distinct-ids ()
+  "Tool-loop assistants retain distinct IDs under one prompt correlation."
+  (let ((opencode-pi--conns (make-hash-table :test 'equal))
+        lifecycle-events)
+    (cl-letf (((symbol-function 'opencode-pi-rpc-alive-p) (lambda (_c) t))
+              ((symbol-function 'opencode-event-dispatch)
+               (lambda (backend-event &optional legacy-event)
+                 (opencode-lifecycle--on-backend-event
+                  backend-event legacy-event)))
+              ((symbol-function 'opencode-lifecycle-emit)
+               (lambda (event) (push event lifecycle-events))))
+      (let ((conn
+             (opencode-pi-conn--create
+              :active-prompt-message-id "msg_user")))
+        (opencode-pi-bind-conn "ses_pi" conn)
+        (opencode-pi--route-event
+         "ses_pi"
+         '(:type "message_end"
+           :message (:role "assistant" :timestamp 41)))
+        (opencode-pi--route-event
+         "ses_pi"
+         '(:type "message_end"
+           :message (:role "assistant" :timestamp 42)))
+        (setq lifecycle-events (nreverse lifecycle-events))
+        (should (= 2 (length lifecycle-events)))
+        (should-not
+         (equal (plist-get (car lifecycle-events) :message-id)
+                (plist-get (cadr lifecycle-events) :message-id)))
+        (should
+         (equal '("msg_user" "msg_user")
+                 (mapcar (lambda (event) (plist-get event :parent-id))
+                         lifecycle-events)))))))
+
+(ert-deftest opencode-pi-route-retry-preserves-final-assistant-correlation ()
+  "A retried assistant remains correlated until authoritative settlement."
+  (let ((opencode-pi--conns (make-hash-table :test 'equal))
+        lifecycle-events)
+    (cl-letf (((symbol-function 'opencode-pi-rpc-alive-p) (lambda (_c) t))
+              ((symbol-function 'opencode-event-dispatch)
+               (lambda (backend-event &optional legacy-event)
+                 (opencode-lifecycle--on-backend-event
+                  backend-event legacy-event)))
+              ((symbol-function 'opencode-lifecycle-emit)
+               (lambda (event) (push event lifecycle-events))))
+      (let ((conn
+             (opencode-pi-conn--create
+              :active-prompt-message-id "msg_pipeline")))
+        (opencode-pi-bind-conn "ses_pi" conn)
+        (opencode-pi--route-event
+         "ses_pi"
+         '(:type "message_end"
+           :message (:role "assistant" :timestamp 1)))
+        (opencode-pi--route-event
+         "ses_pi" '(:type "agent_end" :messages [] :willRetry t))
+        (opencode-pi--route-event "ses_pi" '(:type "agent_start"))
+        (opencode-pi--route-event
+         "ses_pi"
+         '(:type "message_end"
+           :message (:role "assistant" :timestamp 2)))
+        (setq lifecycle-events
+              (seq-filter
+               (lambda (event)
+                 (and (equal "message.updated" (plist-get event :type))
+                      (equal "assistant" (plist-get event :role))
+                      (plist-get event :completed)))
+               (nreverse lifecycle-events)))
+        (should (= 2 (length lifecycle-events)))
+        (should
+         (equal '("msg_pipeline" "msg_pipeline")
+                (mapcar (lambda (event) (plist-get event :parent-id))
+                        lifecycle-events)))
+        (should-not
+         (equal (plist-get (car lifecycle-events) :message-id)
+                (plist-get (cadr lifecycle-events) :message-id)))
+        (should
+         (equal "msg_pipeline"
+                (gethash
+                 (plist-get (cadr lifecycle-events) :message-id)
+                 (opencode-pi-conn-assistant-correlations conn))))
+        (opencode-pi--route-event "ses_pi" '(:type "agent_settled"))
+        (should-not
+         (opencode-pi-conn-active-prompt-message-id conn))))))
+
+(ert-deftest opencode-pi-route-auto-compaction-preserves-correlation ()
+  "Auto-compaction continuation keeps one prompt until agent_settled.
+Covers agent_end willRetry=false followed by compaction willRetry=true."
+  (let ((opencode-pi--conns (make-hash-table :test 'equal))
+        lifecycle-events)
+    (cl-letf (((symbol-function 'opencode-pi-rpc-alive-p) (lambda (_c) t))
+              ((symbol-function 'opencode-event-dispatch)
+               (lambda (backend-event &optional legacy-event)
+                 (opencode-lifecycle--on-backend-event
+                  backend-event legacy-event)))
+              ((symbol-function 'opencode-lifecycle-emit)
+               (lambda (event) (push event lifecycle-events))))
+      (let ((conn
+             (opencode-pi-conn--create
+              :active-prompt-message-id "msg_pipeline")))
+        (opencode-pi-bind-conn "ses_pi" conn)
+        (opencode-pi--route-event
+         "ses_pi"
+         '(:type "message_end"
+           :message (:role "assistant" :timestamp 1)))
+        (opencode-pi--route-event
+         "ses_pi" '(:type "agent_end" :messages [] :willRetry :false))
+        (should
+         (equal "msg_pipeline"
+                (opencode-pi-conn-active-prompt-message-id conn)))
+        (opencode-pi--route-event "ses_pi" '(:type "compaction_start"))
+        (opencode-pi--route-event
+         "ses_pi" '(:type "compaction_end" :willRetry t))
+        (opencode-pi--route-event "ses_pi" '(:type "agent_start"))
+        (opencode-pi--route-event
+         "ses_pi"
+         '(:type "message_end"
+           :message (:role "assistant" :timestamp 2)))
+        (setq lifecycle-events
+              (seq-filter
+               (lambda (event)
+                 (and (equal "message.updated" (plist-get event :type))
+                      (equal "assistant" (plist-get event :role))
+                      (plist-get event :completed)))
+               (nreverse lifecycle-events)))
+        (should (= 2 (length lifecycle-events)))
+        (should
+         (equal '("msg_pipeline" "msg_pipeline")
+                (mapcar (lambda (event) (plist-get event :parent-id))
+                        lifecycle-events)))
+        (should-not
+         (equal (plist-get (car lifecycle-events) :message-id)
+                (plist-get (cadr lifecycle-events) :message-id)))
+        (opencode-pi--route-event "ses_pi" '(:type "agent_settled"))
+        (should-not
+         (opencode-pi-conn-active-prompt-message-id conn))))))
 
 (ert-deftest opencode-pi-route-text-delta-emits-part-update ()
   "A text_delta routes to on-part-updated with a delta and a text part.
 This is the runtime streaming path into the chat renderer."
   (let (emitted)
-    (cl-letf (((symbol-function 'opencode-pi--emit)
-               (lambda (_sid handler props) (setq emitted (cons handler props)))))
+    (cl-letf (((symbol-function 'opencode-event-dispatch)
+               (lambda (backend-event &optional _legacy-event)
+                 (setq emitted backend-event))))
       (opencode-pi--route-event
        "ses_pi"
        (list :type "message_update"
              :assistantMessageEvent
              (list :type "text_delta" :delta "Hi" :partial (list :text "Hi"))))
-      (should (eq #'opencode-chat--on-part-updated (car emitted)))
-      (should (equal "Hi" (plist-get (cdr emitted) :delta)))
-      (should (equal "text" (plist-get (plist-get (cdr emitted) :part) :type))))))
+      (should (equal "message.part.updated" (plist-get emitted :type)))
+      (should (equal "Hi" (plist-get emitted :delta)))
+      (should (equal "text" (plist-get (plist-get emitted :part) :type))))))
+
+(ert-deftest opencode-pi-route-message-start-delta-end-uses-active-owner ()
+  "After message_start, deltas target the active assistant message ID."
+  (let ((opencode-pi--conns (make-hash-table :test 'equal))
+        events)
+    (cl-letf (((symbol-function 'opencode-pi-rpc-alive-p) (lambda (_c) t))
+              ((symbol-function 'opencode-event-dispatch)
+               (lambda (backend-event &optional _legacy-event)
+                 (push backend-event events))))
+      (let ((conn (opencode-pi-conn--create
+                   :active-prompt-message-id "msg_user")))
+        (opencode-pi-bind-conn "ses_pi" conn)
+        (opencode-pi--route-event
+         "ses_pi"
+         '(:type "message_start"
+           :message (:role "assistant" :timestamp 42)))
+        (let ((active (opencode-pi-conn-active-assistant-message-id conn)))
+          (opencode-pi--route-event
+           "ses_pi"
+           '(:type "message_update"
+             :assistantMessageEvent
+             (:type "text_delta" :delta "Hi" :partial (:text "Hi"))))
+          (opencode-pi--route-event
+           "ses_pi"
+           '(:type "message_end"
+             :message (:role "assistant" :timestamp 42)))
+          (setq events (nreverse events))
+          (let ((delta (seq-find
+                        (lambda (event)
+                          (equal "message.part.updated"
+                                 (plist-get event :type)))
+                        events)))
+            (should active)
+            (should (equal active (plist-get delta :message-id)))
+            (should (string-match-p
+                     (regexp-quote active)
+                     (plist-get delta :part-id)))))))))
 
 (ert-deftest opencode-pi-session-file-path ()
   "The session file path is <session-dir>/<project>/<id>.jsonl.
